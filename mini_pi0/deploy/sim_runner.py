@@ -82,8 +82,7 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
 
     if str(cfg.deploy.mode).lower() != "sim":
         raise NotImplementedError(
-            "Only deploy.mode=sim is implemented in the modular package. "
-            "Hardware deployment remains available through deploy_so100.py wrapper."
+            "Only deploy.mode=sim is implemented in this package."
         )
 
     run_dir = create_run_dir(cfg.experiment.runs_root, f"{cfg.experiment.name}-deploy")

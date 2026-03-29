@@ -272,7 +272,6 @@ class EvalConfig:
         cube_xy_range: Optional randomized cube x/y range ``[xmin, xmax, ymin, ymax]``.
         cube_z: Optional fixed cube z override.
         cube_yaw_deg: Optional fixed cube yaw override in degrees.
-        plot_path: Legacy output path for metrics plot copy.
         device: Requested torch device for evaluation.
     """
 
@@ -295,7 +294,6 @@ class EvalConfig:
     cube_xy_range: list[float] | None = None
     cube_z: float | None = None
     cube_yaw_deg: float | None = None
-    plot_path: str = "eval_metrics.png"
     device: str = "auto"
 
 
@@ -307,8 +305,6 @@ class DeployConfig:
         mode: Deployment mode (currently ``sim`` in modular package).
         checkpoint: Path to model checkpoint.
         action_stats_path: Path to action normalization stats.
-        port: Reserved serial port field for hardware wrappers.
-        camera_index: Reserved camera index field for hardware wrappers.
         execute_steps: Number of predicted actions executed before re-planning.
         n_flow_steps: Flow sampler integration steps.
         max_steps: Maximum loop iterations per deploy run.
@@ -319,8 +315,6 @@ class DeployConfig:
     mode: str = "sim"
     checkpoint: str = "checkpoints/best.pt"
     action_stats_path: str = "action_stats.json"
-    port: str = "/dev/ttyUSB0"
-    camera_index: int = 0
     execute_steps: int = 4
     n_flow_steps: int = 10
     max_steps: int = 500

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import os
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -190,11 +188,6 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         json.dump(summary, f, indent=2)
     with (run_dir / "metrics" / "eval_arrays.json").open("w", encoding="utf-8") as f:
         json.dump({k: v.tolist() for k, v in results.items()}, f, indent=2)
-
-    # Legacy path compatibility
-    if cfg.eval.plot_path:
-        os.makedirs(os.path.dirname(cfg.eval.plot_path) or ".", exist_ok=True)
-        shutil.copy2(plot_path, cfg.eval.plot_path)
 
     if cfg.eval.record_grid:
         save_rollout_grid(

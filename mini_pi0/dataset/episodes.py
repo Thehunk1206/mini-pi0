@@ -396,7 +396,7 @@ def load_episodes_lerobot(
         video_backend=(str(video_backend).strip() if video_backend else None),
     )
     if video_backend and hasattr(ds, "video_backend"):
-        # Some lerobot versions may ignore unknown constructor kwargs in wrappers;
+        # Some lerobot versions may ignore unknown constructor kwargs;
         # enforce backend explicitly after construction when attribute exists.
         try:
             ds.video_backend = str(video_backend)
@@ -689,35 +689,3 @@ def _maybe_attach_precomputed_features(episodes: list[EpisodeData], cfg) -> list
             if (ep_idx + 1) % 20 == 0 or (ep_idx + 1) == len(episodes):
                 print(f"[data] Attached features for {ep_idx + 1}/{len(episodes)} episodes", flush=True)
     return episodes
-
-
-def load_episodes(
-    hdf5_path: str,
-    image_key: str,
-    proprio_keys: list[str],
-    limit: int | None = None,
-    data_group: str = "data",
-    fallback_image_hw: tuple[int, int] = (84, 84),
-) -> list[EpisodeData]:
-    """Convenience wrapper for robomimic HDF5 episode loading.
-
-    Args:
-        hdf5_path: Path to robomimic HDF5 file.
-        image_key: Image observation key.
-        proprio_keys: Proprioception observation keys.
-        limit: Optional max number of episodes to load.
-        data_group: Top-level group that contains demo groups.
-        fallback_image_hw: Fallback frame size when image key is absent.
-
-    Returns:
-        List of parsed episodes.
-    """
-
-    return load_episodes_robomimic(
-        hdf5_path=hdf5_path,
-        image_key=image_key,
-        proprio_keys=proprio_keys,
-        limit=limit,
-        data_group=data_group,
-        fallback_image_hw=fallback_image_hw,
-    )

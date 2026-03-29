@@ -242,16 +242,7 @@ Typical outputs:
 - `metrics/train_summary.json`
 - `metrics/eval_summary.json`
 
-## Wrapper Scripts (Backward Compatible)
-
-The root wrappers still work and call the modular package:
-
-```bash
-.venv/bin/python train.py ...
-.venv/bin/python eval.py ...
-.venv/bin/python deploy.py ...
-.venv/bin/python precompute_vision.py ...
-```
+## Hardware Deploy Helper
 
 Hardware deploy helper remains separate:
 

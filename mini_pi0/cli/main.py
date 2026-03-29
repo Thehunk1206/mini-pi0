@@ -187,7 +187,6 @@ def _apply_eval_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "eval.grid_fps", args.grid_fps)
     _append_override(overrides, "eval.grid_width", args.grid_width)
     _append_override(overrides, "eval.grid_height", args.grid_height)
-    _append_override(overrides, "eval.plot_path", args.plot_path)
 
     if args.cube_xy is not None:
         _append_override(overrides, "eval.cube_xy", list(args.cube_xy))
@@ -382,7 +381,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--grid_fps", type=int, default=None)
     p_eval.add_argument("--grid_width", type=int, default=None)
     p_eval.add_argument("--grid_height", type=int, default=None)
-    p_eval.add_argument("--plot_path", default=None)
     p_eval.add_argument("--cube_xy", type=float, nargs=2, default=None)
     p_eval.add_argument("--cube_xy_range", type=float, nargs=4, default=None)
     p_eval.add_argument("--cube_z", type=float, default=None)
@@ -408,7 +406,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint used by wrappers and ``python -m mini_pi0``.
+    """CLI entrypoint for ``mini-pi0`` commands.
 
     Args:
         argv: Optional argv override for tests/programmatic calls.

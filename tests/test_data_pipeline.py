@@ -8,7 +8,6 @@ import h5py
 from mini_pi0.config.io import load_config
 from mini_pi0.dataset.episodes import (
     list_supported_dataset_formats,
-    load_episodes,
     load_episodes_from_config,
     load_episodes_robomimic,
 )
@@ -46,20 +45,9 @@ class DataPipelineTests(unittest.TestCase):
             self.assertEqual(episodes[0].actions.shape, (t, 7))
             self.assertEqual(episodes[0].obs[0]["agentview_image"].shape, (84, 84, 3))
 
-            # convenience wrapper should behave identically
-            episodes2 = load_episodes(
-                hdf5_path=str(h5_path),
-                image_key="agentview_image",
-                proprio_keys=["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
-                limit=None,
-                data_group="data",
-                fallback_image_hw=(84, 84),
-            )
-            self.assertEqual(len(episodes2), 1)
-
-            stats = ActionStats.from_actions(episodes2[0].actions)
+            stats = ActionStats.from_actions(episodes[0].actions)
             ds = ActionChunkDataset(
-                episodes=episodes2,
+                episodes=episodes,
                 chunk_size=4,
                 image_key="agentview_image",
                 proprio_keys=["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],

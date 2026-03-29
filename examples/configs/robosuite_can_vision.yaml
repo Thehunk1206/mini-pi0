@@ -103,7 +103,6 @@ eval:
   cube_xy_range: null
   cube_z: null
   cube_yaw_deg: null
-  plot_path: eval_metrics.png
   device: auto
 
 deploy:

@@ -273,7 +273,3 @@ class MiniPi0FlowMatching(nn.Module):
             tau = torch.full((batch,), i * delta, device=img.device)
             actions = actions + delta * self.action_transformer(actions, tau, cond)
         return actions
-
-
-# Backward-compatible alias
-MiniPi0 = MiniPi0FlowMatching

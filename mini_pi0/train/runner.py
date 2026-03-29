@@ -238,13 +238,8 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     all_actions = np.concatenate([ep.actions.astype(np.float32) for ep in episodes], axis=0)
     stats = ActionStats.from_actions(all_actions)
 
-    # Canonical stats artifact for this run.
     run_stats_path = run_dir / "artifacts" / "action_stats.json"
     stats.save(str(run_stats_path))
-
-    # Backward-compatible stats path used by wrappers and older scripts.
-    legacy_stats_path = Path(cfg.data.action_stats_path)
-    stats.save(str(legacy_stats_path))
 
     dataset = ActionChunkDataset(
         episodes=episodes,
