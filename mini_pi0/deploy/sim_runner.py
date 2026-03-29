@@ -10,11 +10,12 @@ import numpy as np
 import torch
 
 from mini_pi0.config.io import dump_config
-from mini_pi0.config.schema import RootConfig, effective_state_keys
+from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.dataset.obs_processor import ObsProcessor
 from mini_pi0.models.registry import load_checkpoint, make_model
 from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.utils.device import resolve_device
+from mini_pi0.utils.parity import build_checkpoint_parity_report, config_diff, format_parity_issues
 from mini_pi0.utils.runs import create_run_dir
 from mini_pi0.vision.encoders import build_vision_extractor
 
@@ -87,20 +88,52 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
         )
 
     run_dir = create_run_dir(cfg.experiment.runs_root, f"{cfg.experiment.name}-deploy")
-    dump_config(run_dir / "config_resolved.yaml", cfg)
+    requested_cfg = copy.deepcopy(cfg)
 
     device = resolve_device(cfg.deploy.device)
     ckpt = load_checkpoint(cfg.deploy.checkpoint, map_location=device)
-    if isinstance(ckpt, dict):
-        _inject_model_cfg_from_checkpoint(cfg, ckpt)
+    if not isinstance(ckpt, dict):
+        raise ValueError("Checkpoint format is invalid.")
+
+    parity = build_checkpoint_parity_report(requested_cfg, ckpt)
+    parity["checkpoint_path"] = str(cfg.deploy.checkpoint)
+    strict = bool(getattr(cfg.deploy, "strict_parity", True))
+    if parity["issues"]:
+        msg = "Checkpoint/runtime parity mismatches detected:\n" + format_parity_issues(parity["issues"])
+        if strict:
+            raise ValueError(msg + "\nDisable with --set deploy.strict_parity=false if intentional.")
+        print(f"[deploy] WARNING: {msg}", flush=True)
+    for w in parity.get("warnings", []):
+        print(f"[deploy] WARNING: {w}", flush=True)
+
+    _inject_model_cfg_from_checkpoint(cfg, ckpt)
+    runtime_cfg = copy.deepcopy(cfg)
+    print(
+        "[deploy] Preflight | "
+        f"backend={cfg.simulator.backend} task={cfg.simulator.task} robot={cfg.simulator.robot} "
+        f"controller={cfg.simulator.controller} obs_mode={cfg.model.obs_mode} "
+        f"image_keys={effective_image_keys(cfg.robot)} strict_parity={strict}",
+        flush=True,
+    )
+    dump_config(run_dir / "metrics" / "deploy_config_requested.yaml", requested_cfg)
+    dump_config(run_dir / "metrics" / "deploy_config_runtime.yaml", runtime_cfg)
+    with (run_dir / "metrics" / "deploy_provenance.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "checkpoint": str(cfg.deploy.checkpoint),
+                "strict_parity": strict,
+                "parity": parity,
+                "requested_to_runtime_diff": config_diff(requested_cfg, runtime_cfg),
+            },
+            f,
+            indent=2,
+        )
 
     model = make_model(cfg).to(device)
-    if isinstance(ckpt, dict) and "model" in ckpt:
+    if "model" in ckpt:
         model.load_state_dict(ckpt["model"])
-    elif isinstance(ckpt, dict):
-        model.load_state_dict(ckpt)
     else:
-        raise ValueError("Checkpoint format is invalid.")
+        model.load_state_dict(ckpt)
     model.eval()
 
     feature_extractor = None
@@ -132,9 +165,11 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
 
     stats_path = cfg.deploy.action_stats_path or cfg.data.action_stats_path
     state_keys = effective_state_keys(cfg.robot)
+    image_keys = effective_image_keys(cfg.robot)
     processor = ObsProcessor(
         action_stats_path=stats_path,
         image_key=cfg.robot.image_key,
+        image_keys=image_keys,
         proprio_keys=state_keys,
         device=str(device),
         observation_mode=cfg.model.obs_mode,
@@ -154,6 +189,9 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
 
     lo, hi = adapter.action_spec()
     action_dim = int(np.asarray(lo).reshape(-1).shape[0])
+    action_scale = np.asarray(cfg.deploy.action_scale, dtype=np.float32).reshape(-1) if cfg.deploy.action_scale else None
+    smooth_alpha = float(max(0.0, min(1.0, getattr(cfg.deploy, "action_smoothing_alpha", 0.0))))
+    prev_action: np.ndarray | None = None
 
     for _ in range(int(cfg.deploy.max_steps)):
         if not action_buffer:
@@ -164,11 +202,17 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
             proposed = []
             for a in chunk[: int(cfg.deploy.execute_steps)]:
                 x = _reshape_action(a, target_dim=action_dim)
+                if action_scale is not None and action_scale.shape[0] == action_dim:
+                    x = x * action_scale
+                if prev_action is not None and smooth_alpha > 0.0:
+                    x = (1.0 - smooth_alpha) * x + smooth_alpha * prev_action
                 x = np.clip(x, lo, hi).astype(np.float32)
                 proposed.append(x)
             action_buffer = proposed
 
-        step = adapter.step(action_buffer.pop(0))
+        action = action_buffer.pop(0)
+        prev_action = action.copy()
+        step = adapter.step(action)
         obs = step.obs
         reward_sum += float(step.reward)
         success = adapter.check_success(info=step.info, obs=step.obs)

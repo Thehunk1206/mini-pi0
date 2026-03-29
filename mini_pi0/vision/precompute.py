@@ -11,7 +11,7 @@ import torch
 from numpy.lib.format import write_array
 
 from mini_pi0.config.io import dump_config
-from mini_pi0.config.schema import RootConfig
+from mini_pi0.config.schema import RootConfig, effective_image_keys
 from mini_pi0.dataset.episodes import iter_lerobot_episode_images, load_episodes_from_config
 from mini_pi0.utils.device import resolve_device
 from mini_pi0.utils.runs import create_run_dir
@@ -68,6 +68,7 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
 
     fmt = str(getattr(cfg.data, "format", "robomimic_hdf5")).strip().lower()
     use_lerobot_stream = fmt in {"lerobot", "lerobot_hf", "hf"}
+    image_keys = effective_image_keys(cfg.robot)
     episodes = None
     episode_frames_iter = None
     total_episodes_hint: int | None = None
@@ -76,7 +77,7 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
     if use_lerobot_stream:
         episode_frames_iter, meta = iter_lerobot_episode_images(
             repo_id=cfg.data.lerobot_repo_id or "",
-            image_key=cfg.robot.image_key,
+            image_keys=image_keys,
             episode_index_key=cfg.data.lerobot_episode_index_key,
             limit=cfg.data.n_demos,
             fallback_image_hw=tuple(cfg.data.fallback_image_hw),
@@ -85,7 +86,9 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
         )
         total_episodes_hint = int(cfg.data.n_demos) if cfg.data.n_demos is not None else meta.get("total_episodes")
         # When episode limit is set, full-dataset frame count becomes a misleading progress target.
-        total_frames_hint = None if cfg.data.n_demos is not None else meta.get("total_frames")
+        total_frames_hint = None if cfg.data.n_demos is not None else (
+            int(meta.get("total_frames")) * len(image_keys) if meta.get("total_frames") is not None else None
+        )
     else:
         # Always source raw image observations for feature extraction.
         data_cfg = cfg.data
@@ -94,7 +97,7 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
         episodes = load_episodes_from_config(cfg)
         data_cfg.observation_mode = prev_mode
         total_episodes_hint = len(episodes)
-        total_frames_hint = int(sum(len(ep.obs) for ep in episodes))
+        total_frames_hint = int(sum(len(ep.obs) for ep in episodes) * len(image_keys))
 
     device = resolve_device(cfg.train.device)
     batch_size = max(1, int(cfg.vision.batch_size))
@@ -106,7 +109,7 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
     )
     print(
         "[vision] Dataset source | "
-        f"format={cfg.data.format} n_demos={cfg.data.n_demos} image_key={cfg.robot.image_key}",
+        f"format={cfg.data.format} n_demos={cfg.data.n_demos} image_keys={image_keys}",
         flush=True,
     )
     if use_lerobot_stream:
@@ -124,7 +127,6 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
         device=device,
     )
 
-    image_key = cfg.robot.image_key
     zero_frames = 0
     total_frames = 0
     total_eps = 0
@@ -149,7 +151,14 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
         episode_iter = episode_frames_iter
     else:
         episode_iter = (
-            (ep_idx, [np.asarray(obs[image_key], dtype=np.uint8) for obs in ep.obs]) for ep_idx, ep in enumerate(episodes)
+            (
+                ep_idx,
+                {
+                    key: [np.asarray(obs[key], dtype=np.uint8) for obs in ep.obs]
+                    for key in image_keys
+                },
+            )
+            for ep_idx, ep in enumerate(episodes)
         )
 
     if tqdm is not None:
@@ -171,24 +180,40 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
     else:
         frame_bar = None
 
-    for ep_idx, frames in episode_iter:
-        if not frames:
+    for ep_idx, frames_by_key in episode_iter:
+        if not frames_by_key:
+            if frame_bar is not None:
+                frame_bar.update(0)
+            continue
+        min_steps = min(len(frames_by_key[k]) for k in image_keys)
+        if min_steps <= 0:
             if frame_bar is not None:
                 frame_bar.update(0)
             continue
         total_eps += 1
-        total_frames += len(frames)
-        zero_frames += int(sum(int(np.max(f) == 0) for f in frames))
+        total_frames += int(min_steps * len(image_keys))
+        zero_frames += int(
+            sum(
+                int(np.max(np.asarray(frames_by_key[key][i], dtype=np.uint8)) == 0)
+                for i in range(min_steps)
+                for key in image_keys
+            )
+        )
 
-        feats = []
-        for batch in _chunked(frames, batch_size):
-            x = images_to_tensor(batch, device=device)
-            with torch.no_grad():
-                y = extractor(x)
-            feats.append(y.detach().cpu().numpy().astype(np.float32))
-            if frame_bar is not None:
-                frame_bar.update(len(batch))
-        arr = np.concatenate(feats, axis=0)
+        per_key_features: list[np.ndarray] = []
+        for key in image_keys:
+            feats = []
+            frames = frames_by_key[key][:min_steps]
+            for batch in _chunked(frames, batch_size):
+                x = images_to_tensor(batch, device=device)
+                with torch.no_grad():
+                    y = extractor(x)
+                feats.append(y.detach().cpu().numpy().astype(np.float32))
+                if frame_bar is not None:
+                    frame_bar.update(len(batch))
+            per_key_features.append(np.concatenate(feats, axis=0))
+
+        arr = np.concatenate(per_key_features, axis=1) if len(per_key_features) > 1 else per_key_features[0]
         key = f"ep_{ep_idx:06d}"
         np.save(episodic_out_dir / f"{key}.npy", arr)
         if feature_dim is None:
@@ -212,6 +237,7 @@ def run_precompute_vision(cfg: RootConfig) -> dict[str, Any]:
         "episodic_path": str(episodic_out_dir),
         "storage": "npz+episodic_npy" if writes_npz else "episodic_npy",
         "feature_key": cfg.data.precomputed_feature_key,
+        "image_keys": image_keys,
         "n_episodes": int(total_eps),
         "feature_dim": int(feature_dim if feature_dim is not None else extractor.feature_dim),
         "encoder": {

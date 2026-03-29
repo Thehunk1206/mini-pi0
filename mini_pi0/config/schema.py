@@ -79,7 +79,9 @@ class RobotConfig:
         proprio_keys: Observation keys concatenated into proprioceptive state vectors.
         state_keys: Optional alias for the policy state vector keys. When provided,
             this list is used in place of ``proprio_keys`` across train/eval/deploy.
-        image_key: Observation key used as model image input.
+        image_key: Backward-compatible single observation image key used as model image input.
+        image_keys: Optional ordered list of image observation keys. When set, this list
+            is used everywhere instead of ``image_key`` and enables multi-camera conditioning.
     """
 
     name: str = "Panda"
@@ -89,6 +91,7 @@ class RobotConfig:
     )
     state_keys: list[str] | None = None
     image_key: str = "agentview_image"
+    image_keys: list[str] | None = None
 
 
 def effective_state_keys(robot: RobotConfig) -> list[str]:
@@ -104,6 +107,24 @@ def effective_state_keys(robot: RobotConfig) -> list[str]:
     if robot.state_keys is not None and len(robot.state_keys) > 0:
         return list(robot.state_keys)
     return list(robot.proprio_keys)
+
+
+def effective_image_keys(robot: RobotConfig) -> list[str]:
+    """Resolve image observation keys used by data/sim pipelines.
+
+    Args:
+        robot: Robot section from root config.
+
+    Returns:
+        Ordered list of image observation keys. Falls back to ``image_key`` when
+        ``image_keys`` is empty or unset.
+    """
+
+    if robot.image_keys is not None:
+        keys = [str(k).strip() for k in robot.image_keys if str(k).strip()]
+        if keys:
+            return keys
+    return [str(robot.image_key)]
 
 
 @dataclass
@@ -224,6 +245,9 @@ class TrainConfig:
         model_print_depth: Depth for model architecture pretty-print tree.
         resume_from: Optional checkpoint path to resume training from.
         resume_optimizer: Restore optimizer/scheduler states when available.
+        val_ratio: Fraction of training samples reserved for validation (0 disables validation).
+        ema_decay: Exponential moving average decay for model weights (0 disables EMA).
+        checkpoint_use_ema: Save EMA weights into checkpoint model payload when EMA is enabled.
         device: Requested torch device (``auto``, ``cpu``, ``cuda``, ``mps``).
     """
 
@@ -244,6 +268,9 @@ class TrainConfig:
     model_print_depth: int = 3
     resume_from: str | None = None
     resume_optimizer: bool = True
+    val_ratio: float = 0.1
+    ema_decay: float = 0.0
+    checkpoint_use_ema: bool = True
     device: str = "auto"
 
 
@@ -273,6 +300,10 @@ class EvalConfig:
         cube_z: Optional fixed cube z override.
         cube_yaw_deg: Optional fixed cube yaw override in degrees.
         plot_path: Legacy output path for metrics plot copy.
+        strict_parity: Enforce checkpoint/runtime parity checks before rollout.
+        action_smoothing_alpha: Action exponential smoothing factor in ``[0, 1]`` (0 disables).
+        action_scale: Optional per-dimension multiplicative scale applied before clipping.
+        failure_reward_threshold: Threshold for classifying failures as ``no_progress``.
         device: Requested torch device for evaluation.
     """
 
@@ -296,6 +327,10 @@ class EvalConfig:
     cube_z: float | None = None
     cube_yaw_deg: float | None = None
     plot_path: str = "eval_metrics.png"
+    strict_parity: bool = True
+    action_smoothing_alpha: float = 0.0
+    action_scale: list[float] | None = None
+    failure_reward_threshold: float = 0.2
     device: str = "auto"
 
 
@@ -313,6 +348,9 @@ class DeployConfig:
         n_flow_steps: Flow sampler integration steps.
         max_steps: Maximum loop iterations per deploy run.
         record_path: Optional output video path.
+        strict_parity: Enforce checkpoint/runtime parity checks before rollout.
+        action_smoothing_alpha: Action exponential smoothing factor in ``[0, 1]`` (0 disables).
+        action_scale: Optional per-dimension multiplicative scale applied before clipping.
         device: Requested torch device.
     """
 
@@ -325,6 +363,9 @@ class DeployConfig:
     n_flow_steps: int = 10
     max_steps: int = 500
     record_path: str | None = None
+    strict_parity: bool = True
+    action_smoothing_alpha: float = 0.0
+    action_scale: list[float] | None = None
     device: str = "auto"
 
 

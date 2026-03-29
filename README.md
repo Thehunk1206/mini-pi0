@@ -106,16 +106,21 @@ Download directly from Hugging Face dataset repos:
 Use these fields in your config for reliable loading:
 - `data.format`: `robomimic_hdf5` or `lerobot_hf`
 - `robot.image_key`: visual observation key used by policy conditioning
+- `robot.image_keys`: optional ordered list of visual keys for multi-camera conditioning
 - `robot.state_keys`: state vector keys used by all model paths (train/eval/deploy)
 - `data.lerobot_action_key` and `data.lerobot_episode_index_key` for `lerobot_hf`
 
 Recommended key setup for Robosuite can (`robotgeneralist/robosuite_can_ph`):
 - `robot.image_key='observation.images.right_wrist_0_rgb'`
-- `robot.state_keys=['observation.state.eef_pos','observation.state.eef_quat','observation.state.tool']`
+- `robot.image_keys=['observation.images.right_wrist_0_rgb']`
+- `robot.state_keys=['observation.state.eef_pos','observation.state.eef_quat','observation.state.tool','observation.state.object']`
 
 Notes:
 - If `robot.state_keys` is missing, pipeline falls back to `robot.proprio_keys`.
-- Changing `image_key` or `state_keys` changes model inputs, so old checkpoints become incompatible.
+- If `robot.image_keys` is set, it overrides `robot.image_key` and preserves key order.
+- In `obs_mode=image`, multiple cameras are fused side-by-side (same channels, wider image).
+- In `obs_mode=feature`, per-camera features are concatenated, so feature dim scales by camera count.
+- Changing `image_key` / `image_keys` / `state_keys` changes model inputs, so old checkpoints become incompatible.
 - On macOS, prefer `data.lerobot_video_backend='pyav'`.
 - In precomputed mode, `data.precomputed_features_path` should point to the feature directory or archive produced by `precompute-vision`.
 
@@ -136,6 +141,7 @@ This is the recommended path for your current setup.
   --set data.lerobot_repo_id='robotgeneralist/robosuite_can_ph' \
   --set data.lerobot_video_backend='pyav' \
   --set robot.image_key='observation.images.right_wrist_0_rgb' \
+  --set robot.image_keys="['observation.images.right_wrist_0_rgb']" \
   --set robot.state_keys="['observation.state.eef_pos','observation.state.eef_quat','observation.state.tool']" \
   --vision_backend timm \
   --vision_model_name 'vit_base_patch16_dinov3.lvd1689m' \
@@ -151,6 +157,9 @@ This is the recommended path for your current setup.
   --observation_mode precomputed \
   --precomputed_features_path data/features/can_wrist_dinov3_vitb16 \
   --set model.obs_mode=feature \
+  --set train.val_ratio=0.1 \
+  --set train.ema_decay=0.999 \
+  --set train.checkpoint_use_ema=true \
   --set train.device=auto
 ```
 
@@ -195,6 +204,9 @@ Minimal eval command:
 
 Useful eval options:
 - `--verbose --log_every_episodes 1` for per-episode progress logs
+- `--strict_parity` (default) to fail fast when checkpoint/runtime config mismatches
+- `--set eval.action_smoothing_alpha=0.2` to smooth actions between replans
+- `--set eval.action_scale='[1,1,1,1,1,1,1]'` for per-dimension action scaling
 - `--set eval.record_grid=true` to save success/failure 3x3 grid videos
 - `--set eval.max_steps=200` to cap rollout horizon
 - `--set eval.run_dir='runs/<exp>/runN'` to write metrics into an existing run
@@ -209,8 +221,35 @@ Metric interpretation:
 Output files:
 - `metrics/eval_summary.json`: scalar metrics
 - `metrics/eval_arrays.json`: per-episode raw arrays
+- `metrics/eval_provenance.json`: checkpoint/runtime parity report + diff
+- `metrics/eval_config_requested.yaml`: config requested by CLI before checkpoint injection
+- `metrics/eval_config_runtime.yaml`: final runtime config after checkpoint model injection
 - `artifacts/eval_metrics.png`: plots for success trend, episode length, reward distribution
 - `artifacts/success_grid_*.mp4` and `artifacts/failure_grid_*.mp4` when grid recording is enabled
+
+Failure diagnostics in `eval_summary.json`:
+- `failure_reason_counts`: breakdown (`no_progress`, `timeout_after_progress`, `drop_or_unstable`, ...)
+- `action_clip_fraction_mean`: percent of actions clipped by env bounds
+- `max_step_reward_mean`: best per-step reward reached on average
+
+## Eval Ablation Sweep
+
+Run rollout hyperparameter sweeps without editing code:
+
+```bash
+.venv/bin/python -u -m mini_pi0 ablate-eval \
+  --config examples/configs/robosuite_can_vision.yaml \
+  --checkpoint runs/robosuite-can-fm-vision/run1/checkpoints/best.pt \
+  --action_stats runs/robosuite-can-fm-vision/run1/artifacts/action_stats.json \
+  --n_episodes 10 \
+  --execute_steps_values 1,2,4 \
+  --n_flow_steps_values 10,15,30 \
+  --smoothing_values 0.0,0.2
+```
+
+Artifacts are saved under `runs/<experiment>-ablation/runN/` with:
+- `metrics/ablation_metrics.jsonl`
+- `metrics/ablation_summary.json`
 
 ## Important Config Notes
 

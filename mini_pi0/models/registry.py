@@ -6,7 +6,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from mini_pi0.config.schema import ModelConfig, RootConfig
+from mini_pi0.config.schema import ModelConfig, RootConfig, effective_image_keys
 from mini_pi0.models.fm import MiniPi0FlowMatching
 
 _MODEL_REGISTRY = {
@@ -127,6 +127,31 @@ def build_checkpoint_payload(
             "nlayers": cfg.model.nlayers,
         },
         "sim_backend": cfg.simulator.backend,
+        "sim_config": {
+            "backend": cfg.simulator.backend,
+            "task": cfg.simulator.task,
+            "robot": cfg.simulator.robot,
+            "controller": cfg.simulator.controller,
+            "control_freq": cfg.simulator.control_freq,
+            "horizon": cfg.simulator.horizon,
+            "camera_names": list(cfg.simulator.camera_names),
+        },
+        "robot_config": {
+            "name": cfg.robot.name,
+            "action_dim": cfg.robot.action_dim,
+            "image_key": cfg.robot.image_key,
+            "image_keys": effective_image_keys(cfg.robot),
+            "state_keys": list(cfg.robot.state_keys) if cfg.robot.state_keys is not None else None,
+            "proprio_keys": list(cfg.robot.proprio_keys),
+        },
+        "data_config": {
+            "format": cfg.data.format,
+            "observation_mode": cfg.data.observation_mode,
+            "robomimic_hdf5": cfg.data.robomimic_hdf5,
+            "lerobot_repo_id": cfg.data.lerobot_repo_id,
+            "precomputed_features_path": cfg.data.precomputed_features_path,
+            "precomputed_feature_key": cfg.data.precomputed_feature_key,
+        },
         "vision_config": {
             "backend": cfg.vision.backend,
             "model_name": cfg.vision.model_name,

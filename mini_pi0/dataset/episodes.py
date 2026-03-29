@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from mini_pi0.config.schema import effective_state_keys
+from mini_pi0.config.schema import effective_image_keys, effective_state_keys
 
 
 _KEY_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -46,6 +46,20 @@ def _resolve_alias_key(container: Any, key: str) -> str:
         if cand in container:
             return cand
     return key
+
+
+def _resolve_alias_keys(container: Any, keys: list[str]) -> list[str]:
+    """Resolve a list of keys against aliases while preserving order.
+
+    Args:
+        container: Mapping-like object supporting ``in`` membership checks.
+        keys: Requested keys.
+
+    Returns:
+        Resolved key list.
+    """
+
+    return [_resolve_alias_key(container, key) for key in keys]
 
 
 @dataclass
@@ -247,7 +261,7 @@ def _to_uint8_image(arr: np.ndarray, fallback_hw: tuple[int, int]) -> np.ndarray
 
 def load_episodes_robomimic(
     hdf5_path: str,
-    image_key: str,
+    image_keys: list[str],
     proprio_keys: list[str],
     limit: int | None = None,
     data_group: str = "data",
@@ -266,7 +280,7 @@ def load_episodes_robomimic(
 
     Args:
         hdf5_path: Path to input HDF5 file.
-        image_key: Observation image key under each demo's ``obs`` group.
+        image_keys: Ordered observation image keys under each demo's ``obs`` group.
         proprio_keys: Proprio keys under each demo's ``obs`` group.
         limit: Optional max number of demo groups to load.
         data_group: Top-level data group name (default ``data``).
@@ -292,6 +306,8 @@ def load_episodes_robomimic(
     episodes: list[EpisodeData] = []
     if not proprio_keys:
         raise ValueError("proprio_keys must contain at least one observation key.")
+    if not image_keys:
+        raise ValueError("image_keys must contain at least one observation key.")
     with h5py.File(hdf5_path, "r") as f:
         if data_group not in f:
             raise KeyError(f"Expected top-level group '{data_group}' in {hdf5_path}")
@@ -328,22 +344,28 @@ def load_episodes_robomimic(
                 for k in proprio_keys
             }
 
-            image_src_key = _resolve_alias_key(obs_grp, image_key)
-            has_image = image_src_key in obs_grp
-            images = np.asarray(obs_grp[image_src_key]) if has_image else None
+            image_src_keys = _resolve_alias_keys(obs_grp, image_keys)
+            has_image = {k: src in obs_grp for k, src in zip(image_keys, image_src_keys, strict=True)}
+            images = {
+                k: (np.asarray(obs_grp[src]) if has_image[k] else None)
+                for k, src in zip(image_keys, image_src_keys, strict=True)
+            }
 
             t = min(t, *[len(arr) for arr in prop_arrays.values()])
-            if has_image and images is not None:
-                t = min(t, len(images))
+            for key in image_keys:
+                if has_image[key] and images[key] is not None:
+                    t = min(t, len(images[key]))
 
             obs_seq: list[dict[str, np.ndarray]] = []
             h, w = fallback_image_hw
             for i in range(t):
-                if has_image and images is not None:
-                    img = _to_uint8_image(images[i], fallback_hw=(h, w))
-                else:
-                    img = np.zeros((h, w, 3), dtype=np.uint8)
-                obs_t: dict[str, np.ndarray] = {image_key: img}
+                obs_t: dict[str, np.ndarray] = {}
+                for key in image_keys:
+                    if has_image[key] and images[key] is not None:
+                        img = _to_uint8_image(images[key][i], fallback_hw=(h, w))
+                    else:
+                        img = np.zeros((h, w, 3), dtype=np.uint8)
+                    obs_t[key] = img
                 for key in proprio_keys:
                     obs_t[key] = np.asarray(prop_arrays[key][i], dtype=np.float32)
                 obs_seq.append(obs_t)
@@ -357,7 +379,7 @@ def load_episodes_robomimic(
 
 def load_episodes_lerobot(
     repo_id: str,
-    image_key: str,
+    image_keys: list[str],
     proprio_keys: list[str],
     action_key: str = "action",
     episode_index_key: str = "episode_index",
@@ -371,7 +393,7 @@ def load_episodes_lerobot(
 
     Args:
         repo_id: Hugging Face LeRobot dataset repo id.
-        image_key: Feature key used as image observation (supports dotted key paths).
+        image_keys: Ordered feature keys used as image observations (supports dotted key paths).
         proprio_keys: Ordered feature keys concatenated into proprio vector.
         action_key: Feature key containing action vectors.
         episode_index_key: Feature key identifying episode id per frame/sample.
@@ -389,6 +411,8 @@ def load_episodes_lerobot(
 
     if not repo_id:
         raise ValueError("LeRobot repo_id must be a non-empty string.")
+    if not image_keys:
+        raise ValueError("image_keys must contain at least one observation key.")
 
     ds = _make_lerobot_dataset(
         repo_id=repo_id,
@@ -441,8 +465,9 @@ def load_episodes_lerobot(
         action = np.asarray(_to_numpy(_extract_key(sample, action_key)), dtype=np.float32).reshape(-1)
         obs_t: dict[str, np.ndarray] = {}
         if load_images:
-            image = _to_uint8_image(_to_numpy(_extract_key(sample, image_key)), fallback_hw=(h, w))
-            obs_t[image_key] = image
+            for key in image_keys:
+                image = _to_uint8_image(_to_numpy(_extract_key(sample, key)), fallback_hw=(h, w))
+                obs_t[key] = image
         for key in proprio_keys:
             obs_t[key] = np.asarray(_to_numpy(_extract_key(sample, key)), dtype=np.float32).reshape(-1)
 
@@ -465,7 +490,7 @@ def load_episodes_lerobot(
 
 def iter_lerobot_episode_images(
     repo_id: str,
-    image_key: str,
+    image_keys: list[str],
     episode_index_key: str = "episode_index",
     limit: int | None = None,
     fallback_image_hw: tuple[int, int] = (84, 84),
@@ -476,7 +501,7 @@ def iter_lerobot_episode_images(
 
     Args:
         repo_id: Hugging Face LeRobot dataset repo id.
-        image_key: Feature key used as image observation.
+        image_keys: Ordered feature keys used as image observations.
         episode_index_key: Feature key identifying episode id per sample.
         limit: Optional max number of episodes to stream.
         fallback_image_hw: Fallback image shape for invalid/missing frames.
@@ -485,7 +510,8 @@ def iter_lerobot_episode_images(
 
     Returns:
         Tuple of:
-        - an iterator yielding ``(episode_seq_idx, frames)`` where ``frames`` is a list of ``uint8 HxWx3``
+        - an iterator yielding ``(episode_seq_idx, frames_by_key)`` where ``frames_by_key`` maps
+          each image key to a list of ``uint8 HxWx3`` frames
         - metadata dictionary with ``total_frames`` and ``total_episodes`` hints
 
     Raises:
@@ -494,6 +520,8 @@ def iter_lerobot_episode_images(
 
     if not repo_id:
         raise ValueError("LeRobot repo_id must be a non-empty string.")
+    if not image_keys:
+        raise ValueError("image_keys must contain at least one observation key.")
 
     ds = _make_lerobot_dataset(
         repo_id=repo_id,
@@ -516,7 +544,7 @@ def iter_lerobot_episode_images(
         h, w = fallback_image_hw
         n = len(ds)
         current_ep_id: int | None = None
-        current_frames: list[np.ndarray] = []
+        current_frames: dict[str, list[np.ndarray]] = {k: [] for k in image_keys}
         emitted = 0
 
         for i in range(n):
@@ -542,18 +570,19 @@ def iter_lerobot_episode_images(
                 )
 
             if ep_idx != current_ep_id:
-                if current_frames:
+                if any(current_frames[k] for k in image_keys):
                     yield emitted, current_frames
                     emitted += 1
                     if limit is not None and emitted >= int(limit):
                         return
                 current_ep_id = ep_idx
-                current_frames = []
+                current_frames = {k: [] for k in image_keys}
 
-            image = _to_uint8_image(_to_numpy(_extract_key(sample, image_key)), fallback_hw=(h, w))
-            current_frames.append(image)
+            for key in image_keys:
+                image = _to_uint8_image(_to_numpy(_extract_key(sample, key)), fallback_hw=(h, w))
+                current_frames[key].append(image)
 
-        if current_frames and (limit is None or emitted < int(limit)):
+        if any(current_frames[k] for k in image_keys) and (limit is None or emitted < int(limit)):
             yield emitted, current_frames
 
     return _iter(), meta
@@ -574,6 +603,7 @@ def load_episodes_from_config(cfg) -> list[EpisodeData]:
 
     fmt = str(getattr(cfg.data, "format", "robomimic_hdf5")).strip().lower()
     state_keys = effective_state_keys(cfg.robot)
+    image_keys = effective_image_keys(cfg.robot)
     hw = tuple(cfg.data.fallback_image_hw)
     if len(hw) != 2:
         raise ValueError("data.fallback_image_hw must be [H, W]")
@@ -585,7 +615,7 @@ def load_episodes_from_config(cfg) -> list[EpisodeData]:
             raise ValueError("data.robomimic_hdf5 must be set when data.format=robomimic_hdf5")
         episodes = load_episodes_robomimic(
             hdf5_path=hdf5_path,
-            image_key=cfg.robot.image_key,
+            image_keys=image_keys,
             proprio_keys=state_keys,
             limit=cfg.data.n_demos,
             data_group=cfg.data.robomimic_data_group,
@@ -601,7 +631,7 @@ def load_episodes_from_config(cfg) -> list[EpisodeData]:
         load_images = obs_mode not in {"precomputed", "feature", "features"}
         episodes = load_episodes_lerobot(
             repo_id=repo_id,
-            image_key=cfg.robot.image_key,
+            image_keys=image_keys,
             proprio_keys=state_keys,
             action_key=cfg.data.lerobot_action_key,
             episode_index_key=cfg.data.lerobot_episode_index_key,
@@ -698,16 +728,18 @@ def load_episodes(
     limit: int | None = None,
     data_group: str = "data",
     fallback_image_hw: tuple[int, int] = (84, 84),
+    image_keys: list[str] | None = None,
 ) -> list[EpisodeData]:
     """Convenience wrapper for robomimic HDF5 episode loading.
 
     Args:
         hdf5_path: Path to robomimic HDF5 file.
-        image_key: Image observation key.
+        image_key: Image observation key (backward-compatible single key).
         proprio_keys: Proprioception observation keys.
         limit: Optional max number of episodes to load.
         data_group: Top-level group that contains demo groups.
         fallback_image_hw: Fallback frame size when image key is absent.
+        image_keys: Optional list of image keys. If provided, overrides ``image_key``.
 
     Returns:
         List of parsed episodes.
@@ -715,7 +747,7 @@ def load_episodes(
 
     return load_episodes_robomimic(
         hdf5_path=hdf5_path,
-        image_key=image_key,
+        image_keys=list(image_keys) if image_keys else [image_key],
         proprio_keys=proprio_keys,
         limit=limit,
         data_group=data_group,

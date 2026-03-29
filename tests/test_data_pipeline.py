@@ -33,10 +33,15 @@ class DataPipelineTests(unittest.TestCase):
                 obs.create_dataset("robot0_eef_pos", data=np.random.randn(t, 3).astype(np.float32))
                 obs.create_dataset("robot0_eef_quat", data=np.random.randn(t, 4).astype(np.float32))
                 obs.create_dataset("robot0_gripper_qpos", data=np.random.randn(t, 2).astype(np.float32))
+                obs.create_dataset("agentview_image", data=np.random.randint(0, 255, size=(t, 84, 84, 3), dtype=np.uint8))
+                obs.create_dataset(
+                    "robot0_eye_in_hand_image",
+                    data=np.random.randint(0, 255, size=(t, 84, 84, 3), dtype=np.uint8),
+                )
 
             episodes = load_episodes_robomimic(
                 hdf5_path=str(h5_path),
-                image_key="agentview_image",
+                image_keys=["agentview_image"],
                 proprio_keys=["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
                 limit=None,
                 data_group="data",
@@ -62,6 +67,7 @@ class DataPipelineTests(unittest.TestCase):
                 episodes=episodes2,
                 chunk_size=4,
                 image_key="agentview_image",
+                image_keys=None,
                 proprio_keys=["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
                 action_stats=stats,
             )
@@ -70,6 +76,25 @@ class DataPipelineTests(unittest.TestCase):
             self.assertEqual(tuple(img.shape), (3, 84, 84))
             self.assertEqual(tuple(prop.shape), (9,))
             self.assertEqual(tuple(chunk.shape), (4, 7))
+
+            episodes_multi = load_episodes_robomimic(
+                hdf5_path=str(h5_path),
+                image_keys=["agentview_image", "robot0_eye_in_hand_image"],
+                proprio_keys=["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
+                limit=None,
+                data_group="data",
+                fallback_image_hw=(84, 84),
+            )
+            ds_multi = ActionChunkDataset(
+                episodes=episodes_multi,
+                chunk_size=4,
+                image_key="agentview_image",
+                image_keys=["agentview_image", "robot0_eye_in_hand_image"],
+                proprio_keys=["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
+                action_stats=stats,
+            )
+            img_multi, _, _ = ds_multi[0]
+            self.assertEqual(tuple(img_multi.shape), (3, 84, 168))
 
     def test_precomputed_feature_attach(self):
         with tempfile.TemporaryDirectory() as d:
