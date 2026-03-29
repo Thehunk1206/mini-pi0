@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Training / eval artifacts
+runs/
+checkpoints/
+rollouts/
+*.mp4
+*.png
+*.npz
+
+# Local data (keep directory names, ignore contents)
+data/demos/
+data/demos_expert/
+data/robomimic/
+debug_frames/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+
+*.logs
+data/

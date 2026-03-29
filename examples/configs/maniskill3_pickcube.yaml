@@ -1,0 +1,95 @@
+experiment:
+  name: maniskill3-pickcube-fm
+  seed: 0
+  runs_root: runs
+
+simulator:
+  backend: maniskill3
+  task: PickCube-v1
+  robot: panda
+  controller: pd_ee_delta_pose
+  control_freq: 20
+  horizon: 200
+  reward_shaping: true
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [base_camera]
+  camera_width: 84
+  camera_height: 84
+  env_kwargs:
+    obs_mode: rgbd
+    render_mode: rgb_array
+    control_mode: pd_ee_delta_pose
+
+task:
+  object_name: cube
+
+robot:
+  name: panda
+  action_dim: 7
+  image_key: agentview_image
+  proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+  state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+
+data:
+  format: robomimic_hdf5
+  robomimic_hdf5: data/robomimic/lift/ph/low_dim_v15.hdf5
+  robomimic_data_group: data
+  fallback_image_hw: [84, 84]
+  n_demos: 100
+  chunk_size: 16
+  action_stats_path: action_stats.json
+
+model:
+  name: mini_pi0_fm
+  action_dim: 7
+  chunk_size: 16
+  cond_dim: 256
+  d_model: 256
+  nhead: 4
+  nlayers: 4
+
+train:
+  epochs: 50
+  batch_size: 128
+  lr: 0.0001
+  weight_decay: 0.0001
+  num_workers: 0
+  persistent_workers: false
+  save_best: true
+  save_best_min_delta: 0.0001
+  grad_clip_norm: 1.0
+  model_print_depth: 2
+  ckpt_dir: checkpoints
+  device: auto
+
+eval:
+  checkpoint: checkpoints/best.pt
+  action_stats_path: action_stats.json
+  n_episodes: 20
+  execute_steps: 8
+  n_flow_steps: 10
+  max_steps: 200
+  record: false
+  record_grid: false
+  grid_size: 3
+  grid_fps: 20
+  grid_width: 256
+  grid_height: 256
+  cube_xy: null
+  cube_xy_range: null
+  cube_z: null
+  cube_yaw_deg: null
+  plot_path: eval_metrics.png
+  device: cpu
+
+deploy:
+  mode: sim
+  checkpoint: checkpoints/best.pt
+  action_stats_path: action_stats.json
+  execute_steps: 4
+  n_flow_steps: 10
+  max_steps: 200
+  record_path: null
+  device: cpu

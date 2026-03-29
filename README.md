@@ -1,0 +1,260 @@
+![mini-pi0 banner](./assets/banner.jpg)
+
+<img src="./assets/logo.jpg" alt="mini-pi0 logo" width="72" />
+
+# mini-pi0
+
+`mini-pi0` is a modular research and development codebase for training and evaluating flow-matching robot action policies from demonstrations.
+
+It includes:
+- unified CLI for train / eval / deploy-sim / vision precompute
+- typed YAML config system with CLI overrides
+- modular simulator adapters (Robosuite runtime, ManiSkill3 + IsaacLab scaffolds)
+- native `robomimic_hdf5` and `lerobot_hf` dataset loading
+- image and precomputed-vision conditioning pipelines
+
+## Current Backend Status
+
+- Robosuite: full runtime support
+- ManiSkill3: scaffolded
+- IsaacLab: scaffolded
+
+Check local backend diagnostics:
+
+```bash
+.venv/bin/python -m mini_pi0 backends
+```
+
+## Repository Layout
+
+```text
+mini_pi0/
+  cli/         # unified CLI entrypoints
+  config/      # typed dataclass schema + YAML load/merge
+  sim/         # simulator adapter API + backend implementations
+  dataset/     # dataset readers, episode loader, torch dataset, stats
+  models/      # model registry + flow matching policy
+  vision/      # vision backbones + feature precompute
+  train/       # training runner
+  eval/        # evaluation loop, metrics, plots, grids
+  deploy/      # simulation deployment loop
+  utils/       # run directory and device helpers
+
+examples/configs/
+  robosuite_can_vision.yaml
+  robosuite_lift.yaml
+  robosuite_lift_lerobot.yaml
+  robosuite_lift_robomimic.yaml
+  maniskill3_pickcube.yaml      # scaffold
+  isaaclab_scaffold.yaml        # scaffold
+```
+
+## Setup
+
+```bash
+# 1) create venv
+uv venv --python 3.13 .venv
+source .venv/bin/activate
+
+# 2) install dependencies
+uv sync --extra dev --extra lerobot --extra vision --extra hardware
+```
+
+If you prefer pip-style install:
+
+```bash
+uv pip install -r requirements.txt
+```
+
+## Datasets
+
+Supported formats:
+- `robomimic_hdf5`
+- `lerobot_hf`
+
+Detailed guide:
+- [docs/DATASETS.md](docs/DATASETS.md)
+- [docs/ROBOT_DATASET_MAPPING.md](docs/ROBOT_DATASET_MAPPING.md)
+
+Download robomimic example:
+
+```bash
+.venv/bin/python -m mini_pi0 download-robomimic \
+  --task can \
+  --dataset_type ph \
+  --hdf5_type low_dim \
+  --download_dir data/robomimic
+```
+
+Download directly from Hugging Face dataset repos:
+
+```bash
+# LeRobot dataset snapshot (uses local HF cache + saves under data/lerobot)
+.venv/bin/hf download robotgeneralist/robosuite_can_ph \
+  --repo-type dataset \
+  --local-dir data/lerobot/robosuite_can_ph
+
+# Single robomimic file from HF
+.venv/bin/hf download robomimic/robomimic_datasets \
+  --repo-type dataset \
+  v1.5/can/ph/low_dim_v15.hdf5 \
+  --local-dir data/robomimic/can/ph
+```
+
+## Dataset Essentials
+
+Use these fields in your config for reliable loading:
+- `data.format`: `robomimic_hdf5` or `lerobot_hf`
+- `robot.image_key`: visual observation key used by policy conditioning
+- `robot.state_keys`: state vector keys used by all model paths (train/eval/deploy)
+- `data.lerobot_action_key` and `data.lerobot_episode_index_key` for `lerobot_hf`
+
+Recommended key setup for Robosuite can (`robotgeneralist/robosuite_can_ph`):
+- `robot.image_key='observation.images.right_wrist_0_rgb'`
+- `robot.state_keys=['observation.state.eef_pos','observation.state.eef_quat','observation.state.tool']`
+
+Notes:
+- If `robot.state_keys` is missing, pipeline falls back to `robot.proprio_keys`.
+- Changing `image_key` or `state_keys` changes model inputs, so old checkpoints become incompatible.
+- On macOS, prefer `data.lerobot_video_backend='pyav'`.
+- In precomputed mode, `data.precomputed_features_path` should point to the feature directory or archive produced by `precompute-vision`.
+
+Expected source schema:
+- `robomimic_hdf5`: `/<data_group>/<demo_k>/actions` and `/<data_group>/<demo_k>/obs/...`
+- `lerobot_hf`: flattened feature keys such as `observation.images.*`, `observation.state.*`, `action`, `episode_index`
+
+## Quickstart (Can Task, Wrist Camera, Vision Features)
+
+This is the recommended path for your current setup.
+
+1) Precompute wrist-camera vision features:
+
+```bash
+.venv/bin/python -u -m mini_pi0 precompute-vision \
+  --config examples/configs/robosuite_can_vision.yaml \
+  --set data.format=lerobot_hf \
+  --set data.lerobot_repo_id='robotgeneralist/robosuite_can_ph' \
+  --set data.lerobot_video_backend='pyav' \
+  --set robot.image_key='observation.images.right_wrist_0_rgb' \
+  --set robot.state_keys="['observation.state.eef_pos','observation.state.eef_quat','observation.state.tool']" \
+  --vision_backend timm \
+  --vision_model_name 'vit_base_patch16_dinov3.lvd1689m' \
+  --vision_pretrained \
+  --precomputed_features_path data/features/can_wrist_dinov3_vitb16
+```
+
+2) Train policy on precomputed features:
+
+```bash
+.venv/bin/python -u -m mini_pi0 train \
+  --config examples/configs/robosuite_can_vision.yaml \
+  --observation_mode precomputed \
+  --precomputed_features_path data/features/can_wrist_dinov3_vitb16 \
+  --set model.obs_mode=feature \
+  --set train.device=auto
+```
+
+2b) Resume training from a previous run checkpoint:
+
+```bash
+.venv/bin/python -u -m mini_pi0 train \
+  --config examples/configs/robosuite_can_vision.yaml \
+  --observation_mode precomputed \
+  --precomputed_features_path data/features/can_wrist_dinov3_vitb16 \
+  --resume_from runs/robosuite-can-fm-vision/run1/checkpoints/best.pt \
+  --resume_optimizer \
+  --set model.obs_mode=feature \
+  --set train.device=auto
+```
+
+3) Evaluate with verbose live logs:
+
+```bash
+.venv/bin/python -u -m mini_pi0 eval \
+  --config examples/configs/robosuite_can_vision.yaml \
+  --set eval.checkpoint='runs/robosuite-can-fm-vision/run1/checkpoints/best.pt' \
+  --set eval.action_stats_path='runs/robosuite-can-fm-vision/run1/artifacts/action_stats.json' \
+  --set eval.run_dir='runs/robosuite-can-fm-vision/run1' \
+  --set model.obs_mode=feature \
+  --set model.vision_dim=768 \
+  --set vision.use_runtime_extractor=true \
+  --set vision.model_name='vit_base_patch16_dinov3.lvd1689m' \
+  --verbose --log_every_episodes 1
+```
+
+## Evaluation Guide
+
+Minimal eval command:
+
+```bash
+.venv/bin/python -u -m mini_pi0 eval \
+  --config examples/configs/robosuite_can_vision.yaml \
+  --set eval.checkpoint='runs/robosuite-can-fm-vision/run1/checkpoints/best.pt' \
+  --set eval.action_stats_path='runs/robosuite-can-fm-vision/run1/artifacts/action_stats.json'
+```
+
+Useful eval options:
+- `--verbose --log_every_episodes 1` for per-episode progress logs
+- `--set eval.record_grid=true` to save success/failure 3x3 grid videos
+- `--set eval.max_steps=200` to cap rollout horizon
+- `--set eval.run_dir='runs/<exp>/runN'` to write metrics into an existing run
+
+Metric interpretation:
+- `success_rate`: fraction of episodes that reached task success
+- `CI95`: bootstrap 95% confidence interval over success rate
+- `episode_len_mean/std`: rollout length stats in environment steps
+- `reward_mean`: average accumulated reward
+- `infer_ms_mean`: average model inference latency per predicted chunk
+
+Output files:
+- `metrics/eval_summary.json`: scalar metrics
+- `metrics/eval_arrays.json`: per-episode raw arrays
+- `artifacts/eval_metrics.png`: plots for success trend, episode length, reward distribution
+- `artifacts/success_grid_*.mp4` and `artifacts/failure_grid_*.mp4` when grid recording is enabled
+
+## Important Config Notes
+
+- `robot.state_keys` is the preferred definition for policy state inputs.
+- If `robot.state_keys` is not set, pipeline falls back to `robot.proprio_keys`.
+- If you change camera view or state keys, retrain the model for consistent behavior.
+
+## Vision Backbone Discovery
+
+```bash
+.venv/bin/python -m mini_pi0 vision-models
+.venv/bin/python -m mini_pi0 vision-models --backend timm
+.venv/bin/python -m mini_pi0 vision-models --backend timm --all_timm
+```
+
+## Run Artifacts
+
+Each run is written as ordered folders:
+
+```text
+runs/<experiment_name>/run1/
+runs/<experiment_name>/run2/
+...
+```
+
+Typical outputs:
+- `checkpoints/best.pt`
+- `artifacts/action_stats.json`
+- `metrics/train_summary.json`
+- `metrics/eval_summary.json`
+
+## Wrapper Scripts (Backward Compatible)
+
+The root wrappers still work and call the modular package:
+
+```bash
+.venv/bin/python train.py ...
+.venv/bin/python eval.py ...
+.venv/bin/python deploy.py ...
+.venv/bin/python precompute_vision.py ...
+```
+
+Hardware deploy helper remains separate:
+
+```bash
+.venv/bin/python deploy_so100.py ...
+```

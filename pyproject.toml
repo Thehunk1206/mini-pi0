@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-pi0"
+version = "0.1.0"
+description = "Modular flow-matching robot policy research stack"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+  "numpy",
+  "torch",
+  "torchvision",
+  "tqdm",
+  "PyYAML",
+  "h5py",
+  "robosuite",
+  "mujoco",
+  "imageio",
+  "imageio-ffmpeg",
+  "matplotlib",
+  "scipy",
+]
+
+[project.optional-dependencies]
+lerobot = ["lerobot", "av"]
+vision = ["timm", "transformers"]
+hardware = ["opencv-python", "roboticstoolbox-python", "feetech-servo-sdk"]
+maniskill3 = ["gymnasium", "mani_skill"]
+isaaclab = []
+dev = ["pytest"]
+
+[project.scripts]
+mini-pi0 = "mini_pi0.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["mini_pi0*"]

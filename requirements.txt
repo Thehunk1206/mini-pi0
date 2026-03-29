@@ -1,0 +1,24 @@
+numpy
+torch
+torchvision
+tqdm
+PyYAML
+robosuite
+mujoco
+imageio
+imageio-ffmpeg
+matplotlib
+scipy
+h5py
+opencv-python
+lerobot
+av
+timm
+transformers
+
+# Hardware deployment extras (SO100)
+roboticstoolbox-python
+feetech-servo-sdk
+
+# Dev / tests
+pytest
