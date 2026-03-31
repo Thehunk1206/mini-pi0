@@ -163,6 +163,7 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
 
     model.eval()
 
+    image_keys = effective_image_keys(cfg.robot)
     feature_extractor = None
     if str(cfg.model.obs_mode).strip().lower() in {"feature", "precomputed", "features"}:
         if bool(cfg.vision.use_runtime_extractor):
@@ -176,12 +177,15 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
                 device=device,
             )
             expected_dim = int(cfg.model.vision_dim)
-            got_dim = int(feature_extractor.feature_dim)
+            per_view_dim = int(feature_extractor.feature_dim)
+            got_dim = int(per_view_dim * max(1, len(image_keys)))
             if expected_dim > 0 and got_dim != expected_dim:
                 raise ValueError(
                     "Vision feature dim mismatch: model expects "
-                    f"{expected_dim}, runtime extractor '{cfg.vision.model_name}' outputs {got_dim}. "
-                    "Set a matching encoder via `--set vision.model_name=...` "
+                    f"{expected_dim}, runtime extractor '{cfg.vision.model_name}' outputs "
+                    f"{per_view_dim} per view -> total {got_dim} for {len(image_keys)} views. "
+                    "Set matching image keys and encoder via "
+                    "`--set robot.image_keys='[...]' --set vision.model_name=...` "
                     "or use a checkpoint/config trained with the same feature backend."
                 )
         else:
@@ -192,7 +196,6 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
 
     stats_path = cfg.eval.action_stats_path or cfg.data.action_stats_path
     state_keys = effective_state_keys(cfg.robot)
-    image_keys = effective_image_keys(cfg.robot)
     processor = ObsProcessor(
         action_stats_path=stats_path,
         image_key=cfg.robot.image_key,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -7,10 +8,12 @@ import torch
 from torch import nn
 
 from mini_pi0.config.schema import ModelConfig, RootConfig, effective_image_keys
+from mini_pi0.models.crossflow import CrossFlowActionModel
 from mini_pi0.models.fm import MiniPi0FlowMatching
 
 _MODEL_REGISTRY = {
     "mini_pi0_fm": MiniPi0FlowMatching,
+    "mini_pi0_crossflow": CrossFlowActionModel,
 }
 
 
@@ -42,7 +45,7 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
     if key not in _MODEL_REGISTRY:
         raise ValueError(f"Unknown model '{cfg.name}'. Options: {list_models()}")
     cls = _MODEL_REGISTRY[key]
-    return cls(
+    kwargs = dict(
         action_dim=cfg.action_dim,
         prop_dim=cfg.prop_dim,
         obs_mode=cfg.obs_mode,
@@ -53,6 +56,21 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
         nhead=cfg.nhead,
         nlayers=cfg.nlayers,
     )
+    optional_kwargs = {
+        "num_timestep_buckets": getattr(cfg, "num_timestep_buckets", 1000),
+        "noise_beta_alpha": getattr(cfg, "noise_beta_alpha", 1.5),
+        "noise_beta_beta": getattr(cfg, "noise_beta_beta", 1.0),
+        "noise_s": getattr(cfg, "noise_s", 0.999),
+        "state_dropout_prob": getattr(cfg, "state_dropout_prob", 0.0),
+        "state_additive_noise_scale": getattr(cfg, "state_additive_noise_scale", 0.0),
+        "add_action_pos_embed": getattr(cfg, "add_action_pos_embed", True),
+        "use_context_layernorm": getattr(cfg, "use_context_layernorm", True),
+    }
+    sig = inspect.signature(cls.__init__)
+    for k, v in optional_kwargs.items():
+        if k in sig.parameters:
+            kwargs[k] = v
+    return cls(**kwargs)
 
 
 def count_params(module: nn.Module) -> tuple[int, int]:
@@ -125,6 +143,14 @@ def build_checkpoint_payload(
             "d_model": cfg.model.d_model,
             "nhead": cfg.model.nhead,
             "nlayers": cfg.model.nlayers,
+            "num_timestep_buckets": getattr(cfg.model, "num_timestep_buckets", 1000),
+            "noise_beta_alpha": getattr(cfg.model, "noise_beta_alpha", 1.5),
+            "noise_beta_beta": getattr(cfg.model, "noise_beta_beta", 1.0),
+            "noise_s": getattr(cfg.model, "noise_s", 0.999),
+            "state_dropout_prob": getattr(cfg.model, "state_dropout_prob", 0.0),
+            "state_additive_noise_scale": getattr(cfg.model, "state_additive_noise_scale", 0.0),
+            "add_action_pos_embed": getattr(cfg.model, "add_action_pos_embed", True),
+            "use_context_layernorm": getattr(cfg.model, "use_context_layernorm", True),
         },
         "sim_backend": cfg.simulator.backend,
         "sim_config": {

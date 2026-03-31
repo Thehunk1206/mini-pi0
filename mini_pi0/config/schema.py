@@ -182,6 +182,14 @@ class ModelConfig:
         d_model: Transformer hidden dimension.
         nhead: Number of attention heads per transformer layer.
         nlayers: Number of transformer encoder layers.
+        num_timestep_buckets: Number of discrete diffusion timestep buckets.
+        noise_beta_alpha: Alpha parameter for Beta timestep sampling distribution.
+        noise_beta_beta: Beta parameter for Beta timestep sampling distribution.
+        noise_s: Upper timestep cutoff multiplier used in sampling.
+        state_dropout_prob: Probability of dropping state token during training.
+        state_additive_noise_scale: Gaussian noise scale added to state token during training.
+        add_action_pos_embed: Enable learned positional embeddings for action tokens.
+        use_context_layernorm: Apply LayerNorm to context tokens before denoiser.
     """
 
     name: str = "mini_pi0_fm"
@@ -194,6 +202,14 @@ class ModelConfig:
     d_model: int = 256
     nhead: int = 4
     nlayers: int = 4
+    num_timestep_buckets: int = 1000
+    noise_beta_alpha: float = 1.5
+    noise_beta_beta: float = 1.0
+    noise_s: float = 0.999
+    state_dropout_prob: float = 0.0
+    state_additive_noise_scale: float = 0.0
+    add_action_pos_embed: bool = True
+    use_context_layernorm: bool = True
 
 
 @dataclass
