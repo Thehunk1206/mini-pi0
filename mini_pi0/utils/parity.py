@@ -86,6 +86,14 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             "d_model",
             "nhead",
             "nlayers",
+            "num_timestep_buckets",
+            "noise_beta_alpha",
+            "noise_beta_beta",
+            "noise_s",
+            "state_dropout_prob",
+            "state_additive_noise_scale",
+            "add_action_pos_embed",
+            "use_context_layernorm",
         ):
             if key not in model_cfg:
                 continue

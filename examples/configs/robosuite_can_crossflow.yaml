@@ -1,5 +1,5 @@
 experiment:
-  name: robosuite-can-fm-vision
+  name: robosuite-can-crossflow
   seed: 0
   runs_root: runs
 
@@ -38,7 +38,7 @@ data:
   lerobot_episode_index_key: episode_index
   lerobot_local_files_only: false
   lerobot_video_backend: pyav
-  precomputed_features_path: data/features/can_dinov2_vits14.npz
+  precomputed_features_path: null
   precomputed_feature_key: vision_feat
   fallback_image_hw: [84, 84]
   n_demos: 200
@@ -51,13 +51,13 @@ vision:
   pretrained: true
   batch_size: 64
   image_size: 224
-  output_path: data/features/can_dinov2_vits14.npz
+  output_path: data/features/can_crossflow_features
   use_runtime_extractor: true
   hf_model_id: null
   local_files_only: false
 
 model:
-  name: mini_pi0_fm
+  name: mini_pi0_crossflow
   action_dim: 7
   prop_dim: 23
   obs_mode: image
@@ -66,12 +66,20 @@ model:
   cond_dim: 256
   d_model: 384
   nhead: 6
-  nlayers: 4
+  nlayers: 6
+  num_timestep_buckets: 1000
+  noise_beta_alpha: 1.5
+  noise_beta_beta: 1.0
+  noise_s: 0.999
+  state_dropout_prob: 0.05
+  state_additive_noise_scale: 0.01
+  add_action_pos_embed: true
+  use_context_layernorm: true
 
 train:
-  epochs: 150
+  epochs: 200
   batch_size: 256
-  lr: 0.00005
+  lr: 0.0001
   lr_scheduler: cosine
   scheduler_t_max: 200
   scheduler_eta_min: 0.0
@@ -93,7 +101,7 @@ train:
 eval:
   checkpoint: checkpoints/best.pt
   action_stats_path: action_stats.json
-  n_episodes: 100
+  n_episodes: 50
   execute_steps: 4
   n_flow_steps: 10
   max_steps: 450
@@ -101,16 +109,19 @@ eval:
   action_smoothing_alpha: 0.0
   action_scale: null
   failure_reward_threshold: 0.2
+  verbose: true
+  log_every_episodes: 1
   record: false
   record_grid: true
   grid_size: 3
-  grid_fps: 24
+  grid_fps: 20
   grid_width: 256
   grid_height: 256
   cube_xy: null
   cube_xy_range: null
   cube_z: null
   cube_yaw_deg: null
+  run_dir: null
   device: auto
 
 deploy:
