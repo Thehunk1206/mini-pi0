@@ -26,8 +26,9 @@ robot:
   name: Panda
   action_dim: 7
   image_key: observation.images.right_wrist_0_rgb
+  image_keys: [observation.images.right_wrist_0_rgb]
   proprio_keys: [observation.state.eef_pos, observation.state.eef_quat, observation.state.tool]
-  state_keys: [observation.state.eef_pos, observation.state.eef_quat, observation.state.tool]
+  state_keys: [observation.state.eef_pos, observation.state.eef_quat, observation.state.tool, observation.state.object]
 
 data:
   format: lerobot_hf
@@ -58,7 +59,7 @@ vision:
 model:
   name: mini_pi0_fm
   action_dim: 7
-  prop_dim: 9
+  prop_dim: 23
   obs_mode: image
   vision_dim: 0
   chunk_size: 16
@@ -71,7 +72,7 @@ train:
   epochs: 200
   batch_size: 256
   lr: 0.00005
-  lr_scheduler: null
+  lr_scheduler: cosine
   scheduler_t_max: 200
   scheduler_eta_min: 0.0
   scheduler_step_size: 50
@@ -82,6 +83,9 @@ train:
   save_best: true
   save_best_min_delta: 0.0001
   grad_clip_norm: 1.0
+  val_ratio: 0.1
+  ema_decay: 0.999
+  checkpoint_use_ema: true
   model_print_depth: 3
   ckpt_dir: checkpoints
   device: auto
@@ -93,6 +97,10 @@ eval:
   execute_steps: 4
   n_flow_steps: 10
   max_steps: 450
+  strict_parity: true
+  action_smoothing_alpha: 0.0
+  action_scale: null
+  failure_reward_threshold: 0.2
   record: false
   record_grid: true
   grid_size: 3
@@ -112,5 +120,8 @@ deploy:
   execute_steps: 4
   n_flow_steps: 10
   max_steps: 500
+  strict_parity: true
+  action_smoothing_alpha: 0.0
+  action_scale: null
   record_path: null
   device: auto

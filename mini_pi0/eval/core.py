@@ -60,6 +60,38 @@ def _reshape_action(action: np.ndarray, target_dim: int) -> np.ndarray:
     return out
 
 
+def _resolve_action_scale(scale: list[float] | None, target_dim: int) -> np.ndarray | None:
+    """Resolve configured per-dimension action scale vector."""
+
+    if scale is None:
+        return None
+    arr = np.asarray(scale, dtype=np.float32).reshape(-1)
+    if arr.shape[0] != target_dim:
+        return None
+    return arr
+
+
+def _classify_failure_reason(
+    *,
+    success: bool,
+    max_step_reward: float,
+    steps: int,
+    max_steps: int | None,
+    reward_threshold: float,
+) -> str:
+    """Classify rollout outcome into coarse reason buckets."""
+
+    if success:
+        return "success"
+    if max_step_reward < float(reward_threshold):
+        return "no_progress"
+    if max_steps is not None and steps >= int(max_steps):
+        return "timeout_after_progress"
+    if max_step_reward >= 0.99:
+        return "drop_or_unstable"
+    return "failure"
+
+
 def _bootstrap_ci_95(values: np.ndarray, n_boot: int = 1000) -> tuple[float, float]:
     """Estimate 95% bootstrap confidence interval for sample mean.
 
@@ -126,12 +158,14 @@ def evaluate(
     log_every = max(1, int(cfg.eval.log_every_episodes))
     success_count = 0
     start_time = time.perf_counter()
+    smooth_alpha = float(max(0.0, min(1.0, getattr(cfg.eval, "action_smoothing_alpha", 0.0))))
 
     if verbose:
         print(
             "[eval] Starting evaluation: "
             f"episodes={n_episodes}, execute_steps={int(cfg.eval.execute_steps)}, "
-            f"n_flow_steps={int(cfg.eval.n_flow_steps)}, max_steps={cfg.eval.max_steps}",
+            f"n_flow_steps={int(cfg.eval.n_flow_steps)}, max_steps={cfg.eval.max_steps}, "
+            f"smoothing_alpha={smooth_alpha:.2f}",
             flush=True,
         )
 
@@ -171,6 +205,13 @@ def evaluate(
 
         lo, hi = adapter.action_spec()
         action_dim = int(np.asarray(lo).reshape(-1).shape[0])
+        action_scale = _resolve_action_scale(cfg.eval.action_scale, action_dim)
+        prev_action: np.ndarray | None = None
+        clip_count = 0
+        action_count = 0
+        action_abs_sum = 0.0
+        action_abs_max = 0.0
+        max_step_reward = float("-inf")
 
         while True:
             if not action_buffer:
@@ -184,14 +225,28 @@ def evaluate(
                 chunk = processor.denormalize(chunk).detach().cpu().numpy()
                 proposed = []
                 for a in chunk[: int(cfg.eval.execute_steps)]:
-                    x = _reshape_action(a, target_dim=action_dim)
-                    x = np.clip(x, lo, hi).astype(np.float32)
-                    proposed.append(x)
+                    raw = _reshape_action(a, target_dim=action_dim)
+                    if action_scale is not None:
+                        raw = raw * action_scale
+                    if prev_action is not None and smooth_alpha > 0.0:
+                        raw = (1.0 - smooth_alpha) * raw + smooth_alpha * prev_action
+                    clipped = np.clip(raw, lo, hi).astype(np.float32)
+                    if np.any(np.abs(raw - clipped) > 1e-6):
+                        clip_count += 1
+                    proposed.append(clipped)
                 action_buffer = proposed
 
-            step = adapter.step(action_buffer.pop(0))
+            action = action_buffer.pop(0)
+            prev_action = action.copy()
+            action_count += 1
+            action_abs = np.abs(action)
+            action_abs_sum += float(action_abs.mean())
+            action_abs_max = max(action_abs_max, float(action_abs.max()))
+
+            step = adapter.step(action)
             obs = step.obs
             reward_sum += float(step.reward)
+            max_step_reward = max(max_step_reward, float(step.reward))
             steps += 1
 
             if frames is not None:
@@ -221,10 +276,23 @@ def evaluate(
             elif (not success) and len(failure_rollouts) < grid_slots:
                 failure_rollouts.append(frames)
 
+        reason = _classify_failure_reason(
+            success=success,
+            max_step_reward=max_step_reward,
+            steps=steps,
+            max_steps=cfg.eval.max_steps,
+            reward_threshold=float(getattr(cfg.eval, "failure_reward_threshold", 0.2)),
+        )
+
         metrics["success"].append(float(success))
         metrics["episode_length"].append(float(steps))
         metrics["total_reward"].append(float(reward_sum))
         metrics["infer_ms"].append(float(1000.0 * t_infer / max(1, chunks)))
+        metrics["max_step_reward"].append(float(max_step_reward))
+        metrics["action_clip_fraction"].append(float(clip_count / max(1, action_count)))
+        metrics["action_abs_mean"].append(float(action_abs_sum / max(1, action_count)))
+        metrics["action_abs_max"].append(float(action_abs_max))
+        metrics["failure_reason"].append(reason)
         adapter.close()
         if success:
             success_count += 1
@@ -240,6 +308,7 @@ def evaluate(
                 f"[eval] episode {eps_done}/{n_episodes} | {status} "
                 f"| steps={steps} | reward={reward_sum:.2f} "
                 f"| infer={1000.0 * t_infer / max(1, chunks):.1f} ms/chunk "
+                f"| reason={reason} | clip={100.0 * clip_count / max(1, action_count):.1f}% "
                 f"| running_success={running_sr:.1f}% ({success_count}/{eps_done}) "
                 f"| elapsed={_format_duration(elapsed)} | eta={_format_duration(eta)}",
                 flush=True,
@@ -253,7 +322,12 @@ def evaluate(
             flush=True,
         )
 
-    out = {k: np.asarray(v, dtype=np.float32) for k, v in metrics.items()}
+    out: dict[str, np.ndarray] = {}
+    for k, v in metrics.items():
+        if k == "failure_reason":
+            out[k] = np.asarray(v, dtype=object)
+        else:
+            out[k] = np.asarray(v, dtype=np.float32)
     if collect_grid:
         return out, {"success": success_rollouts, "failure": failure_rollouts}
     return out
@@ -336,6 +410,9 @@ def record_episode(
 
     lo, hi = adapter.action_spec()
     action_dim = int(np.asarray(lo).reshape(-1).shape[0])
+    action_scale = _resolve_action_scale(cfg.eval.action_scale, action_dim)
+    smooth_alpha = float(max(0.0, min(1.0, getattr(cfg.eval, "action_smoothing_alpha", 0.0))))
+    prev_action: np.ndarray | None = None
 
     step_budget = int(cfg.eval.max_steps) if cfg.eval.max_steps is not None else int(cfg.simulator.horizon)
 
@@ -348,11 +425,17 @@ def record_episode(
             proposed = []
             for a in chunk[: int(cfg.eval.execute_steps)]:
                 x = _reshape_action(a, target_dim=action_dim)
+                if action_scale is not None:
+                    x = x * action_scale
+                if prev_action is not None and smooth_alpha > 0.0:
+                    x = (1.0 - smooth_alpha) * x + smooth_alpha * prev_action
                 x = np.clip(x, lo, hi).astype(np.float32)
                 proposed.append(x)
             action_buffer = proposed
 
-        step = adapter.step(action_buffer.pop(0))
+        action = action_buffer.pop(0)
+        prev_action = action.copy()
+        step = adapter.step(action)
         obs = step.obs
 
         frame = adapter.render(camera=cfg.simulator.camera_names[0], width=512, height=512)
@@ -389,8 +472,17 @@ def report(results: dict[str, np.ndarray], plot_path: str = "eval_metrics.png") 
     el = np.asarray(results["episode_length"], dtype=np.float32)
     rw = np.asarray(results["total_reward"], dtype=np.float32)
     inf = np.asarray(results["infer_ms"], dtype=np.float32)
+    mxr = np.asarray(results.get("max_step_reward", np.array([])), dtype=np.float32)
+    clipf = np.asarray(results.get("action_clip_fraction", np.array([])), dtype=np.float32)
+    aabs = np.asarray(results.get("action_abs_mean", np.array([])), dtype=np.float32)
+    reasons = np.asarray(results.get("failure_reason", np.array([])), dtype=object)
 
     lo, hi = _bootstrap_ci_95(sr)
+    reason_counts: dict[str, int] = {}
+    if reasons.size > 0:
+        for r in reasons.tolist():
+            key = str(r)
+            reason_counts[key] = reason_counts.get(key, 0) + 1
 
     summary = {
         "success_rate": float(sr.mean()),
@@ -400,12 +492,20 @@ def report(results: dict[str, np.ndarray], plot_path: str = "eval_metrics.png") 
         "episode_len_std": float(el.std()),
         "reward_mean": float(rw.mean()),
         "infer_ms_mean": float(inf.mean()),
+        "max_step_reward_mean": float(mxr.mean()) if mxr.size > 0 else 0.0,
+        "action_clip_fraction_mean": float(clipf.mean()) if clipf.size > 0 else 0.0,
+        "action_abs_mean": float(aabs.mean()) if aabs.size > 0 else 0.0,
+        "failure_reason_counts": reason_counts,
     }
 
     print(f"Success rate : {summary['success_rate'] * 100:.1f}%  [{summary['ci95_low'] * 100:.1f}%, {summary['ci95_high'] * 100:.1f}%] CI95")
     print(f"Episode len  : {summary['episode_len_mean']:.0f} ± {summary['episode_len_std']:.0f} steps")
     print(f"Reward       : {summary['reward_mean']:.2f}")
     print(f"Infer speed  : {summary['infer_ms_mean']:.1f} ms/chunk")
+    print(f"Max step rwd : {summary['max_step_reward_mean']:.3f}")
+    print(f"Action clip  : {summary['action_clip_fraction_mean'] * 100:.1f}%")
+    if reason_counts:
+        print(f"Failure mode : {reason_counts}")
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
 

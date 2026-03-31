@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from mini_pi0.config.io import dump_config
-from mini_pi0.config.schema import RootConfig, effective_state_keys
+from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.dataset.obs_processor import ObsProcessor
 from mini_pi0.eval.core import evaluate, record_episode, report, save_rollout_grid
 from mini_pi0.models.registry import load_checkpoint, make_model
 from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.utils.device import resolve_device
+from mini_pi0.utils.parity import build_checkpoint_parity_report, config_diff, format_parity_issues
 from mini_pi0.utils.runs import create_run_dir
 from mini_pi0.vision.encoders import build_vision_extractor
 
@@ -109,22 +110,54 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
     """
 
     run_dir = _resolve_eval_run_dir(cfg)
-    dump_config(run_dir / "config_resolved.yaml", cfg)
+    requested_cfg = copy.deepcopy(cfg)
 
     device = resolve_device(cfg.eval.device)
 
     ckpt = load_checkpoint(cfg.eval.checkpoint, map_location=device)
-    if isinstance(ckpt, dict):
-        _inject_model_cfg_from_checkpoint(cfg, ckpt)
+    if not isinstance(ckpt, dict):
+        raise ValueError("Checkpoint format is invalid. Expected a dict with 'model' or state_dict keys.")
+
+    parity = build_checkpoint_parity_report(requested_cfg, ckpt)
+    parity["checkpoint_path"] = str(cfg.eval.checkpoint)
+    strict = bool(getattr(cfg.eval, "strict_parity", True))
+    if parity["issues"]:
+        msg = "Checkpoint/runtime parity mismatches detected:\n" + format_parity_issues(parity["issues"])
+        if strict:
+            raise ValueError(msg + "\nDisable with --set eval.strict_parity=false if intentional.")
+        print(f"[eval] WARNING: {msg}", flush=True)
+    for w in parity.get("warnings", []):
+        print(f"[eval] WARNING: {w}", flush=True)
+
+    _inject_model_cfg_from_checkpoint(cfg, ckpt)
+    runtime_cfg = copy.deepcopy(cfg)
+    print(
+        "[eval] Preflight | "
+        f"backend={cfg.simulator.backend} task={cfg.simulator.task} robot={cfg.simulator.robot} "
+        f"controller={cfg.simulator.controller} obs_mode={cfg.model.obs_mode} "
+        f"image_keys={effective_image_keys(cfg.robot)} strict_parity={strict}",
+        flush=True,
+    )
+
+    dump_config(run_dir / "metrics" / "eval_config_requested.yaml", requested_cfg)
+    dump_config(run_dir / "metrics" / "eval_config_runtime.yaml", runtime_cfg)
+    with (run_dir / "metrics" / "eval_provenance.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "checkpoint": str(cfg.eval.checkpoint),
+                "strict_parity": strict,
+                "parity": parity,
+                "requested_to_runtime_diff": config_diff(requested_cfg, runtime_cfg),
+            },
+            f,
+            indent=2,
+        )
 
     model = make_model(cfg).to(device)
-
-    if isinstance(ckpt, dict) and "model" in ckpt:
+    if "model" in ckpt:
         model.load_state_dict(ckpt["model"])
-    elif isinstance(ckpt, dict):
-        model.load_state_dict(ckpt)
     else:
-        raise ValueError("Checkpoint format is invalid. Expected a dict with 'model' or state_dict keys.")
+        model.load_state_dict(ckpt)
 
     model.eval()
 
@@ -157,9 +190,11 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
 
     stats_path = cfg.eval.action_stats_path or cfg.data.action_stats_path
     state_keys = effective_state_keys(cfg.robot)
+    image_keys = effective_image_keys(cfg.robot)
     processor = ObsProcessor(
         action_stats_path=stats_path,
         image_key=cfg.robot.image_key,
+        image_keys=image_keys,
         proprio_keys=state_keys,
         device=str(device),
         observation_mode=cfg.model.obs_mode,

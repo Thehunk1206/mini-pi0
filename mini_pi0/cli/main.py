@@ -8,6 +8,7 @@ from mini_pi0.config.io import load_config
 from mini_pi0.dataset.episodes import list_supported_dataset_formats
 from mini_pi0.dataset.robomimic_download import download_robomimic_dataset
 from mini_pi0.dataset.robot_dataset_mapping import build_robot_dataset_mapping
+from mini_pi0.eval.ablation import run_eval_ablation
 from mini_pi0.eval.runner import run_eval
 from mini_pi0.sim.registry import backend_status, list_backends
 from mini_pi0.train.runner import run_train
@@ -46,6 +47,20 @@ def _append_override(overrides: list[str], key: str, value: Any) -> None:
         overrides.append(f"{key}={value}")
 
 
+def _parse_csv_values(text: str | None, cast_type):
+    """Parse comma-separated CLI text values into typed list."""
+
+    if text is None:
+        return []
+    out = []
+    for raw in str(text).split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        out.append(cast_type(item))
+    return out
+
+
 def _apply_train_overrides(args: argparse.Namespace) -> list[str]:
     """Translate ``train`` CLI args into dotted config overrides.
 
@@ -65,6 +80,12 @@ def _apply_train_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "simulator.task", args.task)
     _append_override(overrides, "simulator.robot", args.robot)
     _append_override(overrides, "simulator.controller", args.controller)
+    _append_override(overrides, "robot.image_key", args.image_key)
+    if args.image_keys is not None:
+        keys = _parse_csv_values(args.image_keys, str)
+        if keys:
+            _append_override(overrides, "robot.image_keys", keys)
+            _append_override(overrides, "robot.image_key", keys[0])
 
     _append_override(overrides, "data.format", args.data_format)
     _append_override(overrides, "data.observation_mode", args.observation_mode)
@@ -99,6 +120,9 @@ def _apply_train_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "train.scheduler_gamma", args.scheduler_gamma)
     _append_override(overrides, "train.resume_from", args.resume_from)
     _append_override(overrides, "train.resume_optimizer", args.resume_optimizer)
+    _append_override(overrides, "train.val_ratio", args.val_ratio)
+    _append_override(overrides, "train.ema_decay", args.ema_decay)
+    _append_override(overrides, "train.checkpoint_use_ema", args.checkpoint_use_ema)
     _append_override(overrides, "train.device", args.device)
     _append_override(overrides, "train.model_print_depth", args.model_print_depth)
     _append_override(overrides, "train.num_workers", args.num_workers)
@@ -139,6 +163,11 @@ def _apply_precompute_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "data.precomputed_feature_key", args.precomputed_feature_key)
 
     _append_override(overrides, "robot.image_key", args.image_key)
+    if args.image_keys is not None:
+        keys = _parse_csv_values(args.image_keys, str)
+        if keys:
+            _append_override(overrides, "robot.image_keys", keys)
+            _append_override(overrides, "robot.image_key", keys[0])
 
     _append_override(overrides, "vision.backend", args.vision_backend)
     _append_override(overrides, "vision.model_name", args.vision_model_name)
@@ -170,6 +199,12 @@ def _apply_eval_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "simulator.task", args.task)
     _append_override(overrides, "simulator.robot", args.robot)
     _append_override(overrides, "simulator.controller", args.controller)
+    _append_override(overrides, "robot.image_key", args.image_key)
+    if args.image_keys is not None:
+        keys = _parse_csv_values(args.image_keys, str)
+        if keys:
+            _append_override(overrides, "robot.image_keys", keys)
+            _append_override(overrides, "robot.image_key", keys[0])
 
     _append_override(overrides, "eval.checkpoint", args.checkpoint)
     _append_override(overrides, "eval.run_dir", args.eval_run_dir)
@@ -178,8 +213,11 @@ def _apply_eval_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "eval.execute_steps", args.execute_steps)
     _append_override(overrides, "eval.n_flow_steps", args.n_flow_steps)
     _append_override(overrides, "eval.max_steps", args.max_steps)
+    _append_override(overrides, "eval.strict_parity", args.strict_parity)
     _append_override(overrides, "eval.verbose", args.verbose)
     _append_override(overrides, "eval.log_every_episodes", args.log_every_episodes)
+    _append_override(overrides, "eval.action_smoothing_alpha", args.action_smoothing_alpha)
+    _append_override(overrides, "eval.failure_reward_threshold", args.failure_reward_threshold)
     _append_override(overrides, "eval.device", args.device)
     _append_override(overrides, "eval.record", args.record)
     _append_override(overrides, "eval.record_grid", args.record_grid)
@@ -187,6 +225,9 @@ def _apply_eval_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "eval.grid_fps", args.grid_fps)
     _append_override(overrides, "eval.grid_width", args.grid_width)
     _append_override(overrides, "eval.grid_height", args.grid_height)
+    _append_override(overrides, "eval.plot_path", args.plot_path)
+    if args.action_scale is not None:
+        _append_override(overrides, "eval.action_scale", list(args.action_scale))
 
     if args.cube_xy is not None:
         _append_override(overrides, "eval.cube_xy", list(args.cube_xy))
@@ -217,6 +258,12 @@ def _apply_deploy_sim_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "simulator.task", args.task)
     _append_override(overrides, "simulator.robot", args.robot)
     _append_override(overrides, "simulator.controller", args.controller)
+    _append_override(overrides, "robot.image_key", args.image_key)
+    if args.image_keys is not None:
+        keys = _parse_csv_values(args.image_keys, str)
+        if keys:
+            _append_override(overrides, "robot.image_keys", keys)
+            _append_override(overrides, "robot.image_key", keys[0])
 
     _append_override(overrides, "deploy.mode", "sim")
     _append_override(overrides, "deploy.checkpoint", args.checkpoint)
@@ -224,8 +271,12 @@ def _apply_deploy_sim_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "deploy.execute_steps", args.execute_steps)
     _append_override(overrides, "deploy.n_flow_steps", args.n_flow_steps)
     _append_override(overrides, "deploy.max_steps", args.max_steps)
+    _append_override(overrides, "deploy.strict_parity", args.strict_parity)
+    _append_override(overrides, "deploy.action_smoothing_alpha", args.action_smoothing_alpha)
     _append_override(overrides, "deploy.device", args.device)
     _append_override(overrides, "deploy.record_path", args.record_path)
+    if args.action_scale is not None:
+        _append_override(overrides, "deploy.action_scale", list(args.action_scale))
 
     return overrides
 
@@ -289,6 +340,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_precomp.add_argument("--n_demos", type=int, default=None)
     p_precomp.add_argument("--image_key", default=None)
+    p_precomp.add_argument("--image_keys", default=None, help="Comma-separated image observation keys.")
     p_precomp.add_argument("--precomputed_features_path", default=None)
     p_precomp.add_argument("--precomputed_feature_key", default=None)
     p_precomp.add_argument("--vision_backend", choices=["torchvision", "timm", "hf"], default=None)
@@ -308,6 +360,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--task", default=None)
     p_train.add_argument("--robot", default=None)
     p_train.add_argument("--controller", default=None)
+    p_train.add_argument("--image_key", default=None)
+    p_train.add_argument("--image_keys", default=None, help="Comma-separated image observation keys.")
     p_train.add_argument("--data_format", choices=list_supported_dataset_formats(), default=None)
     p_train.add_argument("--observation_mode", choices=["image", "precomputed"], default=None)
     p_train.add_argument("--robomimic_hdf5", default=None)
@@ -340,6 +394,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--scheduler_gamma", type=float, default=None)
     p_train.add_argument("--resume_from", default=None)
     p_train.add_argument("--resume_optimizer", action=argparse.BooleanOptionalAction, default=None)
+    p_train.add_argument("--val_ratio", type=float, default=None)
+    p_train.add_argument("--ema_decay", type=float, default=None)
+    p_train.add_argument("--checkpoint_use_ema", action=argparse.BooleanOptionalAction, default=None)
     p_train.add_argument("--action_stats", default=None)
     p_train.add_argument("--device", default=None)
     p_train.add_argument("--model_print_depth", type=int, default=None)
@@ -365,6 +422,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--task", default=None)
     p_eval.add_argument("--robot", default=None)
     p_eval.add_argument("--controller", default=None)
+    p_eval.add_argument("--image_key", default=None)
+    p_eval.add_argument("--image_keys", default=None, help="Comma-separated image observation keys.")
     p_eval.add_argument("--checkpoint", default=None)
     p_eval.add_argument("--eval_run_dir", default=None)
     p_eval.add_argument("--action_stats", default=None)
@@ -372,8 +431,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--execute_steps", type=int, default=None)
     p_eval.add_argument("--n_flow_steps", type=int, default=None)
     p_eval.add_argument("--max_steps", type=int, default=None)
+    p_eval.add_argument("--strict_parity", action=argparse.BooleanOptionalAction, default=None)
     p_eval.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=None)
     p_eval.add_argument("--log_every_episodes", type=int, default=None)
+    p_eval.add_argument("--action_smoothing_alpha", type=float, default=None)
+    p_eval.add_argument("--action_scale", type=float, nargs="+", default=None)
+    p_eval.add_argument("--failure_reward_threshold", type=float, default=None)
     p_eval.add_argument("--device", default=None)
     p_eval.add_argument("--record", action=argparse.BooleanOptionalAction, default=None)
     p_eval.add_argument("--record_grid", action=argparse.BooleanOptionalAction, default=None)
@@ -386,6 +449,31 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--cube_z", type=float, default=None)
     p_eval.add_argument("--cube_yaw_deg", type=float, default=None)
 
+    p_ablate = sub.add_parser("ablate-eval", help="Run eval ablations over rollout hyperparameters")
+    _add_common_config_args(p_ablate)
+    p_ablate.add_argument("--run_name", default=None)
+    p_ablate.add_argument("--seed", type=int, default=None)
+    p_ablate.add_argument("--checkpoint", default=None)
+    p_ablate.add_argument("--action_stats", default=None)
+    p_ablate.add_argument("--n_episodes", type=int, default=None)
+    p_ablate.add_argument("--max_steps", type=int, default=None)
+    p_ablate.add_argument("--strict_parity", action=argparse.BooleanOptionalAction, default=None)
+    p_ablate.add_argument(
+        "--execute_steps_values",
+        default="1,2,4,8",
+        help="Comma-separated execute_steps values for ablation.",
+    )
+    p_ablate.add_argument(
+        "--n_flow_steps_values",
+        default="10,15,30",
+        help="Comma-separated n_flow_steps values for ablation.",
+    )
+    p_ablate.add_argument(
+        "--smoothing_values",
+        default="0.0,0.2,0.4",
+        help="Comma-separated action_smoothing_alpha values for ablation.",
+    )
+
     p_deploy = sub.add_parser("deploy-sim", help="Run simulation deployment loop")
     _add_common_config_args(p_deploy)
     p_deploy.add_argument("--run_name", default=None)
@@ -394,11 +482,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_deploy.add_argument("--task", default=None)
     p_deploy.add_argument("--robot", default=None)
     p_deploy.add_argument("--controller", default=None)
+    p_deploy.add_argument("--image_key", default=None)
+    p_deploy.add_argument("--image_keys", default=None, help="Comma-separated image observation keys.")
     p_deploy.add_argument("--checkpoint", default=None)
     p_deploy.add_argument("--action_stats", default=None)
     p_deploy.add_argument("--execute_steps", type=int, default=None)
     p_deploy.add_argument("--n_flow_steps", type=int, default=None)
     p_deploy.add_argument("--max_steps", type=int, default=None)
+    p_deploy.add_argument("--strict_parity", action=argparse.BooleanOptionalAction, default=None)
+    p_deploy.add_argument("--action_smoothing_alpha", type=float, default=None)
+    p_deploy.add_argument("--action_scale", type=float, nargs="+", default=None)
     p_deploy.add_argument("--device", default=None)
     p_deploy.add_argument("--record_path", default=None)
 
@@ -461,6 +554,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "eval":
         cfg = load_config(args.config, overrides=_apply_eval_overrides(args))
         run_eval(cfg)
+        return 0
+
+    if args.command == "ablate-eval":
+        overrides = list(args.overrides or [])
+        _append_override(overrides, "experiment.name", args.run_name)
+        _append_override(overrides, "experiment.seed", args.seed)
+        _append_override(overrides, "eval.checkpoint", args.checkpoint)
+        _append_override(overrides, "eval.action_stats_path", args.action_stats)
+        _append_override(overrides, "eval.n_episodes", args.n_episodes)
+        _append_override(overrides, "eval.max_steps", args.max_steps)
+        _append_override(overrides, "eval.strict_parity", args.strict_parity)
+        cfg = load_config(args.config, overrides=overrides)
+        run_eval_ablation(
+            cfg,
+            execute_steps_values=_parse_csv_values(args.execute_steps_values, int),
+            flow_steps_values=_parse_csv_values(args.n_flow_steps_values, int),
+            smoothing_values=_parse_csv_values(args.smoothing_values, float),
+        )
         return 0
 
     if args.command == "deploy-sim":

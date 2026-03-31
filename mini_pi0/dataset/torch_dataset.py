@@ -20,6 +20,7 @@ class ActionChunkDataset(Dataset):
         episodes: list[EpisodeData],
         chunk_size: int,
         image_key: str,
+        image_keys: list[str] | None,
         proprio_keys: list[str],
         action_stats: ActionStats,
         observation_key: str | None = None,
@@ -29,7 +30,8 @@ class ActionChunkDataset(Dataset):
         Args:
             episodes: Canonical demonstration episodes.
             chunk_size: Number of consecutive actions predicted per sample.
-            image_key: Observation image key.
+            image_key: Backward-compatible single image key.
+            image_keys: Optional list of image keys for multi-camera conditioning.
             proprio_keys: Ordered proprioception keys for vector concatenation.
             action_stats: Statistics used to normalize action targets.
             observation_key: Override observation key used as model visual input.
@@ -39,6 +41,9 @@ class ActionChunkDataset(Dataset):
         self.samples: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         self.chunk_size = int(chunk_size)
         obs_key = str(observation_key or image_key)
+        cam_keys = [str(k).strip() for k in (image_keys or []) if str(k).strip()]
+        if not cam_keys:
+            cam_keys = [str(image_key)]
 
         for ep in episodes:
             obs_seq = ep.obs
@@ -46,7 +51,32 @@ class ActionChunkDataset(Dataset):
             n = max(0, len(obs_seq) - self.chunk_size + 1)
             for t in range(n):
                 obs_t = obs_seq[t]
-                visual = np.asarray(obs_t[obs_key])
+                if observation_key is not None:
+                    visual = np.asarray(obs_t[obs_key])
+                elif len(cam_keys) == 1:
+                    visual = np.asarray(obs_t[cam_keys[0]])
+                else:
+                    visual_parts = [np.asarray(obs_t[k]) for k in cam_keys]
+                    if all(v.ndim >= 2 for v in visual_parts):
+                        h = visual_parts[0].shape[0]
+                        c = visual_parts[0].shape[2] if visual_parts[0].ndim >= 3 else 1
+                        for idx, part in enumerate(visual_parts[1:], start=1):
+                            part_h = part.shape[0]
+                            part_c = part.shape[2] if part.ndim >= 3 else 1
+                            if part_h != h or part_c != c:
+                                raise ValueError(
+                                    "All image_keys must share height and channels for image fusion. "
+                                    f"Got {visual_parts[0].shape} and {part.shape} at index {idx}."
+                                )
+                        # Keep 3 channels by stitching cameras along width.
+                        visual = np.concatenate([v.astype(np.uint8) for v in visual_parts], axis=1)
+                    elif all(v.ndim == 1 for v in visual_parts):
+                        visual = np.concatenate([v.astype(np.float32).reshape(-1) for v in visual_parts], axis=0)
+                    else:
+                        raise ValueError(
+                            "Mixed visual tensor ranks across image_keys are not supported. "
+                            f"Shapes: {[tuple(v.shape) for v in visual_parts]}"
+                        )
                 if visual.ndim >= 2:
                     visual = visual.astype(np.uint8)
                 else:

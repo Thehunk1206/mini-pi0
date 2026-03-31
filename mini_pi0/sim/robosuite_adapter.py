@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from mini_pi0.config.schema import RootConfig, effective_state_keys
+from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.sim.base import SimulatorAdapter, StepOutput
 
 
@@ -82,8 +82,43 @@ class RobosuiteAdapter(SimulatorAdapter):
         """
 
         suite = self.suite
+        requested = str(self.cfg.simulator.controller).strip()
+        requested_upper = requested.upper()
+        single_arm_alias = {
+            "BASIC": "OSC_POSE",
+            "OSC_POSE": "OSC_POSE",
+            "OSC_POSITION": "OSC_POSITION",
+            "JOINT_POSITION": "JOINT_POSITION",
+            "JOINT_VELOCITY": "JOINT_VELOCITY",
+            "IK_POSE": "IK_POSE",
+        }
         if hasattr(suite, "load_controller_config"):
-            return suite.load_controller_config(default_controller="OSC_POSE")
+            tried: list[str] = []
+            candidates = []
+            if requested:
+                candidates.append(requested)
+            mapped = single_arm_alias.get(requested_upper)
+            if mapped and mapped not in candidates:
+                candidates.append(mapped)
+            if "OSC_POSE" not in candidates:
+                candidates.append("OSC_POSE")
+
+            for cand in candidates:
+                tried.append(cand)
+                try:
+                    out = suite.load_controller_config(default_controller=cand)
+                    print(
+                        f"[robosuite] controller_config=load_controller_config default_controller={cand} "
+                        f"(requested={requested or 'none'})",
+                        flush=True,
+                    )
+                    return out
+                except Exception:
+                    continue
+            raise RuntimeError(
+                "Failed to load robosuite single-arm controller config. "
+                f"requested={requested!r}, tried={tried}"
+            )
         if hasattr(suite, "load_composite_controller_config"):
             cfg = suite.load_composite_controller_config(controller=self.cfg.simulator.controller, robot=robot)
             body_parts = cfg.get("body_parts", None)
@@ -92,6 +127,11 @@ class RobosuiteAdapter(SimulatorAdapter):
                 if preferred:
                     keep = set(preferred)
                     cfg["body_parts"] = {k: v for k, v in body_parts.items() if k in keep}
+            print(
+                f"[robosuite] controller_config=load_composite_controller_config "
+                f"controller={self.cfg.simulator.controller} robot={robot}",
+                flush=True,
+            )
             return cfg
         raise RuntimeError("Unsupported robosuite controller API")
 
@@ -105,11 +145,10 @@ class RobosuiteAdapter(SimulatorAdapter):
             Canonical observation dictionary with configured keys/dtypes.
         """
 
-        image_key = self.cfg.robot.image_key
-        image_src = self._resolve_obs_key(obs, image_key)
-        out = {
-            image_key: np.asarray(obs[image_src], dtype=np.uint8),
-        }
+        out: dict[str, np.ndarray] = {}
+        for image_key in effective_image_keys(self.cfg.robot):
+            image_src = self._resolve_obs_key(obs, image_key)
+            out[image_key] = np.asarray(obs[image_src], dtype=np.uint8)
         for key in self._state_keys:
             src = self._resolve_obs_key(obs, key)
             out[key] = np.asarray(obs[src], dtype=np.float32)
