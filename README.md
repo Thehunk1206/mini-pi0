@@ -6,12 +6,18 @@
 
 `mini-pi0` is a modular research and development codebase for training and evaluating flow-matching robot action policies from demonstrations.
 
+## Demo
+
+<video src="./assets/success_grid_3x3.mp4" controls muted loop width="400"></video>
+
+
 It includes:
 - unified CLI for train / eval / deploy-sim / vision precompute
 - typed YAML config system with CLI overrides
 - modular simulator adapters (Robosuite runtime, ManiSkill3 + IsaacLab scaffolds)
 - native `robomimic_hdf5` and `lerobot_hf` dataset loading
 - image and precomputed-vision conditioning pipelines
+- model registry with `mini_pi0_fm` and `mini_pi0_crossflow` (DiT-style cross-attention policy)
 
 ## Current Backend Status
 
@@ -42,6 +48,7 @@ mini_pi0/
 
 examples/configs/
   robosuite_can_vision.yaml
+  robosuite_can_crossflow.yaml
   robosuite_lift.yaml
   robosuite_lift_lerobot.yaml
   robosuite_lift_robomimic.yaml
@@ -129,6 +136,95 @@ Expected source schema:
 - `robomimic_hdf5`: `/<data_group>/<demo_k>/actions` and `/<data_group>/<demo_k>/obs/...`
 - `lerobot_hf`: flattened feature keys such as `observation.images.*`, `observation.state.*`, `action`, `episode_index`
 
+## CrossFlow Policy (New)
+
+`mini_pi0_crossflow` is the newer policy path in this repo for image-conditioned flow-matching:
+- DiT-style alternating **self-attention + cross-attention** denoiser blocks.
+- Multi-token vision context (spatial grid tokens) instead of a single pooled token.
+- Optional timestep-conditioned AdaLN modulation in denoiser blocks.
+- Better macOS MPS robustness for image tokenization path.
+
+Key model fields:
+- `model.name='mini_pi0_crossflow'`
+- `model.vision_token_grid_size` (default `4`)
+- `model.use_dit_adaln` (default `true`)
+
+Reference config:
+- `examples/configs/robosuite_can_crossflow.yaml`
+
+### CrossFlow Train (Recommended)
+
+```bash
+.venv/bin/python -u -m mini_pi0 train \
+  --config examples/configs/robosuite_can_crossflow.yaml \
+  --set experiment.name='robosuite-can-crossflow' \
+  --set data.lerobot_repo_id='robotgeneralist/robosuite_can_ph' \
+  --set train.device=auto
+```
+
+### CrossFlow Eval (Recommended)
+
+```bash
+RUN_DIR="runs/robosuite-can-crossflow/run1"
+
+.venv/bin/python -u -m mini_pi0 eval \
+  --config examples/configs/robosuite_can_crossflow.yaml \
+  --set eval.checkpoint="$RUN_DIR/checkpoints/best.pt" \
+  --set eval.action_stats_path="$RUN_DIR/artifacts/action_stats.json" \
+  --set eval.run_dir="$RUN_DIR" \
+  --set eval.verbose=true \
+  --set eval.log_every_episodes=1
+```
+
+### Data Curation Filters (Train)
+
+For small/noisy datasets, use curation before chunking:
+- `--filter_min_episode_length`
+- `--filter_min_action_std`
+- `--filter_min_state_delta`
+- `--filter_state_delta_key`
+- `--filter_drop_nan / --no-filter_drop_nan`
+
+Example:
+
+```bash
+.venv/bin/python -u -m mini_pi0 train \
+  --config examples/configs/robosuite_can_crossflow.yaml \
+  --filter_min_episode_length 24 \
+  --filter_min_action_std 0.01 \
+  --filter_min_state_delta 0.02 \
+  --filter_state_delta_key 'observation.state.object' \
+  --filter_drop_nan
+```
+
+The curation summary is saved in:
+- `runs/<exp>/runN/metrics/train_summary.json` under `data_curation`.
+
+### Warmup Stability Controls (Eval / Deploy)
+
+Use conservative rollout controls for the first N env steps, then switch to base values:
+- `stability_warmup_steps`
+- `stability_warmup_execute_steps`
+- `stability_warmup_n_flow_steps`
+- `stability_warmup_action_smoothing_alpha`
+
+CLI flags:
+- Eval: `--stability_warmup_steps`, `--stability_warmup_execute_steps`, `--stability_warmup_n_flow_steps`, `--stability_warmup_action_smoothing_alpha`
+- Deploy-sim: same flags
+
+Example eval:
+
+```bash
+.venv/bin/python -u -m mini_pi0 eval \
+  --config examples/configs/robosuite_can_crossflow.yaml \
+  --set eval.checkpoint='runs/robosuite-can-crossflow/run1/checkpoints/best.pt' \
+  --set eval.action_stats_path='runs/robosuite-can-crossflow/run1/artifacts/action_stats.json' \
+  --stability_warmup_steps 40 \
+  --stability_warmup_execute_steps 2 \
+  --stability_warmup_n_flow_steps 15 \
+  --stability_warmup_action_smoothing_alpha 0.2
+```
+
 ## Quickstart (Can Task, Wrist Camera, Vision Features)
 
 This is the recommended path for your current setup.
@@ -207,6 +303,7 @@ Useful eval options:
 - `--verbose --log_every_episodes 1` for per-episode progress logs
 - `--strict_parity` (default) to fail fast when checkpoint/runtime config mismatches
 - `--set eval.action_smoothing_alpha=0.2` to smooth actions between replans
+- `--stability_warmup_steps`, `--stability_warmup_execute_steps`, `--stability_warmup_n_flow_steps`, `--stability_warmup_action_smoothing_alpha` for early-rollout stabilization
 - `--set eval.action_scale='[1,1,1,1,1,1,1]'` for per-dimension action scaling
 - `--set eval.record_grid=true` to save success/failure 3x3 grid videos
 - `--set eval.max_steps=200` to cap rollout horizon

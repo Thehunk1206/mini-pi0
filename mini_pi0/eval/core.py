@@ -71,6 +71,29 @@ def _resolve_action_scale(scale: list[float] | None, target_dim: int) -> np.ndar
     return arr
 
 
+def _resolve_eval_rollout_controls(cfg: RootConfig, env_steps_done: int) -> tuple[int, int, float]:
+    """Resolve execute/flow/smoothing controls with optional warmup overrides."""
+
+    execute_steps = int(max(1, cfg.eval.execute_steps))
+    n_flow_steps = int(max(1, cfg.eval.n_flow_steps))
+    smooth_alpha = float(max(0.0, min(1.0, getattr(cfg.eval, "action_smoothing_alpha", 0.0))))
+
+    warmup_steps = int(max(0, getattr(cfg.eval, "stability_warmup_steps", 0)))
+    if warmup_steps <= 0 or env_steps_done >= warmup_steps:
+        return execute_steps, n_flow_steps, smooth_alpha
+
+    warm_exec = getattr(cfg.eval, "stability_warmup_execute_steps", None)
+    warm_flow = getattr(cfg.eval, "stability_warmup_n_flow_steps", None)
+    warm_smooth = getattr(cfg.eval, "stability_warmup_action_smoothing_alpha", None)
+    if warm_exec is not None:
+        execute_steps = int(max(1, warm_exec))
+    if warm_flow is not None:
+        n_flow_steps = int(max(1, warm_flow))
+    if warm_smooth is not None:
+        smooth_alpha = float(max(0.0, min(1.0, warm_smooth)))
+    return execute_steps, n_flow_steps, smooth_alpha
+
+
 def _classify_failure_reason(
     *,
     success: bool,
@@ -165,7 +188,7 @@ def evaluate(
             "[eval] Starting evaluation: "
             f"episodes={n_episodes}, execute_steps={int(cfg.eval.execute_steps)}, "
             f"n_flow_steps={int(cfg.eval.n_flow_steps)}, max_steps={cfg.eval.max_steps}, "
-            f"smoothing_alpha={smooth_alpha:.2f}",
+            f"smoothing_alpha={smooth_alpha:.2f}, warmup_steps={int(max(0, getattr(cfg.eval, 'stability_warmup_steps', 0)))}",
             flush=True,
         )
 
@@ -215,21 +238,22 @@ def evaluate(
 
         while True:
             if not action_buffer:
+                execute_steps, n_flow_steps, smooth_alpha_chunk = _resolve_eval_rollout_controls(cfg, steps)
                 img, prop = processor.obs_to_tensors(obs)
                 t0 = time.perf_counter()
                 with torch.no_grad():
-                    chunk = model.sample(img, prop, n_steps=int(cfg.eval.n_flow_steps)).squeeze(0)
+                    chunk = model.sample(img, prop, n_steps=n_flow_steps).squeeze(0)
                 t_infer += time.perf_counter() - t0
                 chunks += 1
 
                 chunk = processor.denormalize(chunk).detach().cpu().numpy()
                 proposed = []
-                for a in chunk[: int(cfg.eval.execute_steps)]:
+                for a in chunk[:execute_steps]:
                     raw = _reshape_action(a, target_dim=action_dim)
                     if action_scale is not None:
                         raw = raw * action_scale
-                    if prev_action is not None and smooth_alpha > 0.0:
-                        raw = (1.0 - smooth_alpha) * raw + smooth_alpha * prev_action
+                    if prev_action is not None and smooth_alpha_chunk > 0.0:
+                        raw = (1.0 - smooth_alpha_chunk) * raw + smooth_alpha_chunk * prev_action
                     clipped = np.clip(raw, lo, hi).astype(np.float32)
                     if np.any(np.abs(raw - clipped) > 1e-6):
                         clip_count += 1

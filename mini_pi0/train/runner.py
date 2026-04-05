@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Subset
 
 from mini_pi0.config.io import dump_config
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys, to_dict
-from mini_pi0.dataset.episodes import load_episodes_from_config
+from mini_pi0.dataset.episodes import EpisodeData, load_episodes_from_config
 from mini_pi0.dataset.stats import ActionStats
 from mini_pi0.dataset.torch_dataset import ActionChunkDataset
 from mini_pi0.models.registry import (
@@ -210,6 +210,119 @@ def _split_train_val(dataset, val_ratio: float, seed: int) -> tuple[Any, Any | N
     return Subset(dataset, train_idx), Subset(dataset, val_idx)
 
 
+def _infer_progress_key(first_obs: dict[str, np.ndarray], preferred_key: str | None) -> str | None:
+    """Pick an observation key used for simple episode progress filtering."""
+
+    candidates: list[str] = []
+    if preferred_key:
+        candidates.append(str(preferred_key))
+    candidates.extend(
+        [
+            "observation.state.object",
+            "object-state",
+            "object",
+            "observation.state.eef_pos",
+            "robot0_eef_pos",
+        ]
+    )
+    for key in candidates:
+        if key in first_obs:
+            return key
+    return None
+
+
+def _has_nonfinite_episode(ep: EpisodeData) -> bool:
+    """Return ``True`` when episode contains NaN / Inf values."""
+
+    actions = np.asarray(ep.actions)
+    if not np.isfinite(actions).all():
+        return True
+    for obs_t in ep.obs:
+        for v in obs_t.values():
+            arr = np.asarray(v)
+            if not np.isfinite(arr).all():
+                return True
+    return False
+
+
+def _episode_progress_delta(ep: EpisodeData, key: str | None) -> float | None:
+    """Compute start/end state delta for one episode and key."""
+
+    if key is None or not ep.obs:
+        return None
+    if key not in ep.obs[0] or key not in ep.obs[-1]:
+        return None
+    a = np.asarray(ep.obs[0][key], dtype=np.float32).reshape(-1)
+    b = np.asarray(ep.obs[-1][key], dtype=np.float32).reshape(-1)
+    d = min(a.shape[0], b.shape[0])
+    if d <= 0:
+        return None
+    return float(np.linalg.norm(b[:d] - a[:d]))
+
+
+def _curate_episodes(episodes: list[EpisodeData], cfg: RootConfig) -> tuple[list[EpisodeData], dict[str, Any]]:
+    """Apply lightweight data-quality filtering for small-data robustness."""
+
+    min_len = int(max(0, getattr(cfg.data, "filter_min_episode_length", 0)))
+    min_action_std = float(max(0.0, getattr(cfg.data, "filter_min_action_std", 0.0)))
+    min_state_delta = float(max(0.0, getattr(cfg.data, "filter_min_state_delta", 0.0)))
+    preferred_state_key = getattr(cfg.data, "filter_state_delta_key", None)
+    drop_nan = bool(getattr(cfg.data, "filter_drop_nan", True))
+
+    summary: dict[str, Any] = {
+        "enabled": bool(drop_nan or min_len > 0 or min_action_std > 0.0 or min_state_delta > 0.0),
+        "before_episodes": int(len(episodes)),
+        "after_episodes": int(len(episodes)),
+        "removed_episodes": 0,
+        "reasons": {},
+        "progress_key": None,
+        "thresholds": {
+            "drop_nan": drop_nan,
+            "min_episode_length": min_len,
+            "min_action_std": min_action_std,
+            "min_state_delta": min_state_delta,
+            "preferred_state_delta_key": preferred_state_key,
+        },
+    }
+    if not episodes or not summary["enabled"]:
+        return episodes, summary
+
+    progress_key = _infer_progress_key(episodes[0].obs[0], preferred_state_key) if episodes[0].obs else None
+    summary["progress_key"] = progress_key
+
+    keep: list[EpisodeData] = []
+    reasons: dict[str, int] = {}
+    for ep in episodes:
+        reason: str | None = None
+        t = int(np.asarray(ep.actions).shape[0]) if np.asarray(ep.actions).ndim >= 1 else 0
+        if min_len > 0 and t < min_len:
+            reason = "short_episode"
+        elif drop_nan and _has_nonfinite_episode(ep):
+            reason = "non_finite_values"
+        elif min_action_std > 0.0:
+            act_std = float(np.asarray(ep.actions, dtype=np.float32).std())
+            if act_std < min_action_std:
+                reason = "low_action_std"
+        if reason is None and min_state_delta > 0.0:
+            delta = _episode_progress_delta(ep, progress_key)
+            if delta is not None and delta < min_state_delta:
+                reason = "low_state_progress"
+        if reason is None:
+            keep.append(ep)
+        else:
+            reasons[reason] = reasons.get(reason, 0) + 1
+
+    summary["after_episodes"] = int(len(keep))
+    summary["removed_episodes"] = int(len(episodes) - len(keep))
+    summary["reasons"] = reasons
+    if not keep:
+        raise ValueError(
+            "Data curation removed all episodes. Relax filters under data.filter_* "
+            f"(summary={summary})."
+        )
+    return keep, summary
+
+
 def _build_scheduler(
     optimizer: torch.optim.Optimizer,
     cfg: RootConfig,
@@ -309,6 +422,17 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     )
     episodes = load_episodes_from_config(cfg)
     print(f"[train] Dataset loaded | episodes={len(episodes)}", flush=True)
+    episodes, curation_summary = _curate_episodes(episodes, cfg)
+    if curation_summary.get("enabled", False):
+        print(
+            "[train] Data curation | "
+            f"before={curation_summary['before_episodes']} after={curation_summary['after_episodes']} "
+            f"removed={curation_summary['removed_episodes']} "
+            f"progress_key={curation_summary.get('progress_key')}",
+            flush=True,
+        )
+        if curation_summary.get("reasons"):
+            print(f"[train] Data curation reasons | {curation_summary['reasons']}", flush=True)
     state_keys = effective_state_keys(cfg.robot)
     image_keys = effective_image_keys(cfg.robot)
     obs_mode_cfg = str(getattr(cfg.data, "observation_mode", "image")).strip().lower()
@@ -658,6 +782,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         "train_samples": int(len(train_dataset)),
         "val_samples": int(len(val_dataset) if val_dataset is not None else 0),
         "episodes": int(len(episodes)),
+        "data_curation": curation_summary,
         "best_checkpoint": str(run_ckpt_dir / "best.pt"),
         "action_stats": str(run_stats_path),
     }

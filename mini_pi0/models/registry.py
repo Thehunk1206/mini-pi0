@@ -65,6 +65,8 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
         "state_additive_noise_scale": getattr(cfg, "state_additive_noise_scale", 0.0),
         "add_action_pos_embed": getattr(cfg, "add_action_pos_embed", True),
         "use_context_layernorm": getattr(cfg, "use_context_layernorm", True),
+        "vision_token_grid_size": getattr(cfg, "vision_token_grid_size", 4),
+        "use_dit_adaln": getattr(cfg, "use_dit_adaln", True),
     }
     sig = inspect.signature(cls.__init__)
     for k, v in optional_kwargs.items():
@@ -151,6 +153,8 @@ def build_checkpoint_payload(
             "state_additive_noise_scale": getattr(cfg.model, "state_additive_noise_scale", 0.0),
             "add_action_pos_embed": getattr(cfg.model, "add_action_pos_embed", True),
             "use_context_layernorm": getattr(cfg.model, "use_context_layernorm", True),
+            "vision_token_grid_size": getattr(cfg.model, "vision_token_grid_size", 4),
+            "use_dit_adaln": getattr(cfg.model, "use_dit_adaln", True),
         },
         "sim_backend": cfg.simulator.backend,
         "sim_config": {
