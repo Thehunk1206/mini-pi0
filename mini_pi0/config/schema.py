@@ -148,6 +148,11 @@ class DataConfig:
         n_demos: Optional max number of demos to load.
         chunk_size: Action horizon length per supervised training sample.
         action_stats_path: Output/input path for action normalization statistics.
+        filter_min_episode_length: Drop episodes shorter than this many timesteps (0 disables).
+        filter_min_action_std: Drop episodes with action std below this threshold (0 disables).
+        filter_min_state_delta: Drop episodes with low start/end state movement (0 disables).
+        filter_state_delta_key: Preferred observation key used for state-progress filtering.
+        filter_drop_nan: Drop episodes containing NaN/Inf values in observations or actions.
     """
 
     format: str = "robomimic_hdf5"
@@ -165,6 +170,11 @@ class DataConfig:
     n_demos: int | None = 200
     chunk_size: int = 16
     action_stats_path: str = "action_stats.json"
+    filter_min_episode_length: int = 0
+    filter_min_action_std: float = 0.0
+    filter_min_state_delta: float = 0.0
+    filter_state_delta_key: str | None = "observation.state.object"
+    filter_drop_nan: bool = True
 
 
 @dataclass
@@ -190,6 +200,8 @@ class ModelConfig:
         state_additive_noise_scale: Gaussian noise scale added to state token during training.
         add_action_pos_embed: Enable learned positional embeddings for action tokens.
         use_context_layernorm: Apply LayerNorm to context tokens before denoiser.
+        vision_token_grid_size: Spatial token grid size per side for image-mode context.
+        use_dit_adaln: Enable DiT-style timestep-conditioned AdaLN modulation in denoiser blocks.
     """
 
     name: str = "mini_pi0_fm"
@@ -210,6 +222,8 @@ class ModelConfig:
     state_additive_noise_scale: float = 0.0
     add_action_pos_embed: bool = True
     use_context_layernorm: bool = True
+    vision_token_grid_size: int = 4
+    use_dit_adaln: bool = True
 
 
 @dataclass
@@ -320,6 +334,10 @@ class EvalConfig:
         action_smoothing_alpha: Action exponential smoothing factor in ``[0, 1]`` (0 disables).
         action_scale: Optional per-dimension multiplicative scale applied before clipping.
         failure_reward_threshold: Threshold for classifying failures as ``no_progress``.
+        stability_warmup_steps: Number of initial env steps using warmup rollout controls.
+        stability_warmup_execute_steps: Warmup override for execute steps (null keeps base value).
+        stability_warmup_n_flow_steps: Warmup override for denoising flow steps.
+        stability_warmup_action_smoothing_alpha: Warmup override for action smoothing alpha.
         device: Requested torch device for evaluation.
     """
 
@@ -347,6 +365,10 @@ class EvalConfig:
     action_smoothing_alpha: float = 0.0
     action_scale: list[float] | None = None
     failure_reward_threshold: float = 0.2
+    stability_warmup_steps: int = 0
+    stability_warmup_execute_steps: int | None = None
+    stability_warmup_n_flow_steps: int | None = None
+    stability_warmup_action_smoothing_alpha: float | None = None
     device: str = "auto"
 
 
@@ -365,6 +387,10 @@ class DeployConfig:
         strict_parity: Enforce checkpoint/runtime parity checks before rollout.
         action_smoothing_alpha: Action exponential smoothing factor in ``[0, 1]`` (0 disables).
         action_scale: Optional per-dimension multiplicative scale applied before clipping.
+        stability_warmup_steps: Number of initial env steps using warmup rollout controls.
+        stability_warmup_execute_steps: Warmup override for execute steps (null keeps base value).
+        stability_warmup_n_flow_steps: Warmup override for denoising flow steps.
+        stability_warmup_action_smoothing_alpha: Warmup override for action smoothing alpha.
         device: Requested torch device.
     """
 
@@ -378,6 +404,10 @@ class DeployConfig:
     strict_parity: bool = True
     action_smoothing_alpha: float = 0.0
     action_scale: list[float] | None = None
+    stability_warmup_steps: int = 0
+    stability_warmup_execute_steps: int | None = None
+    stability_warmup_n_flow_steps: int | None = None
+    stability_warmup_action_smoothing_alpha: float | None = None
     device: str = "auto"
 
 

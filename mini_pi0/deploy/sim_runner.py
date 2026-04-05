@@ -41,6 +41,29 @@ def _reshape_action(action: np.ndarray, target_dim: int) -> np.ndarray:
     return out
 
 
+def _resolve_deploy_rollout_controls(cfg: RootConfig, env_steps_done: int) -> tuple[int, int, float]:
+    """Resolve execute/flow/smoothing controls with optional warmup overrides."""
+
+    execute_steps = int(max(1, cfg.deploy.execute_steps))
+    n_flow_steps = int(max(1, cfg.deploy.n_flow_steps))
+    smooth_alpha = float(max(0.0, min(1.0, getattr(cfg.deploy, "action_smoothing_alpha", 0.0))))
+
+    warmup_steps = int(max(0, getattr(cfg.deploy, "stability_warmup_steps", 0)))
+    if warmup_steps <= 0 or env_steps_done >= warmup_steps:
+        return execute_steps, n_flow_steps, smooth_alpha
+
+    warm_exec = getattr(cfg.deploy, "stability_warmup_execute_steps", None)
+    warm_flow = getattr(cfg.deploy, "stability_warmup_n_flow_steps", None)
+    warm_smooth = getattr(cfg.deploy, "stability_warmup_action_smoothing_alpha", None)
+    if warm_exec is not None:
+        execute_steps = int(max(1, warm_exec))
+    if warm_flow is not None:
+        n_flow_steps = int(max(1, warm_flow))
+    if warm_smooth is not None:
+        smooth_alpha = float(max(0.0, min(1.0, warm_smooth)))
+    return execute_steps, n_flow_steps, smooth_alpha
+
+
 def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> None:
     """Merge checkpoint model metadata into runtime config.
 
@@ -192,17 +215,17 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
     lo, hi = adapter.action_spec()
     action_dim = int(np.asarray(lo).reshape(-1).shape[0])
     action_scale = np.asarray(cfg.deploy.action_scale, dtype=np.float32).reshape(-1) if cfg.deploy.action_scale else None
-    smooth_alpha = float(max(0.0, min(1.0, getattr(cfg.deploy, "action_smoothing_alpha", 0.0))))
     prev_action: np.ndarray | None = None
 
-    for _ in range(int(cfg.deploy.max_steps)):
+    for step_idx in range(int(cfg.deploy.max_steps)):
         if not action_buffer:
+            execute_steps, n_flow_steps, smooth_alpha = _resolve_deploy_rollout_controls(cfg, step_idx)
             img, prop = processor.obs_to_tensors(obs)
             with torch.no_grad():
-                chunk = model.sample(img, prop, n_steps=int(cfg.deploy.n_flow_steps)).squeeze(0)
+                chunk = model.sample(img, prop, n_steps=n_flow_steps).squeeze(0)
             chunk = processor.denormalize(chunk).detach().cpu().numpy()
             proposed = []
-            for a in chunk[: int(cfg.deploy.execute_steps)]:
+            for a in chunk[:execute_steps]:
                 x = _reshape_action(a, target_dim=action_dim)
                 if action_scale is not None and action_scale.shape[0] == action_dim:
                     x = x * action_scale

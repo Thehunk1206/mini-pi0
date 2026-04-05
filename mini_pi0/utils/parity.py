@@ -94,6 +94,8 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             "state_additive_noise_scale",
             "add_action_pos_embed",
             "use_context_layernorm",
+            "vision_token_grid_size",
+            "use_dit_adaln",
         ):
             if key not in model_cfg:
                 continue

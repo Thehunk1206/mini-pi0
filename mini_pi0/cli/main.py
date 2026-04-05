@@ -103,6 +103,11 @@ def _apply_train_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "data.n_demos", args.n_demos)
     _append_override(overrides, "data.chunk_size", args.chunk_size)
     _append_override(overrides, "data.action_stats_path", args.action_stats)
+    _append_override(overrides, "data.filter_min_episode_length", args.filter_min_episode_length)
+    _append_override(overrides, "data.filter_min_action_std", args.filter_min_action_std)
+    _append_override(overrides, "data.filter_min_state_delta", args.filter_min_state_delta)
+    _append_override(overrides, "data.filter_state_delta_key", args.filter_state_delta_key)
+    _append_override(overrides, "data.filter_drop_nan", args.filter_drop_nan)
 
     _append_override(overrides, "robot.action_dim", args.action_dim)
     _append_override(overrides, "model.action_dim", args.action_dim)
@@ -226,6 +231,14 @@ def _apply_eval_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "eval.grid_width", args.grid_width)
     _append_override(overrides, "eval.grid_height", args.grid_height)
     _append_override(overrides, "eval.plot_path", args.plot_path)
+    _append_override(overrides, "eval.stability_warmup_steps", args.stability_warmup_steps)
+    _append_override(overrides, "eval.stability_warmup_execute_steps", args.stability_warmup_execute_steps)
+    _append_override(overrides, "eval.stability_warmup_n_flow_steps", args.stability_warmup_n_flow_steps)
+    _append_override(
+        overrides,
+        "eval.stability_warmup_action_smoothing_alpha",
+        args.stability_warmup_action_smoothing_alpha,
+    )
     if args.action_scale is not None:
         _append_override(overrides, "eval.action_scale", list(args.action_scale))
 
@@ -273,6 +286,14 @@ def _apply_deploy_sim_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "deploy.max_steps", args.max_steps)
     _append_override(overrides, "deploy.strict_parity", args.strict_parity)
     _append_override(overrides, "deploy.action_smoothing_alpha", args.action_smoothing_alpha)
+    _append_override(overrides, "deploy.stability_warmup_steps", args.stability_warmup_steps)
+    _append_override(overrides, "deploy.stability_warmup_execute_steps", args.stability_warmup_execute_steps)
+    _append_override(overrides, "deploy.stability_warmup_n_flow_steps", args.stability_warmup_n_flow_steps)
+    _append_override(
+        overrides,
+        "deploy.stability_warmup_action_smoothing_alpha",
+        args.stability_warmup_action_smoothing_alpha,
+    )
     _append_override(overrides, "deploy.device", args.device)
     _append_override(overrides, "deploy.record_path", args.record_path)
     if args.action_scale is not None:
@@ -381,6 +402,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--fallback_image_hw", type=int, nargs=2, default=None)
     p_train.add_argument("--n_demos", type=int, default=None)
     p_train.add_argument("--chunk_size", type=int, default=None)
+    p_train.add_argument("--filter_min_episode_length", type=int, default=None)
+    p_train.add_argument("--filter_min_action_std", type=float, default=None)
+    p_train.add_argument("--filter_min_state_delta", type=float, default=None)
+    p_train.add_argument("--filter_state_delta_key", default=None)
+    p_train.add_argument("--filter_drop_nan", action=argparse.BooleanOptionalAction, default=None)
     p_train.add_argument("--action_dim", type=int, default=None)
     p_train.add_argument("--model_obs_mode", choices=["image", "feature"], default=None)
     p_train.add_argument("--model_vision_dim", type=int, default=None)
@@ -444,6 +470,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--grid_fps", type=int, default=None)
     p_eval.add_argument("--grid_width", type=int, default=None)
     p_eval.add_argument("--grid_height", type=int, default=None)
+    p_eval.add_argument("--plot_path", default=None)
+    p_eval.add_argument("--stability_warmup_steps", type=int, default=None)
+    p_eval.add_argument("--stability_warmup_execute_steps", type=int, default=None)
+    p_eval.add_argument("--stability_warmup_n_flow_steps", type=int, default=None)
+    p_eval.add_argument("--stability_warmup_action_smoothing_alpha", type=float, default=None)
     p_eval.add_argument("--cube_xy", type=float, nargs=2, default=None)
     p_eval.add_argument("--cube_xy_range", type=float, nargs=4, default=None)
     p_eval.add_argument("--cube_z", type=float, default=None)
@@ -491,6 +522,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_deploy.add_argument("--max_steps", type=int, default=None)
     p_deploy.add_argument("--strict_parity", action=argparse.BooleanOptionalAction, default=None)
     p_deploy.add_argument("--action_smoothing_alpha", type=float, default=None)
+    p_deploy.add_argument("--stability_warmup_steps", type=int, default=None)
+    p_deploy.add_argument("--stability_warmup_execute_steps", type=int, default=None)
+    p_deploy.add_argument("--stability_warmup_n_flow_steps", type=int, default=None)
+    p_deploy.add_argument("--stability_warmup_action_smoothing_alpha", type=float, default=None)
     p_deploy.add_argument("--action_scale", type=float, nargs="+", default=None)
     p_deploy.add_argument("--device", default=None)
     p_deploy.add_argument("--record_path", default=None)

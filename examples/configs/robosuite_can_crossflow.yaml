@@ -44,6 +44,11 @@ data:
   n_demos: 200
   chunk_size: 16
   action_stats_path: action_stats.json
+  filter_min_episode_length: 24
+  filter_min_action_std: 0.01
+  filter_min_state_delta: 0.02
+  filter_state_delta_key: observation.state.object
+  filter_drop_nan: true
 
 vision:
   backend: timm
@@ -66,7 +71,7 @@ model:
   cond_dim: 256
   d_model: 384
   nhead: 6
-  nlayers: 6
+  nlayers: 4
   num_timestep_buckets: 1000
   noise_beta_alpha: 1.5
   noise_beta_beta: 1.0
@@ -75,9 +80,11 @@ model:
   state_additive_noise_scale: 0.01
   add_action_pos_embed: true
   use_context_layernorm: true
+  vision_token_grid_size: 4
+  use_dit_adaln: true
 
 train:
-  epochs: 200
+  epochs: 100
   batch_size: 256
   lr: 0.0001
   lr_scheduler: cosine
@@ -109,6 +116,10 @@ eval:
   action_smoothing_alpha: 0.0
   action_scale: null
   failure_reward_threshold: 0.2
+  stability_warmup_steps: 40
+  stability_warmup_execute_steps: 2
+  stability_warmup_n_flow_steps: 15
+  stability_warmup_action_smoothing_alpha: 0.2
   verbose: true
   log_every_episodes: 1
   record: false
@@ -134,5 +145,9 @@ deploy:
   strict_parity: true
   action_smoothing_alpha: 0.0
   action_scale: null
+  stability_warmup_steps: 40
+  stability_warmup_execute_steps: 2
+  stability_warmup_n_flow_steps: 15
+  stability_warmup_action_smoothing_alpha: 0.2
   record_path: null
   device: auto
