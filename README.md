@@ -8,7 +8,9 @@
 
 ## Demo
 
-<video src="./assets/success_grid_3x3.mp4" controls muted loop width="400"></video>
+[![Success Demo](./assets/success_grid_3x3_preview.gif)](./assets/success_grid_3x3.mp4)
+
+If the preview does not animate in your viewer, open the video directly: [success_grid_3x3.mp4](./assets/success_grid_3x3.mp4)
 
 
 It includes:
