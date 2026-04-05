@@ -8,10 +8,7 @@
 
 ## Demo
 
-[![Success Demo](./assets/success_grid_3x3_preview.gif)](./assets/success_grid_3x3.mp4)
-
-If the preview does not animate in your viewer, open the video directly: [success_grid_3x3.mp4](./assets/success_grid_3x3.mp4)
-
+![Success Demo](./assets/success_grid_3x3_preview.gif)
 
 It includes:
 - unified CLI for train / eval / deploy-sim / vision precompute
