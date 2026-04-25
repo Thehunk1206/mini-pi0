@@ -80,6 +80,7 @@ Supported formats:
 
 Detailed guide:
 - [docs/DATASETS.md](docs/DATASETS.md)
+- [docs/DATALOADER.md](docs/DATALOADER.md)
 - [docs/ROBOT_DATASET_MAPPING.md](docs/ROBOT_DATASET_MAPPING.md)
 - [docs/SIMULATION.md](docs/SIMULATION.md)
 
