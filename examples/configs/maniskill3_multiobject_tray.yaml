@@ -1,0 +1,126 @@
+experiment:
+  name: maniskill3-multiobject-tray-fm
+  seed: 0
+  runs_root: runs
+
+simulator:
+  backend: maniskill3
+  task: MiniPi0MultiObjectTray-v1
+  robot: panda
+  controller: pd_ee_delta_pose
+  control_freq: 20
+  horizon: 300
+  reward_shaping: true
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [base_camera]
+  camera_width: 128
+  camera_height: 128
+  env_kwargs:
+    obs_mode: state_dict
+    reward_mode: dense
+    control_mode: pd_ee_delta_pose
+    render_backend: gpu
+    sim_backend: auto
+    object_count_min: 1
+    object_count_max: 10
+    object_types: [cube, sphere, cone]
+    # Left side of robot in table frame (+y).
+    tray_center: [0.20, 0.22, 0.006]
+    tray_size_xy: [0.22, 0.22]
+    tray_wall_thickness: 0.008
+    tray_wall_height: 0.035
+    tray_z_tol: 0.03
+    settle_steps_required: 3
+    settle_speed_threshold: 0.03
+    lift_height_threshold: 0.06
+    spawn_min: [-0.10, -0.22]
+    spawn_max: [0.10, 0.22]
+    reward:
+      progress: 8.0
+      place_bonus: 4.0
+      terminal_success: 12.0
+      terminal_timeout: 2.0
+      shaping_eef_to_obj: 0.25
+      shaping_obj_to_tray: 0.35
+      shaping_lift: 0.15
+      penalty_drop: 0.8
+      penalty_collision: 0.1
+      penalty_out_of_workspace: 0.6
+      step_cost: 0.01
+
+task:
+  object_name: multi_object
+
+robot:
+  name: panda
+  action_dim: 7
+  image_key: agentview_image
+  image_keys: [agentview_image]
+  proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+  state_keys:
+    - robot0_eef_pos
+    - robot0_eef_quat
+    - robot0_gripper_qpos
+    - observation.state.object
+
+# Example training data path from collector command.
+data:
+  format: robomimic_hdf5
+  robomimic_hdf5: data/robomimic/custom/maniskill3_multiobject/ph/low_dim_v15.hdf5
+  robomimic_data_group: data
+  fallback_image_hw: [128, 128]
+  n_demos: 200
+  chunk_size: 16
+  action_stats_path: action_stats.json
+
+model:
+  name: mini_pi0_fm
+  action_dim: 7
+  chunk_size: 16
+  cond_dim: 256
+  d_model: 256
+  nhead: 4
+  nlayers: 4
+
+train:
+  epochs: 100
+  batch_size: 128
+  lr: 0.0001
+  weight_decay: 0.0001
+  num_workers: 0
+  persistent_workers: false
+  save_best: true
+  save_best_min_delta: 0.0001
+  grad_clip_norm: 1.0
+  model_print_depth: 2
+  ckpt_dir: checkpoints
+  device: auto
+
+eval:
+  checkpoint: checkpoints/best.pt
+  action_stats_path: action_stats.json
+  n_episodes: 20
+  execute_steps: 6
+  n_flow_steps: 12
+  max_steps: 300
+  strict_parity: true
+  record: false
+  record_grid: false
+  grid_size: 3
+  grid_fps: 20
+  grid_width: 256
+  grid_height: 256
+  device: auto
+
+deploy:
+  mode: sim
+  checkpoint: checkpoints/best.pt
+  action_stats_path: action_stats.json
+  execute_steps: 4
+  n_flow_steps: 12
+  max_steps: 300
+  strict_parity: true
+  record_path: null
+  device: auto

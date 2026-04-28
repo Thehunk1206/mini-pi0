@@ -1,127 +1,90 @@
-# MuJoCo and robosuite Simulation Environment
+# Simulation Environment
 
-This document explains the simulation setup used in this repository and points to the exact implementation files.
+This repo supports three simulator backends through one adapter interface:
 
-## Stack Used in This Repo
+- `robosuite`: full runtime support
+- `maniskill3`: implemented custom task + dataset collection
+- `isaaclab`: scaffold only
 
-- Physics engine: `mujoco`
-- Task + robot API: `robosuite`
-- Repo integration pattern: simulator adapter interface under `mini_pi0/sim/`
+Adapter contract is defined in `mini_pi0/sim/base.py` and registry wiring is in `mini_pi0/sim/registry.py`.
 
-Backend status in this codebase:
-- `robosuite`: implemented and used end-to-end
-- `maniskill3`: scaffolded adapter
-- `isaaclab`: scaffolded adapter
+## ManiSkill3 Custom Task
 
-## Adapter Contract
+Implemented task id:
 
-All simulator backends follow one common interface in `mini_pi0/sim/base.py`:
+- `MiniPi0MultiObjectTray-v1`
 
-- `reset(seed)`
-- `step(action) -> StepOutput`
-- `action_spec() -> (low, high)`
-- `render(camera, width, height)`
-- `check_success(info, obs)`
-- optional `set_object_pose(...)`
-- `close()`
+Task behavior:
 
-Registry wiring is in `mini_pi0/sim/registry.py`.
+- Sample object count uniformly from `1..10`
+- Object types cycle through `cube`, `sphere`, `cone` (cone is a stable primitive proxy)
+- Robot picks each object from table and places in tray
+- Per-step progress signal: `success_fraction = placed_count / total_objects` in `[0, 1]`
+- Boolean success compatibility: `success = (success_fraction == 1.0)`
 
-## robosuite Runtime Path
+Core files:
 
-Main implementation: `mini_pi0/sim/robosuite_adapter.py`
+- `mini_pi0/sim/maniskill3_custom_env.py`
+- `mini_pi0/sim/maniskill3_adapter.py`
+- `mini_pi0/dataset/maniskill_collect.py`
+- `examples/configs/maniskill3_multiobject_tray.yaml`
 
-What it does:
+## Reward Design
 
-1. Creates env via `robosuite.make(...)` using config fields from `simulator.*`.
-2. Handles controller API compatibility:
-   - `load_controller_config(...)` path for older API
-   - `load_composite_controller_config(...)` path for newer API
-3. Maps repo canonical keys to robosuite observation keys.
-4. Clips actions to env limits before stepping.
-5. Uses `info["success"]` and `_check_success()` for task success.
-6. Supports render for recordings / eval artifacts.
+Per-step reward:
 
-## Observation Key Aliases Used
+`r_t = r_progress + r_place + r_terminal + r_shaping - r_penalties - r_step`
 
-Implemented in `_resolve_obs_key(...)` in `mini_pi0/sim/robosuite_adapter.py`:
+Logged terms in `info` every step:
 
-- `observation.images.base_0_rgb` -> `agentview_image`
-- `observation.images.right_wrist_0_rgb` -> `robot0_eye_in_hand_image`
-- `observation.images.wrist_0_rgb` -> `robot0_eye_in_hand_image`
-- `observation.state.eef_pos` -> `robot0_eef_pos`
-- `observation.state.eef_quat` -> `robot0_eef_quat`
-- `observation.state.tool` -> `robot0_gripper_qpos`
-- `observation.state.object` -> `object-state`
+- `reward_total`
+- `reward_progress`
+- `reward_place`
+- `reward_terminal`
+- `reward_shaping`
+- `reward_penalties`
+- `reward_step`
+- `success_fraction`
+- `placed_count`
+- `total_objects`
 
-## Important Config Fields
+Defaults are configured in `RewardWeights` in `mini_pi0/sim/maniskill3_custom_env.py`.
 
-Defined in `mini_pi0/config/schema.py` under `SimulatorConfig`:
-
-- `simulator.backend`
-- `simulator.task`
-- `simulator.robot`
-- `simulator.controller`
-- `simulator.control_freq`
-- `simulator.horizon`
-- `simulator.reward_shaping`
-- `simulator.has_renderer`
-- `simulator.has_offscreen_renderer`
-- `simulator.use_camera_obs`
-- `simulator.camera_names`
-- `simulator.camera_width`
-- `simulator.camera_height`
-- `simulator.env_kwargs`
-
-Reference config examples:
-
-- `examples/configs/robosuite_can_vision.yaml`
-- `examples/configs/robosuite_lift.yaml`
-
-## Where Simulation Is Used
-
-- Evaluation:
-  - `mini_pi0/eval/runner.py`
-  - `mini_pi0/eval/core.py`
-- Deployment:
-  - `mini_pi0/deploy/sim_runner.py`
-- Manual replay / visualization:
-  - `visualize_episodes.py`
-
-## macOS Note (MuJoCo Viewer)
-
-For live interactive viewer windows on macOS, `mjpython` may be required by MuJoCo passive viewer.
-
-`visualize_episodes.py` includes `_maybe_reexec_with_mjpython()` to re-exec under `mjpython` when needed.
-
-## Useful Commands
-
-Check backend availability:
+## Install + Backend Check
 
 ```bash
-python -m mini_pi0 backends
+uv sync --extra dev --extra lerobot --extra vision --extra hardware
+.venv/bin/python -m pip install mani_skill
+.venv/bin/python -m mini_pi0 backends
 ```
 
-List local robosuite robots and mapped datasets:
+## Smoke Run (ManiSkill backend)
 
 ```bash
-python -m mini_pi0 robot-dataset-map
+.venv/bin/python -m mini_pi0 eval \
+  --config examples/configs/maniskill3_multiobject_tray.yaml \
+  --set simulator.backend=maniskill3 \
+  --set simulator.task=MiniPi0MultiObjectTray-v1 \
+  --set eval.n_episodes=1 \
+  --set eval.max_steps=50
 ```
 
-Manual demo replay:
+## Dataset Collection (robomimic-style HDF5)
 
 ```bash
-python visualize_episodes.py --task PickPlaceCan --input_hdf5 <path_to_hdf5>
+.venv/bin/python -m mini_pi0 collect-maniskill-demos \
+  --config examples/configs/maniskill3_multiobject_tray.yaml \
+  --task MiniPi0MultiObjectTray-v1 \
+  --num_episodes 50 \
+  --max_steps 300 \
+  --out_hdf5 data/robomimic/custom/maniskill3_multiobject/ph/low_dim_v15.hdf5 \
+  --overwrite
 ```
 
-If viewer errors on macOS:
+HDF5 layout is robomimic-style under `/data/demo_k` with:
 
-```bash
-mjpython visualize_episodes.py --task PickPlaceCan --input_hdf5 <path_to_hdf5>
-```
-
-## External References
-
-- MuJoCo docs: https://mujoco.readthedocs.io/
-- robosuite docs: https://robosuite.ai/docs/
+- `actions`, `rewards`, `dones`
+- `obs/*` canonical keys
+- `info/*` reward/progress traces
+- attrs: `success_bool`, `placed_count`, `total_objects`, `final_success_fraction`
 

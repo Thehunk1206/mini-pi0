@@ -56,8 +56,14 @@ def backend_status() -> dict[str, dict[str, Any]]:
         ok = True
         msg = "available"
         if name == "maniskill3":
-            ok = False
-            msg = "scaffolded only"
+            try:
+                import mani_skill  # noqa: F401
+
+                ok = True
+                msg = "implemented"
+            except Exception as e:
+                ok = False
+                msg = f"implemented, missing dependency: {type(e).__name__}"
         elif name == "robosuite":
             try:
                 import robosuite  # noqa: F401
