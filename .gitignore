@@ -37,3 +37,4 @@ debug_frames/
 
 *.logs
 data/
+artifacts/

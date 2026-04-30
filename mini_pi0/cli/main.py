@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from mini_pi0.config.io import load_config
+from mini_pi0.dataset.maniskill_collect import collect_maniskill_demos
 from mini_pi0.dataset.episodes import list_supported_dataset_formats
 from mini_pi0.dataset.robomimic_download import download_robomimic_dataset
 from mini_pi0.dataset.robot_dataset_mapping import build_robot_dataset_mapping
@@ -530,6 +531,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_deploy.add_argument("--device", default=None)
     p_deploy.add_argument("--record_path", default=None)
 
+    p_collect_ms = sub.add_parser(
+        "collect-maniskill-demos",
+        help="Collect scripted demos from custom ManiSkill multi-object pick-place task",
+    )
+    _add_common_config_args(p_collect_ms)
+    p_collect_ms.add_argument("--run_name", default=None)
+    p_collect_ms.add_argument("--seed", type=int, default=None)
+    p_collect_ms.add_argument("--task", default=None)
+    p_collect_ms.add_argument("--robot", default=None)
+    p_collect_ms.add_argument("--controller", default=None)
+    p_collect_ms.add_argument("--image_key", default=None)
+    p_collect_ms.add_argument("--image_keys", default=None, help="Comma-separated image observation keys.")
+    p_collect_ms.add_argument("--out_hdf5", default="data/robomimic/custom/maniskill3_multiobject/ph/low_dim_v15.hdf5")
+    p_collect_ms.add_argument("--num_episodes", type=int, default=100)
+    p_collect_ms.add_argument("--num_envs", type=int, default=1)
+    p_collect_ms.add_argument("--max_steps", type=int, default=300)
+    p_collect_ms.add_argument("--only_success", action=argparse.BooleanOptionalAction, default=True)
+    p_collect_ms.add_argument("--collector_backend", choices=["scripted", "mplib"], default="scripted")
+    p_collect_ms.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
+
     return p
 
 
@@ -614,6 +635,35 @@ def main(argv: list[str] | None = None) -> int:
 
         cfg = load_config(args.config, overrides=_apply_deploy_sim_overrides(args))
         run_deploy_sim(cfg)
+        return 0
+
+    if args.command == "collect-maniskill-demos":
+        overrides = list(args.overrides or [])
+        _append_override(overrides, "experiment.name", args.run_name)
+        _append_override(overrides, "experiment.seed", args.seed)
+        _append_override(overrides, "simulator.backend", "maniskill3")
+        _append_override(overrides, "simulator.task", args.task)
+        _append_override(overrides, "simulator.robot", args.robot)
+        _append_override(overrides, "simulator.controller", args.controller)
+        _append_override(overrides, "simulator.horizon", args.max_steps)
+        _append_override(overrides, "robot.image_key", args.image_key)
+        if args.image_keys is not None:
+            keys = _parse_csv_values(args.image_keys, str)
+            if keys:
+                _append_override(overrides, "robot.image_keys", keys)
+                _append_override(overrides, "robot.image_key", keys[0])
+        cfg = load_config(args.config, overrides=overrides)
+        out = collect_maniskill_demos(
+            cfg,
+            out_hdf5=args.out_hdf5,
+            num_episodes=int(args.num_episodes),
+            num_envs=int(args.num_envs),
+            max_steps=int(args.max_steps),
+            only_success=bool(args.only_success),
+            collector_backend=str(args.collector_backend),
+            overwrite=bool(args.overwrite),
+        )
+        print(json.dumps(out, indent=2, sort_keys=True))
         return 0
 
     parser.error(f"Unknown command: {args.command}")

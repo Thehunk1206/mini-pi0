@@ -13,7 +13,7 @@
 It includes:
 - unified CLI for train / eval / deploy-sim / vision precompute
 - typed YAML config system with CLI overrides
-- modular simulator adapters (Robosuite runtime, ManiSkill3 + IsaacLab scaffolds)
+- modular simulator adapters (Robosuite runtime, ManiSkill3 custom-task runtime, IsaacLab scaffold)
 - native `robomimic_hdf5` and `lerobot_hf` dataset loading
 - image and precomputed-vision conditioning pipelines
 - model registry with `mini_pi0_fm` and `mini_pi0_crossflow` (DiT-style cross-attention policy)
@@ -21,7 +21,7 @@ It includes:
 ## Current Backend Status
 
 - Robosuite: full runtime support
-- ManiSkill3: scaffolded
+- ManiSkill3: implemented (custom multi-object pick-and-place task + collector)
 - IsaacLab: scaffolded
 
 Check local backend diagnostics:
@@ -51,7 +51,8 @@ examples/configs/
   robosuite_lift.yaml
   robosuite_lift_lerobot.yaml
   robosuite_lift_robomimic.yaml
-  maniskill3_pickcube.yaml      # scaffold
+  maniskill3_pickcube.yaml      # baseline maniskill config
+  maniskill3_multiobject_tray.yaml
   isaaclab_scaffold.yaml        # scaffold
 ```
 
@@ -64,6 +65,16 @@ source .venv/bin/activate
 
 # 2) install dependencies
 uv sync --extra dev --extra lerobot --extra vision --extra hardware
+```
+
+If your environment blocks writes to the default uv cache or managed-Python path,
+use this fallback (verified in this repo):
+
+```bash
+UV_CACHE_DIR=.uv-cache uv venv --no-managed-python --python "$(command -v python3.11)" .venv
+source .venv/bin/activate
+UV_CACHE_DIR=.uv-cache uv sync --no-managed-python --python "$(command -v python3.11)" \
+  --extra dev --extra lerobot --extra vision --extra hardware
 ```
 
 If you prefer pip-style install:
