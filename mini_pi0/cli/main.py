@@ -545,8 +545,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_collect_ms.add_argument("--image_keys", default=None, help="Comma-separated image observation keys.")
     p_collect_ms.add_argument("--out_hdf5", default="data/robomimic/custom/maniskill3_multiobject/ph/low_dim_v15.hdf5")
     p_collect_ms.add_argument("--num_episodes", type=int, default=100)
+    p_collect_ms.add_argument("--num_envs", type=int, default=1)
     p_collect_ms.add_argument("--max_steps", type=int, default=300)
     p_collect_ms.add_argument("--only_success", action=argparse.BooleanOptionalAction, default=True)
+    p_collect_ms.add_argument("--collector_backend", choices=["scripted", "mplib"], default="scripted")
     p_collect_ms.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
 
     return p
@@ -655,8 +657,10 @@ def main(argv: list[str] | None = None) -> int:
             cfg,
             out_hdf5=args.out_hdf5,
             num_episodes=int(args.num_episodes),
+            num_envs=int(args.num_envs),
             max_steps=int(args.max_steps),
             only_success=bool(args.only_success),
+            collector_backend=str(args.collector_backend),
             overwrite=bool(args.overwrite),
         )
         print(json.dumps(out, indent=2, sort_keys=True))

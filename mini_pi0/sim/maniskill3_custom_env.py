@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any
 
 import numpy as np
 import sapien
 import torch
+from transforms3d import euler
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.envs.tasks.tabletop.pick_cube_cfgs import PICK_CUBE_CONFIGS
 from mani_skill.sensors.camera import CameraConfig
@@ -31,7 +33,7 @@ class RewardWeights:
     step_cost: float = 0.01
 
 
-@register_env("MiniPi0MultiObjectTray-v1", max_episode_steps=300, override=True)
+@register_env("MiniPi0MultiObjectTray-v1", max_episode_steps=1000, override=True)
 class MiniPi0MultiObjectTrayEnv(BaseEnv):
     """Custom ManiSkill task: pick random objects and place all in tray.
 
@@ -54,6 +56,13 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         tray_size_xy=(0.22, 0.22),
         tray_wall_thickness: float = 0.008,
         tray_wall_height: float = 0.035,
+        bowl_center=(0.20, -0.22, 0.006),
+        bowl_inner_radius: float = 0.11,
+        bowl_spawn_height: float = 0.0,
+        bowl_table_z_offset: float = 0.02,
+        bowl_pose_quat=(1.0, 0.0, 0.0, 0.0),
+        bowl_spawn_plane_offset: float = 0.035,
+        reset_settle_steps: int = 18,
         tray_z_tol: float = 0.03,
         settle_steps_required: int = 3,
         settle_speed_threshold: float = 0.03,
@@ -64,7 +73,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         sensor_height: int = 128,
         render_width: int = 512,
         render_height: int = 512,
-        timeout_steps: int = 300,
+        timeout_steps: int = 1000,
         reward: dict[str, float] | None = None,
         **kwargs,
     ):
@@ -77,6 +86,13 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         self.tray_size_xy_np = np.asarray(tray_size_xy, dtype=np.float32)
         self.tray_wall_thickness = float(max(0.004, tray_wall_thickness))
         self.tray_wall_height = float(max(0.015, tray_wall_height))
+        self.bowl_center_np = np.asarray(bowl_center, dtype=np.float32)
+        self.bowl_inner_radius = float(max(0.04, bowl_inner_radius))
+        self.bowl_spawn_height = float(max(0.0, bowl_spawn_height))
+        self.bowl_table_z_offset = float(max(0.0, bowl_table_z_offset))
+        self.bowl_pose_quat = np.asarray(bowl_pose_quat, dtype=np.float32)
+        self.bowl_spawn_plane_offset = float(max(0.0, bowl_spawn_plane_offset))
+        self.reset_settle_steps = int(max(0, reset_settle_steps))
         self.tray_z_tol = float(tray_z_tol)
         self.settle_steps_required = int(max(1, settle_steps_required))
         self.settle_speed_threshold = float(settle_speed_threshold)
@@ -198,6 +214,27 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             )
             self.tray_walls.append(wall)
 
+        # Source bowl on right side (-y): use ManiSkill humanoid-task bowl mesh pattern.
+        # This mesh needs a fixed +90deg X corrective pose to be upright.
+        bowl_builder = self.scene.create_actor_builder()
+        bowl_fix_q = euler.euler2quat(np.pi / 2, 0, 0)
+        import mani_skill.envs.tasks.humanoid.humanoid_pick_place as humanoid_pick_place
+        bowl_assets_dir = os.path.join(os.path.dirname(humanoid_pick_place.__file__), "assets")
+        bowl_builder.add_nonconvex_collision_from_file(
+            filename=os.path.join(bowl_assets_dir, "frl_apartment_bowl_07.ply"),
+            pose=sapien.Pose(q=bowl_fix_q),
+            scale=[1.0, 1.0, 1.0],
+        )
+        bowl_builder.add_visual_from_file(
+            filename=os.path.join(bowl_assets_dir, "frl_apartment_bowl_07.glb"),
+            scale=[1.0, 1.0, 1.0],
+            pose=sapien.Pose(q=bowl_fix_q),
+        )
+        bowl_pose_p = self.bowl_center_np.copy()
+        bowl_pose_p[2] += self.bowl_table_z_offset
+        bowl_builder.initial_pose = sapien.Pose(p=bowl_pose_p.tolist(), q=self.bowl_pose_quat.tolist())
+        self.bowl = bowl_builder.build_kinematic(name="source_bowl")
+
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         with torch.device(self.device):
             b = len(env_idx)
@@ -221,17 +258,54 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             for i in range(self.object_count_max):
                 self._active_object_mask[:, i] = i < active_counts
 
+            # Spawn active objects inside bowl with simple separation retries.
+            device = self.device
+            bowl_center_xy = torch.tensor(self.bowl_center_np[:2], dtype=torch.float32, device=device)
+            spawn_r = max(0.02, self.bowl_inner_radius - 0.02)
+            min_sep = 0.045
+            xyz_store: list[torch.Tensor] = []
             for i, actor in enumerate(self.objects):
-                xy = torch.rand((self.num_envs, 2), device=self.device)
-                xy = xy * torch.tensor(self.spawn_max - self.spawn_min, device=self.device) + torch.tensor(
-                    self.spawn_min, device=self.device
-                )
-                xyz = torch.zeros((self.num_envs, 3), device=self.device)
+                xy = torch.zeros((self.num_envs, 2), device=device)
+                for env_i in range(self.num_envs):
+                    best_xy = None
+                    for _ in range(25):
+                        theta = float(torch.rand((1,), device=device).item()) * 2.0 * np.pi
+                        r = spawn_r * np.sqrt(float(torch.rand((1,), device=device).item()))
+                        cand = bowl_center_xy + torch.tensor([r * np.cos(theta), r * np.sin(theta)], device=device)
+                        valid = True
+                        for prev in xyz_store:
+                            d = torch.linalg.norm(cand - prev[env_i, :2]).item()
+                            if d < min_sep:
+                                valid = False
+                                break
+                        if valid:
+                            best_xy = cand
+                            break
+                    if best_xy is None:
+                        # fallback sample without separation constraint
+                        theta = float(torch.rand((1,), device=device).item()) * 2.0 * np.pi
+                        r = spawn_r * np.sqrt(float(torch.rand((1,), device=device).item()))
+                        best_xy = bowl_center_xy + torch.tensor([r * np.cos(theta), r * np.sin(theta)], device=device)
+                    xy[env_i] = best_xy
+
+                xyz = torch.zeros((self.num_envs, 3), device=device)
                 xyz[:, :2] = xy
-                xyz[:, 2] = 0.022
+                if self.object_shape_names[i] == "sphere":
+                    z_offset = 0.022
+                elif self.object_shape_names[i] == "cube":
+                    z_offset = 0.020
+                else:
+                    z_offset = 0.020
+                xyz[:, 2] = (
+                    float(self.bowl_center_np[2] + self.bowl_table_z_offset)
+                    + self.bowl_spawn_plane_offset
+                    + z_offset
+                    + self.bowl_spawn_height
+                )
                 qs = torch.zeros((self.num_envs, 4), device=self.device)
                 qs[:, 0] = 1.0
                 actor.set_pose(Pose.create_from_pq(p=xyz, q=qs))
+                xyz_store.append(xyz)
 
                 inactive = ~self._active_object_mask[:, i]
                 if torch.any(inactive):
@@ -261,6 +335,25 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                 p = p.unsqueeze(0).repeat(self.num_envs, 1)
                 q = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
                 wall.set_pose(Pose.create_from_pq(p=p, q=q))
+
+            # Reset bowl to configured right-side position.
+            bowl_pose_p = self.bowl_center_np.copy()
+            bowl_pose_p[2] += self.bowl_table_z_offset
+            self.bowl.set_pose(
+                Pose.create_from_pq(
+                    p=torch.tensor(bowl_pose_p, dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
+                    q=torch.tensor(self.bowl_pose_quat, dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
+                )
+            )
+            if self.reset_settle_steps > 0:
+                for _ in range(self.reset_settle_steps):
+                    self.scene.step()
+            for actor in self.objects:
+                try:
+                    actor.set_linear_velocity(torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device))
+                    actor.set_angular_velocity(torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device))
+                except Exception:
+                    pass
 
     def _get_object_pos_tensor(self) -> torch.Tensor:
         pos = []
