@@ -533,7 +533,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_collect_ms = sub.add_parser(
         "collect-maniskill-demos",
-        help="Collect scripted demos from custom ManiSkill multi-object pick-place task",
+        help="Collect ManiSkill demos using task-specific collector plugins",
     )
     _add_common_config_args(p_collect_ms)
     p_collect_ms.add_argument("--run_name", default=None)
@@ -549,6 +549,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_collect_ms.add_argument("--max_steps", type=int, default=300)
     p_collect_ms.add_argument("--only_success", action=argparse.BooleanOptionalAction, default=True)
     p_collect_ms.add_argument("--collector_backend", choices=["scripted", "mplib"], default="scripted")
+    p_collect_ms.add_argument("--collector_name", default=None, help="Task-specific collector plugin name.")
     p_collect_ms.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
 
     return p
@@ -661,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
             max_steps=int(args.max_steps),
             only_success=bool(args.only_success),
             collector_backend=str(args.collector_backend),
+            collector_name=args.collector_name,
             overwrite=bool(args.overwrite),
         )
         print(json.dumps(out, indent=2, sort_keys=True))
