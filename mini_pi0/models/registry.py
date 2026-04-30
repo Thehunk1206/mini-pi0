@@ -10,10 +10,12 @@ from torch import nn
 from mini_pi0.config.schema import ModelConfig, RootConfig, effective_image_keys
 from mini_pi0.models.crossflow import CrossFlowActionModel
 from mini_pi0.models.fm import MiniPi0FlowMatching
+from mini_pi0.models.mini_pi05 import MiniPI05Config, PI05SmolVLM
 
 _MODEL_REGISTRY = {
     "mini_pi0_fm": MiniPi0FlowMatching,
     "mini_pi0_crossflow": CrossFlowActionModel,
+    "mini_pi05": PI05SmolVLM,
 }
 
 
@@ -45,6 +47,24 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
     if key not in _MODEL_REGISTRY:
         raise ValueError(f"Unknown model '{cfg.name}'. Options: {list_models()}")
     cls = _MODEL_REGISTRY[key]
+    if key == "mini_pi05":
+        if str(cfg.obs_mode).strip().lower() not in {"image"}:
+            raise ValueError(
+                "mini_pi05 currently supports obs_mode=image only in this training infra."
+            )
+        num_cameras = 1
+        if isinstance(model_cfg, RootConfig):
+            num_cameras = max(1, len(effective_image_keys(model_cfg.robot)))
+        dtype = "bfloat16" if torch.cuda.is_available() else "float32"
+        pi05_cfg = MiniPI05Config(
+            action_dim=int(cfg.action_dim),
+            action_horizon=int(cfg.chunk_size),
+            num_cameras=int(num_cameras),
+            state_dim=int(cfg.prop_dim),
+            dtype=dtype,
+        )
+        return cls(pi05_cfg)
+
     kwargs = dict(
         action_dim=cfg.action_dim,
         prop_dim=cfg.prop_dim,
