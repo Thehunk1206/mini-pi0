@@ -14,13 +14,14 @@ simulator:
   has_renderer: false
   has_offscreen_renderer: true
   use_camera_obs: true
-  camera_names: [base_camera, agentview_camera]
+  camera_names: [base_camera, hand_camera]
   camera_width: 640
   camera_height: 640
   env_kwargs:
     obs_mode: rgbd
     reward_mode: dense
     control_mode: pd_ee_delta_pose
+    scripted_control_mode: pd_ee_delta_pose
     render_backend: gpu
     sim_backend: auto
     object_count_min: 2
@@ -28,18 +29,23 @@ simulator:
     robot_init_qpos_noise: 0.0
     object_types: [cube, sphere, cone]
     # Left side of robot in table frame (+y).
-    tray_center: [0.05, 0.22, 0.006]
+    tray_center: [0.05, 0.28, 0.006]
     tray_size_xy: [0.22, 0.22]
     tray_wall_thickness: 0.008
     tray_wall_height: 0.035
     # Right side source bowl in table frame (-y).
-    bowl_center: [0.05, -0.18, 0.006]
+    bowl_center: [0.05, -0.28, 0.006]
     bowl_inner_radius: 0.11
     bowl_table_z_offset: 0.02
     bowl_pose_quat: [1.0, 0.0, 0.0, 0.0]
     bowl_spawn_plane_offset: 0.006
     bowl_spawn_height: 0.0
     source_bowl_collision: false
+    source_bowl_containment: true
+    source_bowl_wall_segments: 16
+    source_bowl_wall_thickness: 0.008
+    source_bowl_wall_height: 0.04
+    source_bowl_wall_radius_offset: 0.025
     scripted_grasp_assist: false
     grasp_assist_z_offset: -0.04
     # Force actual sensor outputs to 640x640 for dataset collection.
@@ -50,6 +56,8 @@ simulator:
     render_height: 640
     reset_settle_steps: 18
     tray_z_tol: 0.03
+    tray_place_min_z: 0.012
+    tray_place_max_z: 0.14
     settle_steps_required: 3
     settle_speed_threshold: 0.03
     lift_height_threshold: 0.06
@@ -76,7 +84,7 @@ robot:
   name: panda
   action_dim: 7
   image_key: base_image
-  image_keys: [base_image, agentview_image]
+  image_keys: [base_image, hand_image]
   proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
   state_keys:
     - robot0_eef_pos
@@ -87,7 +95,7 @@ robot:
 # Example training data path from collector command.
 data:
   format: robomimic_hdf5
-  robomimic_hdf5: artifacts/physical_scripted_2eps_obj2to4_h700_640.hdf5
+  robomimic_hdf5: artifacts/physical_scripted_handcam_bowlfix_placevol_2eps_obj2to4_h700_640.hdf5
   robomimic_data_group: data
   fallback_image_hw: [640, 640]
   n_demos: 200

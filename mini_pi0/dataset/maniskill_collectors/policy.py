@@ -62,6 +62,56 @@ class ScriptedMultiObjectOracle:
                 best_idx = i
         return best_idx
 
+    @staticmethod
+    def _wrap_symmetric_yaw_error(error: float) -> float:
+        """Wrap yaw error for a parallel-jaw gripper's 180-degree symmetry."""
+        while error > np.pi / 2:
+            error -= np.pi
+        while error < -np.pi / 2:
+            error += np.pi
+        return float(error)
+
+    @staticmethod
+    def _closing_axis_xy(eef_quat_wxyz: np.ndarray) -> np.ndarray:
+        """Return the gripper closing axis projected into the table plane."""
+        if eef_quat_wxyz.shape[0] < 4:
+            return np.array([1.0, 0.0], dtype=np.float32)
+        w, x, y, z = [float(v) for v in eef_quat_wxyz[:4]]
+        axis = np.array(
+            [
+                2.0 * (x * y - z * w),
+                1.0 - 2.0 * (x * x + z * z),
+            ],
+            dtype=np.float32,
+        )
+        norm = float(np.linalg.norm(axis))
+        if norm < 1e-6:
+            return np.array([1.0, 0.0], dtype=np.float32)
+        return axis / norm
+
+    @staticmethod
+    def _desired_closing_axis_xy(target_idx: int, obj: np.ndarray, obj_mask: np.ndarray, placed: np.ndarray) -> np.ndarray:
+        """Choose a gripper closing axis that avoids nearby clutter."""
+        target_xy = obj[target_idx, :2]
+        best_idx = None
+        best_dist = float("inf")
+        for idx in range(min(len(obj), len(obj_mask), len(placed))):
+            if idx == target_idx or obj_mask[idx] < 0.5 or placed[idx] > 0.5:
+                continue
+            dist = float(np.linalg.norm(obj[idx, :2] - target_xy))
+            if dist < best_dist:
+                best_idx = idx
+                best_dist = dist
+        if best_idx is None or best_dist > 0.09:
+            return np.array([1.0, 0.0], dtype=np.float32)
+
+        neighbor_vec = obj[best_idx, :2] - target_xy
+        norm = float(np.linalg.norm(neighbor_vec))
+        if norm < 1e-6:
+            return np.array([1.0, 0.0], dtype=np.float32)
+        neighbor_axis = neighbor_vec / norm
+        return np.array([-neighbor_axis[1], neighbor_axis[0]], dtype=np.float32)
+
     def act(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         """Generate one normalized action in `[-1, 1]` for current phase.
 
@@ -73,7 +123,12 @@ class ScriptedMultiObjectOracle:
         """
         action = np.zeros((7,), dtype=np.float32)
         eef = np.asarray(obs["robot0_eef_pos"], dtype=np.float32)
+        eef_quat = np.asarray(
+            obs.get("robot0_eef_quat", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)),
+            dtype=np.float32,
+        ).reshape(-1)
         obj = np.asarray(obs.get("observation.state.object"), dtype=np.float32).reshape(-1, 3)
+        obj_mask = np.asarray(obs.get("observation.state.object_mask"), dtype=np.float32).reshape(-1)
         placed = np.asarray(obs.get("observation.state.placed_mask"), dtype=np.float32).reshape(-1)
         grasped_mask = np.asarray(obs.get("observation.state.grasped_mask", np.zeros_like(placed)), dtype=np.float32).reshape(-1)
         gripper_qpos = np.asarray(obs.get("robot0_gripper_qpos", np.zeros((2,), dtype=np.float32)), dtype=np.float32).reshape(-1)
@@ -91,6 +146,16 @@ class ScriptedMultiObjectOracle:
             return action
 
         target = obj[self.target_idx]
+        current_closing = self._closing_axis_xy(eef_quat)
+        desired_closing = self._desired_closing_axis_xy(self.target_idx, obj, obj_mask, placed)
+        yaw_error = np.arctan2(
+            current_closing[0] * desired_closing[1] - current_closing[1] * desired_closing[0],
+            float(np.dot(current_closing, desired_closing)),
+        )
+        yaw_error = self._wrap_symmetric_yaw_error(float(yaw_error))
+        # Positive Z action produced negative world yaw in the Panda controller
+        # probe, so this sign compensates that mapping.
+        yaw_action = float(np.clip(-4.0 * yaw_error, -1.0, 1.0))
         above = target + np.array([0.0, 0.0, 0.11], dtype=np.float32)
         pre_grasp = target + np.array([0.0, 0.0, 0.045], dtype=np.float32)
         grasp = target + np.array([0.0, 0.0, 0.004], dtype=np.float32)
@@ -131,16 +196,19 @@ class ScriptedMultiObjectOracle:
 
         if self.phase == "approach_above":
             action[:3] = delta(above, gain=5.0)
+            action[5] = yaw_action
             action[6] = 1.0
             if np.linalg.norm(above - eef) < 0.018:
                 transition("pre_grasp")
         elif self.phase == "pre_grasp":
             action[:3] = delta(pre_grasp, gain=4.5)
+            action[5] = yaw_action
             action[6] = 1.0
             if np.linalg.norm(pre_grasp - eef) < 0.014:
                 transition("descend_grasp")
         elif self.phase == "descend_grasp":
             action[:3] = delta(grasp, gain=3.5)
+            action[5] = yaw_action
             action[6] = 1.0
             if np.linalg.norm(grasp - eef) < 0.010:
                 transition("close_gripper")

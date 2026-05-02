@@ -156,18 +156,29 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
     placed = to_numpy(uw._placed_mask).astype(np.float32)
     frac = to_numpy(uw._last_success_fraction).astype(np.float32)
 
-    frame = None
+    sensor_frames: dict[str, np.ndarray] = {}
     if isinstance(raw_obs, dict):
-        try:
-            rgb = raw_obs["sensor_data"]["base_camera"]["rgb"]
-            arr = to_numpy(rgb)
-            if arr.ndim == 3:
-                arr = arr[None, ...]
-            frame = np.clip(arr, 0, 255).astype(np.uint8)
-        except Exception:
-            frame = None
-    if frame is None:
-        frame = np.zeros((num_envs, 128, 128, 3), dtype=np.uint8)
+        sensor_data = raw_obs.get("sensor_data", {})
+        if isinstance(sensor_data, dict):
+            for camera_name, payload in sensor_data.items():
+                if not isinstance(payload, dict) or "rgb" not in payload:
+                    continue
+                arr = to_numpy(payload["rgb"])
+                if arr.ndim == 5:
+                    arr = arr[:, 0]
+                elif arr.ndim == 3:
+                    arr = arr[None, ...]
+                if arr.ndim != 4:
+                    continue
+                sensor_frames[str(camera_name)] = np.clip(arr[..., :3], 0, 255).astype(np.uint8)
+
+    fallback_frame = next(iter(sensor_frames.values()), np.zeros((num_envs, 128, 128, 3), dtype=np.uint8))
+
+    def camera_name_for_image_key(image_key: str) -> str:
+        """Map canonical image keys to ManiSkill sensor camera names."""
+        if image_key.endswith("_image"):
+            return f"{image_key[:-6]}_camera"
+        return image_key
 
     out_batch: list[dict[str, np.ndarray]] = []
     for i in range(num_envs):
@@ -185,6 +196,7 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
         }
         obs_i: dict[str, np.ndarray] = {}
         for key in image_keys:
+            frame = sensor_frames.get(camera_name_for_image_key(key), fallback_frame)
             obs_i[key] = frame[i][..., :3]
         for key in state_keys:
             obs_i[key] = np.asarray(default_state.get(key, np.zeros((1,), dtype=np.float32)), dtype=np.float32)

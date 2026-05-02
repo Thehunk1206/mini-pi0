@@ -39,6 +39,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
 
         render_mode = "rgb_array" if bool(cfg.simulator.has_offscreen_renderer) else "none"
         render_backend = env_kwargs.pop("render_backend", "cpu")
+        env_kwargs.pop("scripted_control_mode", None)
 
         self.env = gym.make(
             task_id,
@@ -148,7 +149,9 @@ class ManiSkill3Adapter(SimulatorAdapter):
                 out[key] = np.asarray(frame, dtype=np.uint8)
         else:
             for idx, key in enumerate(self._image_keys):
-                cam_name = camera_order[min(idx, len(camera_order) - 1)]
+                cam_name = f"{key[:-6]}_camera" if key.endswith("_image") else camera_order[min(idx, len(camera_order) - 1)]
+                if cam_name not in sensor_frames:
+                    cam_name = camera_order[min(idx, len(camera_order) - 1)]
                 out[key] = np.asarray(sensor_frames.get(cam_name, frame), dtype=np.uint8)
 
         default_state = {

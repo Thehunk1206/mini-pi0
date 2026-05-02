@@ -63,11 +63,18 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         bowl_pose_quat=(1.0, 0.0, 0.0, 0.0),
         bowl_spawn_plane_offset: float = 0.035,
         source_bowl_collision: bool = True,
+        source_bowl_containment: bool = True,
+        source_bowl_wall_segments: int = 16,
+        source_bowl_wall_thickness: float = 0.008,
+        source_bowl_wall_height: float = 0.04,
+        source_bowl_wall_radius_offset: float = 0.025,
         scripted_grasp_assist: bool = False,
         grasp_assist_radius: float = 0.085,
         grasp_assist_z_offset: float = -0.04,
         reset_settle_steps: int = 18,
         tray_z_tol: float = 0.03,
+        tray_place_min_z: float = 0.012,
+        tray_place_max_z: float = 0.14,
         settle_steps_required: int = 3,
         settle_speed_threshold: float = 0.03,
         lift_height_threshold: float = 0.06,
@@ -97,11 +104,18 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         self.bowl_pose_quat = np.asarray(bowl_pose_quat, dtype=np.float32)
         self.bowl_spawn_plane_offset = float(max(0.0, bowl_spawn_plane_offset))
         self.source_bowl_collision = bool(source_bowl_collision)
+        self.source_bowl_containment = bool(source_bowl_containment)
+        self.source_bowl_wall_segments = int(max(8, source_bowl_wall_segments))
+        self.source_bowl_wall_thickness = float(max(0.004, source_bowl_wall_thickness))
+        self.source_bowl_wall_height = float(max(0.015, source_bowl_wall_height))
+        self.source_bowl_wall_radius_offset = float(max(0.0, source_bowl_wall_radius_offset))
         self.scripted_grasp_assist = bool(scripted_grasp_assist)
         self.grasp_assist_radius = float(max(0.0, grasp_assist_radius))
         self.grasp_assist_z_offset = float(grasp_assist_z_offset)
         self.reset_settle_steps = int(max(0, reset_settle_steps))
         self.tray_z_tol = float(tray_z_tol)
+        self.tray_place_min_z = float(tray_place_min_z)
+        self.tray_place_max_z = float(max(tray_place_min_z, tray_place_max_z))
         self.settle_steps_required = int(max(1, settle_steps_required))
         self.settle_speed_threshold = float(settle_speed_threshold)
         self.lift_height_threshold = float(lift_height_threshold)
@@ -140,8 +154,27 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
 
     @property
     def _default_sensor_configs(self):
-        pose = sapien_utils.look_at(eye=self.sensor_cam_eye_pos, target=self.sensor_cam_target_pos)
-        return [CameraConfig("base_camera", pose, self.sensor_width, self.sensor_height, np.pi / 2, 0.01, 100)]
+        base_pose = sapien_utils.look_at(eye=self.sensor_cam_eye_pos, target=self.sensor_cam_target_pos)
+        hand_mount = self.agent.robot.links_map.get("panda_hand")
+        hand_pose = sapien.Pose(
+            p=[0.0464982, -0.0200011, 0.0360011],
+            q=[0.0, 0.70710678, 0.0, 0.70710678],
+        )
+        configs = [CameraConfig("base_camera", base_pose, self.sensor_width, self.sensor_height, np.pi / 2, 0.01, 100)]
+        if hand_mount is not None:
+            configs.append(
+                CameraConfig(
+                    "hand_camera",
+                    hand_pose,
+                    self.sensor_width,
+                    self.sensor_height,
+                    np.pi / 2,
+                    0.01,
+                    100,
+                    mount=hand_mount,
+                )
+            )
+        return configs
 
     @property
     def _default_human_render_camera_configs(self):
@@ -244,6 +277,32 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         bowl_pose_p[2] += self.bowl_table_z_offset
         bowl_builder.initial_pose = sapien.Pose(p=bowl_pose_p.tolist(), q=self.bowl_pose_quat.tolist())
         self.bowl = bowl_builder.build_kinematic(name="source_bowl")
+        self.bowl_containment_walls = []
+        if self.source_bowl_containment:
+            radius = max(0.03, self.bowl_inner_radius + self.source_bowl_wall_radius_offset)
+            segment_half_len = radius * np.tan(np.pi / self.source_bowl_wall_segments) * 1.15
+            wall_half_h = self.source_bowl_wall_height * 0.5
+            wall_z = float(self.bowl_center_np[2] + self.bowl_table_z_offset + wall_half_h)
+            for wall_idx in range(self.source_bowl_wall_segments):
+                theta = 2.0 * np.pi * wall_idx / self.source_bowl_wall_segments
+                center = np.array(
+                    [
+                        self.bowl_center_np[0] + radius * np.cos(theta),
+                        self.bowl_center_np[1] + radius * np.sin(theta),
+                        wall_z,
+                    ],
+                    dtype=np.float32,
+                )
+                wall = actors.build_box(
+                    self.scene,
+                    half_sizes=[self.source_bowl_wall_thickness * 0.5, segment_half_len, wall_half_h],
+                    color=[0.35, 0.35, 0.35, 0.0],
+                    name=f"source_bowl_containment_{wall_idx:02d}",
+                    body_type="kinematic",
+                    add_collision=True,
+                    initial_pose=sapien.Pose(p=center.tolist(), q=euler.euler2quat(0, 0, theta).tolist()),
+                )
+                self.bowl_containment_walls.append(wall)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         with torch.device(self.device):
@@ -272,7 +331,8 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             # Spawn active objects inside bowl with simple separation retries.
             device = self.device
             bowl_center_xy = torch.tensor(self.bowl_center_np[:2], dtype=torch.float32, device=device)
-            spawn_r = max(0.02, self.bowl_inner_radius - 0.02)
+            spawn_margin = max(0.03, self.source_bowl_wall_thickness + 0.026)
+            spawn_r = max(0.02, self.bowl_inner_radius - spawn_margin)
             min_sep = 0.045
             xyz_store: list[torch.Tensor] = []
             for i, actor in enumerate(self.objects):
@@ -356,6 +416,23 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                     q=torch.tensor(self.bowl_pose_quat, dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
                 )
             )
+            if self.source_bowl_containment:
+                radius = max(0.03, self.bowl_inner_radius + self.source_bowl_wall_radius_offset)
+                wall_half_h = self.source_bowl_wall_height * 0.5
+                wall_z = float(self.bowl_center_np[2] + self.bowl_table_z_offset + wall_half_h)
+                for wall_idx, wall in enumerate(self.bowl_containment_walls):
+                    theta = 2.0 * np.pi * wall_idx / self.source_bowl_wall_segments
+                    p = torch.tensor(
+                        [
+                            self.bowl_center_np[0] + radius * np.cos(theta),
+                            self.bowl_center_np[1] + radius * np.sin(theta),
+                            wall_z,
+                        ],
+                        dtype=torch.float32,
+                        device=self.device,
+                    ).unsqueeze(0).repeat(self.num_envs, 1)
+                    q = torch.tensor(euler.euler2quat(0, 0, theta), dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+                    wall.set_pose(Pose.create_from_pq(p=p, q=q))
             robot_pose_before_settle = self.agent.robot.pose
             robot_qpos_before_settle = self.agent.robot.get_qpos().clone()
             if self.reset_settle_steps > 0:
@@ -426,7 +503,10 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             torch.abs(obj_pos[..., 0] - tray_center[..., 0]) <= tray_half[..., 0],
             torch.abs(obj_pos[..., 1] - tray_center[..., 1]) <= tray_half[..., 1],
         )
-        in_z = torch.abs(obj_pos[..., 2] - 0.022) <= self.tray_z_tol
+        in_z = torch.logical_and(
+            obj_pos[..., 2] >= self.tray_place_min_z,
+            obj_pos[..., 2] <= self.tray_place_max_z,
+        )
 
         static = []
         grasped = []
@@ -436,7 +516,12 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         static_mask = torch.stack(static, dim=1)
         grasped_mask = torch.stack(grasped, dim=1)
 
-        candidate = self._active_object_mask & in_xy & in_z & static_mask & (~grasped_mask)
+        # A tray placement should be accepted once the object is released and
+        # remains inside the tray volume. Cylinders and spheres can roll or sit
+        # on another object after a valid drop, so requiring a narrow surface-z
+        # band makes the oracle retarget already-placed objects and pick them
+        # again.
+        candidate = self._active_object_mask & in_xy & in_z & (~grasped_mask)
         self._settle_counter = torch.where(candidate, self._settle_counter + 1, torch.zeros_like(self._settle_counter))
         newly_settled = self._settle_counter >= self.settle_steps_required
         self._placed_mask = self._placed_mask | newly_settled

@@ -107,6 +107,7 @@ def collect_single_scripted_episode(
     run_cfg = copy.deepcopy(ep_cfg)
     run_cfg.simulator.controller = _resolve_scripted_control_mode(ep_cfg)
     run_cfg.simulator.env_kwargs = dict(run_cfg.simulator.env_kwargs or {})
+    run_cfg.simulator.env_kwargs.pop("scripted_control_mode", None)
     run_cfg.simulator.env_kwargs["control_mode"] = str(run_cfg.simulator.controller)
     adapter = make_sim_adapter(run_cfg)
     obs = adapter.reset(seed=ep_cfg.experiment.seed)
@@ -171,6 +172,7 @@ def collect_vectorized_scripted_episodes(
     import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
 
     env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
+    env_kwargs.pop("scripted_control_mode", None)
     task_id = str(ep_cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
     control_mode = _resolve_scripted_control_mode(ep_cfg)
     env = gym.make(
