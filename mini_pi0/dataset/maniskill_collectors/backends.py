@@ -29,6 +29,43 @@ from .common import (
 from .policy import ScriptedMultiObjectOracle
 
 
+def _resolve_scripted_control_mode(ep_cfg: RootConfig) -> str:
+    """Resolve scripted rollout control mode with stable defaults."""
+    env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
+    explicit = env_kwargs.get("scripted_control_mode")
+    if explicit is not None:
+        return str(explicit)
+    current = str(ep_cfg.simulator.controller)
+    if current in {"pd_ee_delta_pose", "pd_ee_pose"}:
+        return "pd_ee_delta_pos"
+    return current
+
+
+def _project_scripted_action(action7: np.ndarray, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+    """Map canonical 7D scripted action to current env action-space dimension."""
+    lo = np.asarray(low, dtype=np.float32).reshape(-1)
+    hi = np.asarray(high, dtype=np.float32).reshape(-1)
+    dim = int(lo.shape[0])
+    a = np.asarray(action7, dtype=np.float32).reshape(-1)
+    if a.shape[0] < 7:
+        raise ValueError(f"Expected scripted action with >=7 dims, got {a.shape[0]}")
+
+    if dim == 7:
+        out = a.copy()
+    elif dim == 4:
+        out = np.asarray([a[0], a[1], a[2], a[6]], dtype=np.float32)
+    elif dim == 3:
+        out = np.asarray([a[0], a[1], a[2]], dtype=np.float32)
+    elif dim == 6:
+        out = np.asarray([a[0], a[1], a[2], a[3], a[4], a[5]], dtype=np.float32)
+    else:
+        out = np.zeros((dim,), dtype=np.float32)
+        out[: min(3, dim)] = a[: min(3, dim)]
+        if dim > 0:
+            out[-1] = a[6]
+    return np.clip(out, lo, hi)
+
+
 def mplib_runtime_check() -> bool:
     """Return True when mplib planner can be constructed in current runtime.
 
@@ -67,9 +104,14 @@ def collect_single_scripted_episode(
     """
     tray_center = np.asarray(ep_cfg.simulator.env_kwargs.get("tray_center", [0.62, 0.0, 0.0]), dtype=np.float32)
     policy = ScriptedMultiObjectOracle(tray_center=tray_center)
-    adapter = make_sim_adapter(ep_cfg)
+    run_cfg = copy.deepcopy(ep_cfg)
+    run_cfg.simulator.controller = _resolve_scripted_control_mode(ep_cfg)
+    run_cfg.simulator.env_kwargs = dict(run_cfg.simulator.env_kwargs or {})
+    run_cfg.simulator.env_kwargs["control_mode"] = str(run_cfg.simulator.controller)
+    adapter = make_sim_adapter(run_cfg)
     obs = adapter.reset(seed=ep_cfg.experiment.seed)
     policy.reset()
+    low, high = adapter.action_spec()
 
     buf = EpisodeBuffer(obs=[], actions=[], rewards=[], dones=[], info_rows=[])
     final_info: dict[str, Any] = {"success": False, "success_fraction": 0.0, "placed_count": 0, "total_objects": 0}
@@ -85,7 +127,8 @@ def collect_single_scripted_episode(
             ])
             if k in obs
         })
-        action = policy.act(obs)
+        action7 = policy.act(obs)
+        action = _project_scripted_action(action7, low, high)
         step = adapter.step(action)
         buf.actions.append(action.astype(np.float32))
         buf.rewards.append(float(step.reward))
@@ -129,12 +172,13 @@ def collect_vectorized_scripted_episodes(
 
     env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
     task_id = str(ep_cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
+    control_mode = _resolve_scripted_control_mode(ep_cfg)
     env = gym.make(
         task_id,
         num_envs=num_envs,
         obs_mode=env_kwargs.pop("obs_mode", "rgbd"),
         reward_mode=env_kwargs.pop("reward_mode", "dense"),
-        control_mode=env_kwargs.pop("control_mode", str(ep_cfg.simulator.controller)),
+        control_mode=env_kwargs.pop("control_mode", control_mode),
         render_mode="none",
         render_backend=env_kwargs.pop("render_backend", "gpu"),
         sim_backend=env_kwargs.pop("sim_backend", "auto"),
@@ -142,6 +186,10 @@ def collect_vectorized_scripted_episodes(
         **env_kwargs,
     )
     raw_obs, _ = env.reset(seed=int(ep_cfg.experiment.seed))
+    space_lo = np.asarray(env.action_space.low, dtype=np.float32)
+    space_hi = np.asarray(env.action_space.high, dtype=np.float32)
+    low = space_lo[0] if space_lo.ndim == 2 else space_lo
+    high = space_hi[0] if space_hi.ndim == 2 else space_hi
 
     tray_center = np.asarray(ep_cfg.simulator.env_kwargs.get("tray_center", [0.62, 0.0, 0.0]), dtype=np.float32)
     policies = [ScriptedMultiObjectOracle(tray_center=tray_center) for _ in range(num_envs)]
@@ -156,7 +204,8 @@ def collect_vectorized_scripted_episodes(
         acts = []
         for i in range(num_envs):
             obs_i = obs_batch[i]
-            act_i = policies[i].act(obs_i).astype(np.float32)
+            act7 = policies[i].act(obs_i).astype(np.float32)
+            act_i = _project_scripted_action(act7, low, high)
             buffers[i].obs.append({
                 k: np.asarray(obs_i[k])
                 for k in set(image_keys + state_keys + [

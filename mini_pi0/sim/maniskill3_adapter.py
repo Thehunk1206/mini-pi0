@@ -22,6 +22,11 @@ class ManiSkill3Adapter(SimulatorAdapter):
         self.cfg = cfg
         self._state_keys = effective_state_keys(cfg.robot)
         self._image_keys = effective_image_keys(cfg.robot)
+        self._preferred_camera_names = [
+            str(name).strip()
+            for name in (cfg.simulator.camera_names or [])
+            if str(name).strip()
+        ]
 
         env_kwargs = dict(cfg.simulator.env_kwargs or {})
         task_id = str(cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
@@ -73,28 +78,34 @@ class ManiSkill3Adapter(SimulatorAdapter):
         placed_np = self._to_numpy(placed)[0]
         return obj_pos_np.astype(np.float32), active_np.astype(np.float32), placed_np.astype(np.float32), frac
 
-    def _extract_image_from_raw_obs(self) -> np.ndarray | None:
+    def _extract_sensor_frames(self) -> dict[str, np.ndarray]:
         raw = self._last_raw_obs
         if not isinstance(raw, dict):
-            return None
+            return {}
+        out: dict[str, np.ndarray] = {}
         try:
             sensor_data = raw.get("sensor_data", {})
             if not isinstance(sensor_data, dict):
-                return None
-            cam = sensor_data.get("base_camera", {})
-            if not isinstance(cam, dict):
-                return None
-            rgb = cam.get("rgb", None)
-            if rgb is None:
-                return None
-            arr = self._to_numpy(rgb)
-            if arr.ndim == 4:
-                arr = arr[0]
-            if arr.dtype != np.uint8:
-                arr = np.clip(arr, 0, 255).astype(np.uint8)
-            return arr
+                return {}
+            for camera_name, camera_payload in sensor_data.items():
+                if not isinstance(camera_payload, dict):
+                    continue
+                rgb = camera_payload.get("rgb", None)
+                if rgb is None:
+                    continue
+                arr = self._to_numpy(rgb)
+                if arr.ndim == 5:
+                    arr = arr[0, 0]
+                elif arr.ndim == 4:
+                    arr = arr[0]
+                if arr.ndim != 3:
+                    continue
+                if arr.dtype != np.uint8:
+                    arr = np.clip(arr, 0, 255).astype(np.uint8)
+                out[str(camera_name)] = arr
+            return out
         except Exception:
-            return None
+            return {}
 
     def _canonical_obs_from_env(self) -> dict[str, np.ndarray]:
         uw = self.unwrapped
@@ -103,8 +114,25 @@ class ManiSkill3Adapter(SimulatorAdapter):
         qpos = self._to_numpy(uw.agent.robot.get_qpos())[0].astype(np.float32)
 
         obj_flat, obj_mask, placed_mask, frac = self._get_object_state()
+        grasped_mask = np.zeros_like(placed_mask, dtype=np.float32)
+        try:
+            grasp_rows = [self._to_numpy(uw.agent.is_grasping(actor))[0] for actor in uw.objects]
+            if grasp_rows:
+                grasped_mask = np.asarray(grasp_rows, dtype=np.float32)
+        except Exception:
+            grasped_mask = np.zeros_like(placed_mask, dtype=np.float32)
 
-        frame = self._extract_image_from_raw_obs()
+        sensor_frames = self._extract_sensor_frames()
+        frame = None
+        camera_order: list[str] = []
+        for name in self._preferred_camera_names:
+            if name in sensor_frames and name not in camera_order:
+                camera_order.append(name)
+        for name in sensor_frames.keys():
+            if name not in camera_order:
+                camera_order.append(name)
+        if camera_order:
+            frame = sensor_frames[camera_order[0]]
         if bool(self.cfg.simulator.has_offscreen_renderer):
             if frame is None:
                 try:
@@ -115,8 +143,13 @@ class ManiSkill3Adapter(SimulatorAdapter):
             frame = np.zeros((int(self.cfg.simulator.camera_height), int(self.cfg.simulator.camera_width), 3), dtype=np.uint8)
 
         out: dict[str, np.ndarray] = {}
-        for key in self._image_keys:
-            out[key] = np.asarray(frame, dtype=np.uint8)
+        if not camera_order:
+            for key in self._image_keys:
+                out[key] = np.asarray(frame, dtype=np.uint8)
+        else:
+            for idx, key in enumerate(self._image_keys):
+                cam_name = camera_order[min(idx, len(camera_order) - 1)]
+                out[key] = np.asarray(sensor_frames.get(cam_name, frame), dtype=np.uint8)
 
         default_state = {
             "robot0_eef_pos": tcp_p,
@@ -128,6 +161,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
             "observation.state.object": obj_flat,
             "observation.state.object_mask": obj_mask,
             "observation.state.placed_mask": placed_mask,
+            "observation.state.grasped_mask": grasped_mask,
             "observation.state.task_progress": np.array([frac], dtype=np.float32),
         }
 
@@ -138,6 +172,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
             "observation.state.object",
             "observation.state.object_mask",
             "observation.state.placed_mask",
+            "observation.state.grasped_mask",
             "observation.state.task_progress",
         ):
             out[key] = np.asarray(default_state[key], dtype=np.float32)

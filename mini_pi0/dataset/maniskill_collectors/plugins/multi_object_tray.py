@@ -59,6 +59,9 @@ class MiniPi0MultiObjectTrayCollector:
             - otherwise use scripted oracle backend
         """
         backend = str(req.backend or "scripted").lower()
+        allow_scripted_fallback = bool(
+            (req.cfg.simulator.env_kwargs or {}).get("scripted_allow_mplib_fallback", False)
+        )
         if backend == "mplib" and mplib_runtime_check():
             return collect_single_mplib_episode(
                 req.cfg,
@@ -66,12 +69,27 @@ class MiniPi0MultiObjectTrayCollector:
                 image_keys=req.image_keys,
                 state_keys=req.state_keys,
             )
-        return collect_single_scripted_episode(
+        scripted_buf, scripted_info = collect_single_scripted_episode(
             req.cfg,
             image_keys=req.image_keys,
             state_keys=req.state_keys,
             max_steps=int(req.max_steps),
         )
+        # Optional quality guard: if scripted controller stalls with no
+        # progress, retry one episode with mplib planner when enabled.
+        if (
+            backend == "scripted"
+            and allow_scripted_fallback
+            and float(scripted_info.get("success_fraction", 0.0)) <= 0.0
+            and mplib_runtime_check()
+        ):
+            return collect_single_mplib_episode(
+                req.cfg,
+                max_steps=int(req.max_steps),
+                image_keys=req.image_keys,
+                state_keys=req.state_keys,
+            )
+        return scripted_buf, scripted_info
 
     def collect_vectorized(self, req: CollectorRequest, episodes_target: int):
         """Collect vectorized episodes with scripted-first stability policy.

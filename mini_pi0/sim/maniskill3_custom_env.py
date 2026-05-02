@@ -62,6 +62,10 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         bowl_table_z_offset: float = 0.02,
         bowl_pose_quat=(1.0, 0.0, 0.0, 0.0),
         bowl_spawn_plane_offset: float = 0.035,
+        source_bowl_collision: bool = True,
+        scripted_grasp_assist: bool = False,
+        grasp_assist_radius: float = 0.085,
+        grasp_assist_z_offset: float = -0.04,
         reset_settle_steps: int = 18,
         tray_z_tol: float = 0.03,
         settle_steps_required: int = 3,
@@ -92,6 +96,10 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         self.bowl_table_z_offset = float(max(0.0, bowl_table_z_offset))
         self.bowl_pose_quat = np.asarray(bowl_pose_quat, dtype=np.float32)
         self.bowl_spawn_plane_offset = float(max(0.0, bowl_spawn_plane_offset))
+        self.source_bowl_collision = bool(source_bowl_collision)
+        self.scripted_grasp_assist = bool(scripted_grasp_assist)
+        self.grasp_assist_radius = float(max(0.0, grasp_assist_radius))
+        self.grasp_assist_z_offset = float(grasp_assist_z_offset)
         self.reset_settle_steps = int(max(0, reset_settle_steps))
         self.tray_z_tol = float(tray_z_tol)
         self.settle_steps_required = int(max(1, settle_steps_required))
@@ -117,6 +125,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         self._prev_success_fraction = None
         self._last_success_fraction = None
         self._last_held_mask = None
+        self._grasp_assist_held_idx = None
         self._target_idx = None
         self._last_reward_terms: dict[str, torch.Tensor] | None = None
 
@@ -220,11 +229,12 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         bowl_fix_q = euler.euler2quat(np.pi / 2, 0, 0)
         import mani_skill.envs.tasks.humanoid.humanoid_pick_place as humanoid_pick_place
         bowl_assets_dir = os.path.join(os.path.dirname(humanoid_pick_place.__file__), "assets")
-        bowl_builder.add_nonconvex_collision_from_file(
-            filename=os.path.join(bowl_assets_dir, "frl_apartment_bowl_07.ply"),
-            pose=sapien.Pose(q=bowl_fix_q),
-            scale=[1.0, 1.0, 1.0],
-        )
+        if self.source_bowl_collision:
+            bowl_builder.add_nonconvex_collision_from_file(
+                filename=os.path.join(bowl_assets_dir, "frl_apartment_bowl_07.ply"),
+                pose=sapien.Pose(q=bowl_fix_q),
+                scale=[1.0, 1.0, 1.0],
+            )
         bowl_builder.add_visual_from_file(
             filename=os.path.join(bowl_assets_dir, "frl_apartment_bowl_07.glb"),
             scale=[1.0, 1.0, 1.0],
@@ -246,6 +256,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             self._settle_counter = torch.zeros((self.num_envs, self.object_count_max), dtype=torch.int32, device=self.device)
             self._prev_success_fraction = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
             self._last_success_fraction = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
+            self._grasp_assist_held_idx = torch.full((self.num_envs,), -1, dtype=torch.int64, device=self.device)
             self._target_idx = torch.zeros((self.num_envs,), dtype=torch.int64, device=self.device)
             self._last_reward_terms = None
 
@@ -345,9 +356,13 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                     q=torch.tensor(self.bowl_pose_quat, dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
                 )
             )
+            robot_pose_before_settle = self.agent.robot.pose
+            robot_qpos_before_settle = self.agent.robot.get_qpos().clone()
             if self.reset_settle_steps > 0:
                 for _ in range(self.reset_settle_steps):
                     self.scene.step()
+                self.agent.reset(robot_qpos_before_settle)
+                self.agent.robot.set_pose(robot_pose_before_settle)
             for actor in self.objects:
                 try:
                     actor.set_linear_velocity(torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device))
@@ -360,6 +375,40 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         for actor in self.objects:
             pos.append(actor.pose.p)
         return torch.stack(pos, dim=1)
+
+    def _apply_scripted_grasp_assist(self) -> None:
+        """Carry near grasped objects for scripted demonstration collection."""
+        if not self.scripted_grasp_assist or self._grasp_assist_held_idx is None:
+            return
+        tcp_pos = self.agent.tcp.pose.p
+        obj_pos = self._get_object_pos_tensor()
+        qpos = self.agent.robot.get_qpos()
+        gripper_closed = torch.mean(torch.abs(qpos[:, -2:]), dim=1) < 0.015
+        gripper_open = torch.mean(torch.abs(qpos[:, -2:]), dim=1) > 0.025
+
+        valid = self._active_object_mask & (~self._placed_mask)
+        dist = torch.linalg.norm(obj_pos - tcp_pos[:, None, :], dim=-1)
+        dist = torch.where(valid, dist, torch.full_like(dist, 1e6))
+        nearest_dist, nearest_idx = torch.min(dist, dim=1)
+        can_grasp = gripper_closed & (self._grasp_assist_held_idx < 0) & (nearest_dist < self.grasp_assist_radius)
+        self._grasp_assist_held_idx = torch.where(can_grasp, nearest_idx, self._grasp_assist_held_idx)
+        self._grasp_assist_held_idx = torch.where(gripper_open, torch.full_like(self._grasp_assist_held_idx, -1), self._grasp_assist_held_idx)
+
+        carry_offset = torch.tensor([0.0, 0.0, self.grasp_assist_z_offset], dtype=torch.float32, device=self.device)
+        target_pos = tcp_pos + carry_offset.view(1, 3)
+        for obj_idx, actor in enumerate(self.objects):
+            held = self._grasp_assist_held_idx == obj_idx
+            if not torch.any(held):
+                continue
+            p = actor.pose.p.clone()
+            q = actor.pose.q.clone()
+            p[held] = target_pos[held]
+            actor.set_pose(Pose.create_from_pq(p=p, q=q))
+            try:
+                actor.set_linear_velocity(torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device))
+                actor.set_angular_velocity(torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device))
+            except Exception:
+                pass
 
     def _update_target_indices(self, tcp_pos: torch.Tensor, obj_pos: torch.Tensor):
         d = torch.linalg.norm(obj_pos - tcp_pos[:, None, :], dim=-1)
@@ -509,6 +558,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         # Override to inject reward term breakdown into info for logging/collection.
         action = self._step_action(action)
         self._elapsed_steps += 1
+        self._apply_scripted_grasp_assist()
         info = self.get_info()
         obs = self.get_obs(info, unflattened=True)
         reward = self.get_reward(obs=obs, action=action, info=info)

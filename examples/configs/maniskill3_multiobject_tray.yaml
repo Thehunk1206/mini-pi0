@@ -9,35 +9,45 @@ simulator:
   robot: panda
   controller: pd_ee_delta_pose
   control_freq: 20
-  horizon: 300
+  horizon: 700
   reward_shaping: true
   has_renderer: false
   has_offscreen_renderer: true
   use_camera_obs: true
-  camera_names: [base_camera]
-  camera_width: 128
-  camera_height: 128
+  camera_names: [base_camera, agentview_camera]
+  camera_width: 640
+  camera_height: 640
   env_kwargs:
     obs_mode: rgbd
     reward_mode: dense
     control_mode: pd_ee_delta_pose
     render_backend: gpu
     sim_backend: auto
-    object_count_min: 1
-    object_count_max: 3
+    object_count_min: 2
+    object_count_max: 4
+    robot_init_qpos_noise: 0.0
     object_types: [cube, sphere, cone]
     # Left side of robot in table frame (+y).
-    tray_center: [-0.05, 0.20, 0.006]
+    tray_center: [0.05, 0.22, 0.006]
     tray_size_xy: [0.22, 0.22]
     tray_wall_thickness: 0.008
     tray_wall_height: 0.035
     # Right side source bowl in table frame (-y).
-    bowl_center: [-0.05, -0.20, 0.006]
+    bowl_center: [0.05, -0.18, 0.006]
     bowl_inner_radius: 0.11
     bowl_table_z_offset: 0.02
     bowl_pose_quat: [1.0, 0.0, 0.0, 0.0]
-    bowl_spawn_plane_offset: 0.035
+    bowl_spawn_plane_offset: 0.006
     bowl_spawn_height: 0.0
+    source_bowl_collision: false
+    scripted_grasp_assist: false
+    grasp_assist_z_offset: -0.04
+    # Force actual sensor outputs to 640x640 for dataset collection.
+    sensor_width: 640
+    sensor_height: 640
+    # Optional: preview/render camera resolution for recordings.
+    render_width: 640
+    render_height: 640
     reset_settle_steps: 18
     tray_z_tol: 0.03
     settle_steps_required: 3
@@ -65,8 +75,8 @@ task:
 robot:
   name: panda
   action_dim: 7
-  image_key: agentview_image
-  image_keys: [agentview_image]
+  image_key: base_image
+  image_keys: [base_image, agentview_image]
   proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
   state_keys:
     - robot0_eef_pos
@@ -77,26 +87,38 @@ robot:
 # Example training data path from collector command.
 data:
   format: robomimic_hdf5
-  robomimic_hdf5: data/robomimic/custom/maniskill3_multiobject/ph/low_dim_v15.hdf5
+  robomimic_hdf5: artifacts/physical_scripted_2eps_obj2to4_h700_640.hdf5
   robomimic_data_group: data
-  fallback_image_hw: [128, 128]
+  fallback_image_hw: [640, 640]
   n_demos: 200
   chunk_size: 16
   action_stats_path: action_stats.json
 
 model:
-  name: mini_pi0_fm
+  name: mini_pi05
   action_dim: 7
+  prop_dim: 9
+  obs_mode: image
+  vision_dim: 0
   chunk_size: 16
-  cond_dim: 256
-  d_model: 256
-  nhead: 4
-  nlayers: 4
+  pretrained_model_name_or_path: HuggingFaceTB/SmolVLM-256M-Instruct
+  pretrained_variant: 256M
+  pretrained_local_files_only: false
 
 train:
   epochs: 100
   batch_size: 128
   lr: 0.0001
+  lr_backbone: 0.00001
+  lr_expert: 0.0001
+  freeze_backbone_steps: 2000
+  image_aug_enable: true
+  image_aug_crop_scale: 0.92
+  image_aug_brightness: 0.20
+  image_aug_contrast: 0.20
+  image_aug_saturation: 0.20
+  action_noise_std: 0.02
+  action_noise_clip: 1.5
   weight_decay: 0.0001
   num_workers: 0
   persistent_workers: false

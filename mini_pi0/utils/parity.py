@@ -96,6 +96,9 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             "use_context_layernorm",
             "vision_token_grid_size",
             "use_dit_adaln",
+            "pretrained_model_name_or_path",
+            "pretrained_variant",
+            "pretrained_local_files_only",
         ):
             if key not in model_cfg:
                 continue

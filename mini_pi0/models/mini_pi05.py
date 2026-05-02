@@ -41,16 +41,17 @@ Observation format
 from __future__ import annotations
 
 import copy
+import logging
 import math
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from transformers import SmolVLMConfig, SmolVLMForConditionalGeneration
+from transformers import AutoConfig, SmolVLMConfig, SmolVLMForConditionalGeneration
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
@@ -60,6 +61,8 @@ from transformers.models.llama.modeling_llama import (
     apply_rotary_pos_emb,
     eager_attention_forward,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -83,17 +86,21 @@ class ExpertConfig:
 @dataclass
 class MiniPI05Config:
     # ── VLM backbone (SmolVLM-256M sized) ──────────────────────────────────
-    vlm_text_hidden_size: int = 576          # SmolLM2-360M hidden dim
+    vlm_text_hidden_size: int = 576
     vlm_text_layers: int = 18               # must equal expert layers
     vlm_text_heads: int = 9
     vlm_text_kv_heads: int = 3
     vlm_text_intermediate: int = 1536
     vlm_text_head_dim: int = 64
-    vlm_vision_hidden: int = 384            # SigLIP-small hidden
+    vlm_text_vocab_size: int = 49280
+    vlm_vision_hidden: int = 768
     vlm_vision_layers: int = 12
-    vlm_vision_heads: int = 6
-    vlm_vision_image_size: int = 224
-    vlm_vision_patch_size: int = 14
+    vlm_vision_heads: int = 12
+    vlm_vision_image_size: int = 512
+    vlm_vision_patch_size: int = 16
+    vlm_scale_factor: int = 4
+    vlm_image_token_id: int = 49190
+    vlm_pad_token_id: int = 128002
 
     # ── Action expert ───────────────────────────────────────────────────────
     expert: ExpertConfig = field(default_factory=ExpertConfig)
@@ -111,6 +118,168 @@ class MiniPI05Config:
     fm_min_period: float = 4e-3
     fm_max_period: float = 4.0
     fm_num_steps: int = 10         # Euler integration steps at inference
+
+
+_SMOLVLM_256M_TEXT: dict[str, int] = {
+    "vlm_text_hidden_size": 576,
+    "vlm_text_layers": 30,
+    "vlm_text_heads": 9,
+    "vlm_text_kv_heads": 3,
+    "vlm_text_intermediate": 1536,
+    "vlm_text_head_dim": 64,
+    "vlm_text_vocab_size": 49280,
+}
+
+_SMOLVLM_500M_TEXT: dict[str, int] = {
+    "vlm_text_hidden_size": 960,
+    "vlm_text_layers": 32,
+    "vlm_text_heads": 15,
+    "vlm_text_kv_heads": 5,
+    "vlm_text_intermediate": 2560,
+    "vlm_text_head_dim": 64,
+    "vlm_text_vocab_size": 49280,
+}
+
+_SMOLVLM_VISION: dict[str, int] = {
+    "vlm_vision_hidden": 768,
+    "vlm_vision_layers": 12,
+    "vlm_vision_heads": 12,
+    "vlm_vision_image_size": 512,
+    "vlm_vision_patch_size": 16,
+}
+
+_EXPERT_DEFAULTS_256M: dict[str, float | int] = {
+    "hidden_size": 576,
+    "intermediate_size": 1536,
+    "num_hidden_layers": 30,
+    "num_attention_heads": 9,
+    "num_key_value_heads": 3,
+    "head_dim": 64,
+    "rms_norm_eps": 1e-6,
+    "rope_theta": 10000.0,
+}
+
+_EXPERT_DEFAULTS_500M: dict[str, float | int] = {
+    "hidden_size": 960,
+    "intermediate_size": 2560,
+    "num_hidden_layers": 32,
+    "num_attention_heads": 15,
+    "num_key_value_heads": 5,
+    "head_dim": 64,
+    "rms_norm_eps": 1e-6,
+    "rope_theta": 10000.0,
+}
+
+
+def make_config_for_variant(
+    variant: Literal["256M", "500M"],
+    action_dim: int = 18,
+    action_horizon: int = 50,
+    num_cameras: int = 2,
+    state_dim: int | None = None,
+    dtype: str = "bfloat16",
+    expert_overrides: dict[str, float | int] | None = None,
+) -> MiniPI05Config:
+    """Build a MiniPI05 config that matches a published SmolVLM checkpoint.
+
+    Args:
+        variant: SmolVLM variant to target.
+        action_dim: Action dimension (largest robot DoF).
+        action_horizon: Chunk length.
+        num_cameras: Number of cameras per sample.
+        state_dim: Proprio dimension. If None, `action_dim` is used.
+        dtype: Runtime compute dtype string accepted by this model.
+        expert_overrides: Optional expert overrides. Structural attention fields
+            are intentionally locked to remain compatible with joint attention.
+
+    Returns:
+        A fully-populated MiniPI05Config.
+
+    Raises:
+        ValueError: If variant is invalid or forbidden expert keys are overridden.
+    """
+    if variant == "256M":
+        text_cfg = _SMOLVLM_256M_TEXT
+        expert_cfg: dict[str, float | int] = dict(_EXPERT_DEFAULTS_256M)
+    elif variant == "500M":
+        text_cfg = _SMOLVLM_500M_TEXT
+        expert_cfg = dict(_EXPERT_DEFAULTS_500M)
+    else:
+        raise ValueError(f"Unknown variant '{variant}'. Choose '256M' or '500M'.")
+
+    if expert_overrides:
+        forbidden = {
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+        }
+        illegal = forbidden.intersection(expert_overrides.keys())
+        if illegal:
+            raise ValueError(
+                "Cannot override attention-structure fields "
+                f"{sorted(illegal)}. They must match the VLM backbone."
+            )
+        expert_cfg.update(expert_overrides)
+
+    return MiniPI05Config(
+        **text_cfg,
+        **_SMOLVLM_VISION,
+        expert=ExpertConfig(**expert_cfg),
+        action_dim=action_dim,
+        action_horizon=action_horizon,
+        num_cameras=num_cameras,
+        state_dim=state_dim,
+        dtype=dtype,
+    )
+
+
+def _apply_pretrained_backbone_shape(
+    config: MiniPI05Config,
+    pretrained_model_name_or_path: str,
+    local_files_only: bool,
+) -> MiniPI05Config:
+    """Overwrite MiniPI05 backbone dimensions from the checkpoint config.
+
+    Args:
+        config: Base MiniPI05 config to mutate.
+        pretrained_model_name_or_path: HF model id or local directory.
+        local_files_only: Whether to avoid remote hub calls.
+
+    Returns:
+        The same config instance with backbone fields aligned to checkpoint.
+    """
+    pretrained_cfg = AutoConfig.from_pretrained(
+        pretrained_model_name_or_path,
+        local_files_only=local_files_only,
+    )
+    config.vlm_text_hidden_size = int(pretrained_cfg.text_config.hidden_size)
+    config.vlm_text_layers = int(pretrained_cfg.text_config.num_hidden_layers)
+    config.vlm_text_heads = int(pretrained_cfg.text_config.num_attention_heads)
+    config.vlm_text_kv_heads = int(pretrained_cfg.text_config.num_key_value_heads)
+    config.vlm_text_intermediate = int(pretrained_cfg.text_config.intermediate_size)
+    config.vlm_text_head_dim = int(getattr(pretrained_cfg.text_config, "head_dim", 64))
+    config.vlm_text_vocab_size = int(pretrained_cfg.text_config.vocab_size)
+
+    config.vlm_vision_hidden = int(pretrained_cfg.vision_config.hidden_size)
+    config.vlm_vision_layers = int(pretrained_cfg.vision_config.num_hidden_layers)
+    config.vlm_vision_heads = int(pretrained_cfg.vision_config.num_attention_heads)
+    config.vlm_vision_image_size = int(pretrained_cfg.vision_config.image_size)
+    config.vlm_vision_patch_size = int(pretrained_cfg.vision_config.patch_size)
+
+    config.vlm_scale_factor = int(getattr(pretrained_cfg, "scale_factor", 4))
+    config.vlm_image_token_id = int(getattr(pretrained_cfg, "image_token_id", 49190))
+    config.vlm_pad_token_id = int(getattr(pretrained_cfg, "pad_token_id", 128002))
+
+    # Joint attention requires this structural parity.
+    config.expert.num_hidden_layers = config.vlm_text_layers
+    config.expert.num_attention_heads = config.vlm_text_heads
+    config.expert.num_key_value_heads = config.vlm_text_kv_heads
+    config.expert.head_dim = config.vlm_text_head_dim
+
+    if config.expert.hidden_size % config.expert.num_attention_heads != 0:
+        config.expert.hidden_size = config.vlm_text_hidden_size
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +418,7 @@ class SmolVLMWithExpertModel(nn.Module):
                 "num_attention_heads": cfg.vlm_text_heads,
                 "num_key_value_heads": cfg.vlm_text_kv_heads,
                 "head_dim":           cfg.vlm_text_head_dim,
+                "vocab_size":         cfg.vlm_text_vocab_size,
                 "rms_norm_eps":       1e-6,
                 "rope_theta":         10000.0,
                 "max_position_embeddings": 4096,
@@ -263,6 +433,9 @@ class SmolVLMWithExpertModel(nn.Module):
                 "image_size":         cfg.vlm_vision_image_size,
                 "patch_size":         cfg.vlm_vision_patch_size,
             },
+            scale_factor=cfg.vlm_scale_factor,
+            image_token_id=cfg.vlm_image_token_id,
+            pad_token_id=cfg.vlm_pad_token_id,
         )
         self.smolvlm = SmolVLMForConditionalGeneration(smolvlm_cfg)
         # Shortcuts into the text backbone
@@ -918,6 +1091,268 @@ class PI05SmolVLM(nn.Module):
         return self.sample_actions(obs, num_steps=int(n_steps))
 
 
+def remap_smolvlm_state_dict(ckpt_state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
+    """Remap raw SmolVLM checkpoint keys into MiniPI05 keyspace.
+
+    Args:
+        ckpt_state_dict: State dict from `SmolVLMForConditionalGeneration`.
+
+    Returns:
+        Remapped state dict where `model.*` keys are moved under
+        `backbone.smolvlm.model.*`.
+    """
+    remapped: dict[str, Tensor] = {}
+    skipped_keys: list[str] = []
+    for key, value in ckpt_state_dict.items():
+        if key.startswith("model."):
+            remapped[f"backbone.smolvlm.{key}"] = value
+            continue
+        if key.startswith("lm_head."):
+            skipped_keys.append(key)
+            continue
+        LOGGER.warning("Unexpected checkpoint key skipped: %s", key)
+        skipped_keys.append(key)
+    LOGGER.info(
+        "Remapped %d keys from SmolVLM checkpoint. Skipped %d keys.",
+        len(remapped),
+        len(skipped_keys),
+    )
+    return remapped
+
+
+def _verify_pretrained_load(
+    model: PI05SmolVLM,
+    missing_keys: list[str],
+    unexpected_keys: list[str],
+) -> None:
+    """Validate strict=False loading outcome and report parameter accounting.
+
+    Args:
+        model: Target model after loading.
+        missing_keys: Missing keys returned by `load_state_dict`.
+        unexpected_keys: Unexpected keys returned by `load_state_dict`.
+
+    Raises:
+        RuntimeError: If keys outside expected trainable heads are missing or if
+            there are unexpected keys.
+    """
+    expected_missing_prefixes = (
+        "backbone.expert_layers.",
+        "backbone.expert_norm.",
+        "action_in_proj.",
+        "action_out_proj.",
+        "time_mlp.",
+        "state_to_action.",
+        # Aliased references to the same SmolVLM text parameters.
+        "backbone.vlm_layers.",
+        "backbone.vlm_norm.",
+        # Language modeling head is intentionally unused by PI0.5.
+        "backbone.smolvlm.lm_head.",
+    )
+    invalid_missing = [
+        key
+        for key in missing_keys
+        if not any(key.startswith(prefix) for prefix in expected_missing_prefixes)
+    ]
+    if invalid_missing:
+        bad_keys = "\n  ".join(invalid_missing)
+        raise RuntimeError(
+            "Unexpected missing keys after loading checkpoint:\n  " + bad_keys
+        )
+
+    if unexpected_keys:
+        bad_keys = "\n  ".join(unexpected_keys)
+        raise RuntimeError(
+            "Unexpected remapped keys not present in MiniPI05 model:\n  " + bad_keys
+        )
+
+    total_params = sum(parameter.numel() for parameter in model.parameters())
+    fresh_params = sum(
+        parameter.numel()
+        for name, parameter in model.named_parameters()
+        if any(name.startswith(prefix) for prefix in expected_missing_prefixes)
+    )
+    loaded_params = total_params - fresh_params
+    LOGGER.info(
+        "Load complete | total=%.1fM loaded_from_ckpt=%.1fM random_init=%.1fM",
+        total_params / 1e6,
+        loaded_params / 1e6,
+        fresh_params / 1e6,
+    )
+
+
+def load_minipi05_from_smolvlm(
+    pretrained_model_name_or_path: str,
+    variant: Literal["256M", "500M"] = "256M",
+    action_dim: int = 18,
+    action_horizon: int = 50,
+    num_cameras: int = 2,
+    state_dim: int | None = None,
+    dtype: str = "bfloat16",
+    expert_overrides: dict[str, float | int] | None = None,
+    device: str | torch.device = "cpu",
+    torch_dtype: torch.dtype | None = None,
+    local_files_only: bool = False,
+) -> PI05SmolVLM:
+    """Build MiniPI05 and load SmolVLM pretrained weights into its backbone.
+
+    Args:
+        pretrained_model_name_or_path: HF model id or local path.
+        variant: Checkpoint family variant (`256M` or `500M`).
+        action_dim: Action dimension.
+        action_horizon: Action horizon.
+        num_cameras: Number of image streams.
+        state_dim: Proprio dimension.
+        dtype: Compute dtype for MiniPI05 runtime.
+        expert_overrides: Optional non-structural expert overrides.
+        device: Device to move the final model onto.
+        torch_dtype: Optional dtype for checkpoint loading.
+        local_files_only: If True, avoid network calls in HF loader.
+
+    Returns:
+        Initialized MiniPI05 model with pretrained SmolVLM backbone.
+    """
+    config = make_config_for_variant(
+        variant=variant,
+        action_dim=action_dim,
+        action_horizon=action_horizon,
+        num_cameras=num_cameras,
+        state_dim=state_dim,
+        dtype=dtype,
+        expert_overrides=expert_overrides,
+    )
+    config = _apply_pretrained_backbone_shape(
+        config=config,
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        local_files_only=local_files_only,
+    )
+    LOGGER.info(
+        "Backbone aligned to checkpoint | text=%d/%d/%d vision=%d/%d/%d img=%d patch=%d vocab=%d sf=%d",
+        config.vlm_text_hidden_size,
+        config.vlm_text_layers,
+        config.vlm_text_heads,
+        config.vlm_vision_hidden,
+        config.vlm_vision_layers,
+        config.vlm_vision_heads,
+        config.vlm_vision_image_size,
+        config.vlm_vision_patch_size,
+        config.vlm_text_vocab_size,
+        config.vlm_scale_factor,
+    )
+    model = PI05SmolVLM(config)
+
+    checkpoint_dtype = torch_dtype if torch_dtype is not None else torch.float32
+    LOGGER.info("Loading SmolVLM checkpoint from %s", pretrained_model_name_or_path)
+    pretrained = SmolVLMForConditionalGeneration.from_pretrained(
+        pretrained_model_name_or_path,
+        torch_dtype=checkpoint_dtype,
+        local_files_only=local_files_only,
+    )
+    checkpoint_state_dict = pretrained.state_dict()
+    del pretrained
+
+    remapped_state_dict = remap_smolvlm_state_dict(checkpoint_state_dict)
+    missing_keys, unexpected_keys = model.load_state_dict(
+        remapped_state_dict,
+        strict=False,
+    )
+    _verify_pretrained_load(model, missing_keys, unexpected_keys)
+
+    if dtype == "bfloat16":
+        model.backbone._cast_to_bfloat16()
+        model.action_in_proj.to(torch.bfloat16)
+        model.action_out_proj.to(torch.bfloat16)
+        model.time_mlp.to(torch.bfloat16)
+        model.state_to_action.to(torch.bfloat16)
+    return model.to(device)
+
+
+def load_minipi05_from_safetensors(
+    safetensors_path: str,
+    variant: Literal["256M", "500M"] = "256M",
+    action_dim: int = 18,
+    action_horizon: int = 50,
+    num_cameras: int = 2,
+    state_dim: int | None = None,
+    dtype: str = "bfloat16",
+    expert_overrides: dict[str, float | int] | None = None,
+    device: str | torch.device = "cpu",
+) -> PI05SmolVLM:
+    """Load SmolVLM weights from a local safetensors file.
+
+    Args:
+        safetensors_path: Path to the `.safetensors` file.
+        variant: SmolVLM variant.
+        action_dim: Action dimension.
+        action_horizon: Action horizon.
+        num_cameras: Number of camera streams.
+        state_dim: Proprio dimension.
+        dtype: Runtime model dtype.
+        expert_overrides: Optional expert overrides.
+        device: Target device.
+
+    Returns:
+        Initialized MiniPI05 model with loaded backbone weights.
+
+    Raises:
+        ImportError: If `safetensors` package is not installed.
+    """
+    try:
+        from safetensors.torch import load_file
+    except ImportError as error:
+        raise ImportError(
+            "safetensors is required for local safetensors loading. "
+            "Install with `pip install safetensors`."
+        ) from error
+
+    config = make_config_for_variant(
+        variant=variant,
+        action_dim=action_dim,
+        action_horizon=action_horizon,
+        num_cameras=num_cameras,
+        state_dim=state_dim,
+        dtype=dtype,
+        expert_overrides=expert_overrides,
+    )
+    model = PI05SmolVLM(config)
+    checkpoint_state_dict = load_file(safetensors_path)
+    remapped_state_dict = remap_smolvlm_state_dict(checkpoint_state_dict)
+    missing_keys, unexpected_keys = model.load_state_dict(
+        remapped_state_dict,
+        strict=False,
+    )
+    _verify_pretrained_load(model, missing_keys, unexpected_keys)
+
+    if dtype == "bfloat16":
+        model.backbone._cast_to_bfloat16()
+        model.action_in_proj.to(torch.bfloat16)
+        model.action_out_proj.to(torch.bfloat16)
+        model.time_mlp.to(torch.bfloat16)
+        model.state_to_action.to(torch.bfloat16)
+    return model.to(device)
+
+
+def freeze_vlm_backbone(model: PI05SmolVLM) -> None:
+    """Freeze SmolVLM backbone parameters, keeping action heads trainable."""
+    for name, parameter in model.named_parameters():
+        if name.startswith("backbone.smolvlm."):
+            parameter.requires_grad_(False)
+
+
+def unfreeze_vlm_backbone(model: PI05SmolVLM) -> None:
+    """Unfreeze SmolVLM backbone parameters for full fine-tuning."""
+    for name, parameter in model.named_parameters():
+        if name.startswith("backbone.smolvlm."):
+            parameter.requires_grad_(True)
+
+
+def freeze_vision_tower(model: PI05SmolVLM) -> None:
+    """Freeze only the vision tower and connector while leaving text trainable."""
+    for name, parameter in model.named_parameters():
+        if "vision_model" in name or "connector" in name:
+            parameter.requires_grad_(False)
+
+
 # ---------------------------------------------------------------------------
 # Quick smoke test
 # ---------------------------------------------------------------------------
@@ -926,48 +1361,93 @@ if __name__ == "__main__":
     import sys
 
     print("Building π₀.5 – SmolVLM edition ...")
+    USE_PRETRAINED = True
+    PRETRAINED_MODEL = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    VARIANT: Literal["256M", "500M"] = "256M"
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    DTYPE = "float32"
+    BATCH_SIZE = 1
+    NUM_CAMERAS = 2
+    ACTION_DIM = 8
+    ACTION_HORIZON = 10
+    LANG_LEN = 8
+    NUM_STEPS = 3
+    LOCAL_FILES_ONLY = False
 
-    cfg = MiniPI05Config(
-        # Tiny config for fast smoke test
-        vlm_text_hidden_size=128,
-        vlm_text_layers=4,
-        vlm_text_heads=4,
-        vlm_text_kv_heads=2,
-        vlm_text_intermediate=256,
-        vlm_text_head_dim=32,
-        vlm_vision_hidden=128,
-        vlm_vision_layers=2,
-        vlm_vision_heads=4,
-        vlm_vision_image_size=64,
-        vlm_vision_patch_size=8,
-        expert=ExpertConfig(
-            hidden_size=128,
-            intermediate_size=256,
-            num_hidden_layers=4,   # must match vlm_text_layers
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            head_dim=32,
-        ),
-        action_dim=8,
-        action_horizon=10,
-        num_cameras=2,
-        dtype="float32",           # float32 for CPU smoke test
-    )
+    if USE_PRETRAINED:
+        model = load_minipi05_from_smolvlm(
+            pretrained_model_name_or_path=PRETRAINED_MODEL,
+            variant=VARIANT,
+            action_dim=ACTION_DIM,
+            action_horizon=ACTION_HORIZON,
+            num_cameras=NUM_CAMERAS,
+            dtype=DTYPE,
+            device=DEVICE,
+            local_files_only=LOCAL_FILES_ONLY,
+        )
+        cfg = model.cfg
+        print(f"Loaded pretrained SmolVLM backbone from: {PRETRAINED_MODEL}")
+    else:
+        cfg = MiniPI05Config(
+            # Tiny config for fast smoke test
+            vlm_text_hidden_size=128,
+            vlm_text_layers=4,
+            vlm_text_heads=4,
+            vlm_text_kv_heads=2,
+            vlm_text_intermediate=256,
+            vlm_text_head_dim=32,
+            vlm_vision_hidden=128,
+            vlm_vision_layers=2,
+            vlm_vision_heads=4,
+            vlm_vision_image_size=64,
+            vlm_vision_patch_size=8,
+            expert=ExpertConfig(
+                hidden_size=128,
+                intermediate_size=256,
+                num_hidden_layers=4,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                head_dim=32,
+            ),
+            action_dim=ACTION_DIM,
+            action_horizon=ACTION_HORIZON,
+            num_cameras=NUM_CAMERAS,
+            dtype=DTYPE,
+        )
+        model = PI05SmolVLM(cfg).to(DEVICE)
+        print("Loaded tiny random-init smoke configuration.")
 
-    model = PI05SmolVLM(cfg)
-    total_params = sum(p.numel() for p in model.parameters()) / 1e6
+    total_params = sum(parameter.numel() for parameter in model.parameters()) / 1e6
     print(f"Total parameters: {total_params:.1f}M")
 
-    B, L, C, H, W = 2, 16, 3, 64, 64
+    batch_size = int(BATCH_SIZE)
+    lang_len = int(LANG_LEN)
+    channels = 3
+    image_size = int(cfg.vlm_vision_image_size)
+    action_dim = int(cfg.action_dim)
+    device = torch.device(DEVICE)
+
+    images = [
+        torch.randn(batch_size, channels, image_size, image_size, device=device)
+        for _ in range(cfg.num_cameras)
+    ]
+    image_masks = [
+        torch.ones(batch_size, dtype=torch.bool, device=device)
+        for _ in range(cfg.num_cameras)
+    ]
     obs = Observation(
-        images      = [torch.randn(B, C, H, W), torch.randn(B, C, H, W)],
-        image_masks = [torch.ones(B, dtype=torch.bool),
-                       torch.ones(B, dtype=torch.bool)],
-        lang_tokens = torch.zeros(B, L, dtype=torch.long),
-        lang_masks  = torch.ones(B, L, dtype=torch.bool),
-        state       = torch.randn(B, cfg.action_dim),
+        images=images,
+        image_masks=image_masks,
+        lang_tokens=torch.zeros(batch_size, lang_len, dtype=torch.long, device=device),
+        lang_masks=torch.ones(batch_size, lang_len, dtype=torch.bool, device=device),
+        state=torch.randn(batch_size, action_dim, device=device),
     )
-    actions = torch.randn(B, cfg.action_horizon, cfg.action_dim)
+    actions = torch.randn(
+        batch_size,
+        int(cfg.action_horizon),
+        action_dim,
+        device=device,
+    )
 
     print("Forward (training) ...")
     loss = model(obs, actions)
@@ -978,7 +1458,7 @@ if __name__ == "__main__":
     print("Forward (inference) ...")
     model.eval()
     with torch.no_grad():
-        sampled = model.sample_actions(obs, num_steps=3)
+        sampled = model.sample_actions(obs, num_steps=int(NUM_STEPS))
     print(f"  sampled shape : {sampled.shape}")
 
     print("\nSmoke test passed.")

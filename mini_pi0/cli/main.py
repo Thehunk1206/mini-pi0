@@ -551,6 +551,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_collect_ms.add_argument("--collector_backend", choices=["scripted", "mplib"], default="scripted")
     p_collect_ms.add_argument("--collector_name", default=None, help="Task-specific collector plugin name.")
     p_collect_ms.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
+    p_collect_ms.add_argument("--append", action=argparse.BooleanOptionalAction, default=False)
 
     return p
 
@@ -664,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
             collector_backend=str(args.collector_backend),
             collector_name=args.collector_name,
             overwrite=bool(args.overwrite),
+            append=bool(args.append),
         )
         print(json.dumps(out, indent=2, sort_keys=True))
         return 0

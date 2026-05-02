@@ -75,6 +75,7 @@ class ScriptedMultiObjectOracle:
         eef = np.asarray(obs["robot0_eef_pos"], dtype=np.float32)
         obj = np.asarray(obs.get("observation.state.object"), dtype=np.float32).reshape(-1, 3)
         placed = np.asarray(obs.get("observation.state.placed_mask"), dtype=np.float32).reshape(-1)
+        grasped_mask = np.asarray(obs.get("observation.state.grasped_mask", np.zeros_like(placed)), dtype=np.float32).reshape(-1)
         gripper_qpos = np.asarray(obs.get("robot0_gripper_qpos", np.zeros((2,), dtype=np.float32)), dtype=np.float32).reshape(-1)
 
         self.phase_step += 1
@@ -91,14 +92,14 @@ class ScriptedMultiObjectOracle:
 
         target = obj[self.target_idx]
         above = target + np.array([0.0, 0.0, 0.11], dtype=np.float32)
-        pre_grasp = target + np.array([0.0, 0.0, 0.055], dtype=np.float32)
-        grasp = target + np.array([0.0, 0.0, 0.022], dtype=np.float32)
+        pre_grasp = target + np.array([0.0, 0.0, 0.045], dtype=np.float32)
+        grasp = target + np.array([0.0, 0.0, 0.004], dtype=np.float32)
         lift_goal = target + np.array([0.0, 0.0, 0.15], dtype=np.float32)
         tray_above = self.tray_center + np.array([0.0, 0.0, 0.16], dtype=np.float32)
         tray_drop = self.tray_center + np.array([0.0, 0.0, 0.065], dtype=np.float32)
         retreat = self.tray_center + np.array([0.0, 0.0, 0.18], dtype=np.float32)
 
-        def delta(goal: np.ndarray, gain: float = 10.0) -> np.ndarray:
+        def delta(goal: np.ndarray, gain: float = 4.0) -> np.ndarray:
             d = (goal - eef) * gain
             d = np.clip(d, -1.0, 1.0)
             return d.astype(np.float32)
@@ -108,10 +109,9 @@ class ScriptedMultiObjectOracle:
             self.phase_step = 0
 
         def likely_grasped() -> bool:
-            g_close = bool(np.mean(np.abs(gripper_qpos)) < 0.03)
+            grasped = bool(self.target_idx < len(grasped_mask) and grasped_mask[self.target_idx] > 0.5)
             lifted = bool(target[2] > 0.04)
-            near_eef = bool(np.linalg.norm(target - eef) < 0.09)
-            return (g_close and near_eef) or lifted
+            return grasped or lifted
 
         if self.phase_step > 90:
             self.retry_count += 1
@@ -130,28 +130,28 @@ class ScriptedMultiObjectOracle:
             return action
 
         if self.phase == "approach_above":
-            action[:3] = delta(above)
+            action[:3] = delta(above, gain=5.0)
             action[6] = 1.0
-            if np.linalg.norm(above - eef) < 0.022:
+            if np.linalg.norm(above - eef) < 0.018:
                 transition("pre_grasp")
         elif self.phase == "pre_grasp":
-            action[:3] = delta(pre_grasp)
+            action[:3] = delta(pre_grasp, gain=4.5)
             action[6] = 1.0
-            if np.linalg.norm(pre_grasp - eef) < 0.018:
+            if np.linalg.norm(pre_grasp - eef) < 0.014:
                 transition("descend_grasp")
         elif self.phase == "descend_grasp":
-            action[:3] = delta(grasp)
+            action[:3] = delta(grasp, gain=3.5)
             action[6] = 1.0
-            if np.linalg.norm(grasp - eef) < 0.012:
+            if np.linalg.norm(grasp - eef) < 0.010:
                 transition("close_gripper")
         elif self.phase == "close_gripper":
             action[:3] = 0.0
             action[6] = -1.0
             self.closed_hold_steps += 1
-            if self.closed_hold_steps >= 8:
+            if self.closed_hold_steps >= 14:
                 transition("lift")
         elif self.phase == "lift":
-            action[:3] = delta(lift_goal)
+            action[:3] = delta(lift_goal, gain=3.5)
             action[6] = -1.0
             if likely_grasped() and eef[2] > (self.lift_reference_z + 0.08):
                 transition("to_tray_above")
@@ -159,14 +159,14 @@ class ScriptedMultiObjectOracle:
                 self.retry_count += 1
                 transition("select_target")
         elif self.phase == "to_tray_above":
-            action[:3] = delta(tray_above)
+            action[:3] = delta(tray_above, gain=3.0)
             action[6] = -1.0
-            if np.linalg.norm(tray_above - eef) < 0.026:
+            if np.linalg.norm(tray_above - eef) < 0.08:
                 transition("drop_to_tray")
         elif self.phase == "drop_to_tray":
-            action[:3] = delta(tray_drop)
+            action[:3] = delta(tray_drop, gain=2.5)
             action[6] = -1.0
-            if np.linalg.norm(tray_drop - eef) < 0.016:
+            if np.linalg.norm(tray_drop - eef) < 0.06:
                 transition("open_gripper")
         elif self.phase == "open_gripper":
             action[:3] = 0.0
@@ -175,9 +175,9 @@ class ScriptedMultiObjectOracle:
             if self.open_hold_steps >= 10:
                 transition("retreat")
         elif self.phase == "retreat":
-            action[:3] = delta(retreat)
+            action[:3] = delta(retreat, gain=3.0)
             action[6] = 1.0
-            if np.linalg.norm(retreat - eef) < 0.025:
+            if np.linalg.norm(retreat - eef) < 0.08:
                 if self.target_idx < len(placed) and placed[self.target_idx] > 0.5:
                     self.target_idx = None
                     self.retry_count = 0
