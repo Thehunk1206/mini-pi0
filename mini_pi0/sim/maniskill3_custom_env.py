@@ -15,7 +15,10 @@ from mani_skill.utils import sapien_utils
 from mani_skill.utils.building import actors
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
+from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils.structs import Pose
+
+from mini_pi0.sim.domain_randomization import DomainRandomizationConfig, parse_domain_randomization_config
 
 
 @dataclass
@@ -86,8 +89,11 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         render_height: int = 512,
         timeout_steps: int = 1000,
         reward: dict[str, float] | None = None,
+        domain_randomization: dict[str, Any] | None = None,
         **kwargs,
     ):
+        self.dr_config: DomainRandomizationConfig = parse_domain_randomization_config(domain_randomization)
+        self.domain_randomization = bool(self.dr_config.enabled)
         self.robot_init_qpos_noise = float(robot_init_qpos_noise)
         self.object_count_min = int(max(1, object_count_min))
         self.object_count_max = int(max(self.object_count_min, object_count_max))
@@ -141,6 +147,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         self._last_held_mask = None
         self._grasp_assist_held_idx = None
         self._target_idx = None
+        self._placement_targets = None
         self._last_reward_terms: dict[str, torch.Tensor] | None = None
 
         robot_key = str(robot_uids).strip().lower()
@@ -154,13 +161,24 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
 
     @property
     def _default_sensor_configs(self):
-        base_pose = sapien_utils.look_at(eye=self.sensor_cam_eye_pos, target=self.sensor_cam_target_pos)
+        cam_cfg = self.dr_config.camera
+        base_eye = np.asarray(self.sensor_cam_eye_pos, dtype=np.float32).copy()
+        base_target = np.asarray(self.sensor_cam_target_pos, dtype=np.float32).copy()
+        hand_p = np.array([0.0464982, -0.0200011, 0.0360011], dtype=np.float32)
+        fov = np.pi / 2
+        if self.domain_randomization and cam_cfg.enabled:
+            base_eye += self._np_uniform(-np.asarray(cam_cfg.base_pos_jitter), np.asarray(cam_cfg.base_pos_jitter))
+            base_target += self._np_uniform(-np.asarray(cam_cfg.base_target_jitter), np.asarray(cam_cfg.base_target_jitter))
+            hand_p += self._np_uniform(-np.asarray(cam_cfg.hand_pos_jitter), np.asarray(cam_cfg.hand_pos_jitter))
+            fov += np.deg2rad(float(self._np_uniform(-cam_cfg.fov_jitter_deg, cam_cfg.fov_jitter_deg)))
+
+        base_pose = sapien_utils.look_at(eye=base_eye, target=base_target)
         hand_mount = self.agent.robot.links_map.get("panda_hand")
         hand_pose = sapien.Pose(
-            p=[0.0464982, -0.0200011, 0.0360011],
+            p=hand_p.tolist(),
             q=[0.0, 0.70710678, 0.0, 0.70710678],
         )
-        configs = [CameraConfig("base_camera", base_pose, self.sensor_width, self.sensor_height, np.pi / 2, 0.01, 100)]
+        configs = [CameraConfig("base_camera", base_pose, self.sensor_width, self.sensor_height, fov, 0.01, 100, shader_pack="default")]
         if hand_mount is not None:
             configs.append(
                 CameraConfig(
@@ -168,10 +186,11 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                     hand_pose,
                     self.sensor_width,
                     self.sensor_height,
-                    np.pi / 2,
+                    fov,
                     0.01,
                     100,
                     mount=hand_mount,
+                    shader_pack="default",
                 )
             )
         return configs
@@ -181,41 +200,106 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         pose = sapien_utils.look_at(eye=self.human_cam_eye_pos, target=self.human_cam_target_pos)
         return CameraConfig("render_camera", pose, self.render_width, self.render_height, 1, 0.01, 100)
 
+    def _load_lighting(self, options: dict):
+        """Load default or randomized scene lighting."""
+        if not (self.domain_randomization and self.dr_config.lighting.enabled):
+            return super()._load_lighting(options)
+
+        light_cfg = self.dr_config.lighting
+        ambient = float(self._np_uniform(*light_cfg.ambient_range))
+        intensity = float(self._np_uniform(*light_cfg.directional_intensity_range))
+        yaw = np.deg2rad(float(self._np_uniform(*light_cfg.directional_yaw_range_deg)))
+        direction = [float(np.cos(yaw)), float(np.sin(yaw)), -1.0]
+        self.scene.set_ambient_light([ambient, ambient, ambient])
+        self.scene.add_directional_light(
+            direction,
+            [intensity, intensity, intensity],
+            shadow=self.enable_shadow,
+            shadow_scale=5,
+            shadow_map_size=2048,
+        )
+        self.scene.add_directional_light([0, 0, -1], [0.7, 0.7, 0.7])
+
+    def _np_uniform(self, low: Any, high: Any) -> np.ndarray | float:
+        """Sample from the environment RNG if available, otherwise numpy RNG."""
+        rng = getattr(self, "_batched_episode_rng", None)
+        if rng is not None:
+            try:
+                return rng[0].uniform(low=low, high=high)
+            except Exception:
+                return rng.uniform(low=low, high=high)
+        return np.random.default_rng().uniform(low=low, high=high)
+
+    @staticmethod
+    def _jitter_color(base: list[float], jitter: float, rng: np.random.Generator) -> list[float]:
+        """Apply bounded RGB jitter while preserving alpha."""
+        rgb = np.asarray(base[:3], dtype=np.float32)
+        if jitter > 0.0:
+            rgb = np.clip(rgb + rng.uniform(-jitter, jitter, size=3), 0.05, 0.95)
+        return rgb.tolist() + [float(base[3] if len(base) > 3 else 1.0)]
+
+    def _build_randomized_object(self, idx: int, shape: str, base_color: list[float]) -> Any:
+        """Build one logical object, optionally merged from per-subscene variants."""
+        if not self.domain_randomization:
+            return self._build_shared_object(idx, shape, base_color)
+
+        obj_cfg = self.dr_config.visual
+        phys_cfg = self.dr_config.physics
+        built = []
+        for scene_i in range(self.num_envs):
+            rng = self._batched_episode_rng[scene_i]
+            color = self._jitter_color(base_color, obj_cfg.object_color_jitter if obj_cfg.enabled else 0.0, rng)
+            friction = float(rng.uniform(*phys_cfg.object_friction_range)) if phys_cfg.enabled else 1.0
+            restitution = float(rng.uniform(*phys_cfg.object_restitution_range)) if phys_cfg.enabled else 0.0
+            mass_scale = float(rng.uniform(*phys_cfg.object_mass_scale_range)) if phys_cfg.enabled else 1.0
+            material = sapien.pysapien.physx.PhysxMaterial(
+                static_friction=friction,
+                dynamic_friction=friction,
+                restitution=restitution,
+            )
+            builder = self.scene.create_actor_builder()
+            if shape == "cube":
+                builder.add_box_collision(half_size=[0.02] * 3, material=material, density=1000 * mass_scale)
+                builder.add_box_visual(half_size=[0.02] * 3, material=sapien.render.RenderMaterial(base_color=color))
+            elif shape == "sphere":
+                builder.add_sphere_collision(radius=0.022, material=material, density=1000 * mass_scale)
+                builder.add_sphere_visual(radius=0.022, material=sapien.render.RenderMaterial(base_color=color))
+            else:
+                builder.add_cylinder_collision(radius=0.020, half_length=0.020, material=material, density=1000 * mass_scale)
+                builder.add_cylinder_visual(radius=0.020, half_length=0.020, material=sapien.render.RenderMaterial(base_color=color))
+            builder.set_scene_idxs([scene_i])
+            builder.initial_pose = sapien.Pose(p=[5, 5, 5])
+            actor = builder.build(name=f"obj_{idx:02d}_{shape}_{scene_i}")
+            self.remove_from_state_dict_registry(actor)
+            built.append(actor)
+        merged = Actor.merge(built, name=f"obj_{idx:02d}_{shape}")
+        self.add_to_state_dict_registry(merged)
+        return merged
+
+    def _build_shared_object(self, idx: int, shape: str, color: list[float]) -> Any:
+        """Build one shared primitive object for non-randomized runs."""
+        name = f"obj_{idx:02d}_{shape}"
+        if shape == "cube":
+            return actors.build_cube(self.scene, half_size=0.02, color=color, name=name, initial_pose=sapien.Pose(p=[5, 5, 5]))
+        if shape == "sphere":
+            return actors.build_sphere(self.scene, radius=0.022, color=color, name=name, initial_pose=sapien.Pose(p=[5, 5, 5]))
+        return actors.build_cylinder(self.scene, radius=0.020, half_length=0.020, color=color, name=name, initial_pose=sapien.Pose(p=[5, 5, 5]))
+
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(env=self, robot_init_qpos_noise=self.robot_init_qpos_noise)
         self.table_scene.build()
 
         self.objects: list[Any] = []
         self.object_shape_names: list[str] = []
+        base_colors = {
+            "cube": [0.90, 0.20, 0.20, 1.0],
+            "sphere": [0.18, 0.56, 0.88, 1.0],
+            "cone": [0.85, 0.74, 0.21, 1.0],
+        }
 
         for idx in range(self.object_count_max):
             shape = self.object_types[idx % len(self.object_types)]
-            name = f"obj_{idx:02d}_{shape}"
-            if shape == "cube":
-                actor = actors.build_cube(
-                    self.scene,
-                    half_size=0.02,
-                    color=[0.90, 0.20, 0.20, 1.0],
-                    name=name,
-                    initial_pose=sapien.Pose(p=[5, 5, 5]),
-                )
-            elif shape == "sphere":
-                actor = actors.build_sphere(
-                    self.scene,
-                    radius=0.022,
-                    color=[0.18, 0.56, 0.88, 1.0],
-                    name=name,
-                    initial_pose=sapien.Pose(p=[5, 5, 5]),
-                )
-            else:
-                actor = actors.build_cylinder(
-                    self.scene,
-                    radius=0.020,
-                    half_length=0.020,
-                    color=[0.85, 0.74, 0.21, 1.0],
-                    name=name,
-                    initial_pose=sapien.Pose(p=[5, 5, 5]),
-                )
+            actor = self._build_randomized_object(idx, shape, base_colors[shape])
             self.objects.append(actor)
             self.object_shape_names.append(shape)
 
@@ -226,11 +310,21 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         wh = self.tray_wall_height
         wall_half_h = wh * 0.5
         base_z = float(self.tray_center_np[2])
+        rng0 = self._batched_episode_rng[0] if self.domain_randomization else np.random.default_rng(0)
+        tray_color = [0.25, 0.25, 0.28, 1.0]
+        tray_wall_color = [0.18, 0.18, 0.20, 1.0]
+        bowl_wall_color = [0.35, 0.35, 0.35, 0.0]
+        bowl_color = [1.0, 1.0, 1.0, 1.0]
+        if self.domain_randomization and self.dr_config.visual.enabled:
+            tray_color = self._jitter_color(tray_color, self.dr_config.visual.tray_color_jitter, rng0)
+            tray_wall_color = self._jitter_color(tray_wall_color, self.dr_config.visual.tray_color_jitter, rng0)
+            bowl_wall_color = self._jitter_color(bowl_wall_color, self.dr_config.visual.bowl_color_jitter, rng0)
+            bowl_color = self._jitter_color(bowl_color, self.dr_config.visual.bowl_color_jitter, rng0)
 
         self.tray = actors.build_box(
             self.scene,
             half_sizes=[sx, sy, tray_base_half_z],
-            color=[0.25, 0.25, 0.28, 1.0],
+            color=tray_color,
             name="tray_base",
             body_type="kinematic",
             add_collision=True,
@@ -248,7 +342,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             wall = actors.build_box(
                 self.scene,
                 half_sizes=hs,
-                color=[0.18, 0.18, 0.20, 1.0],
+                color=tray_wall_color,
                 name=nm,
                 body_type="kinematic",
                 add_collision=True,
@@ -272,6 +366,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             filename=os.path.join(bowl_assets_dir, "frl_apartment_bowl_07.glb"),
             scale=[1.0, 1.0, 1.0],
             pose=sapien.Pose(q=bowl_fix_q),
+            material=sapien.render.RenderMaterial(base_color=bowl_color),
         )
         bowl_pose_p = self.bowl_center_np.copy()
         bowl_pose_p[2] += self.bowl_table_z_offset
@@ -296,7 +391,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                 wall = actors.build_box(
                     self.scene,
                     half_sizes=[self.source_bowl_wall_thickness * 0.5, segment_half_len, wall_half_h],
-                    color=[0.35, 0.35, 0.35, 0.0],
+                    color=bowl_wall_color,
                     name=f"source_bowl_containment_{wall_idx:02d}",
                     body_type="kinematic",
                     add_collision=True,
@@ -317,6 +412,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             self._last_success_fraction = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
             self._grasp_assist_held_idx = torch.full((self.num_envs,), -1, dtype=torch.int64, device=self.device)
             self._target_idx = torch.zeros((self.num_envs,), dtype=torch.int64, device=self.device)
+            self._placement_targets = self._sample_placement_targets()
             self._last_reward_terms = None
 
             active_counts = torch.randint(
@@ -325,19 +421,28 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                 size=(self.num_envs,),
                 device=self.device,
             )
-            for i in range(self.object_count_max):
-                self._active_object_mask[:, i] = i < active_counts
+            if self.domain_randomization and self.dr_config.objects.enabled and self.dr_config.objects.randomize_active_slots:
+                for env_i in range(self.num_envs):
+                    perm = torch.randperm(self.object_count_max, device=self.device)
+                    self._active_object_mask[env_i, perm[: int(active_counts[env_i].item())]] = True
+            else:
+                for i in range(self.object_count_max):
+                    self._active_object_mask[:, i] = i < active_counts
 
             # Spawn active objects inside bowl with simple separation retries.
             device = self.device
             bowl_center_xy = torch.tensor(self.bowl_center_np[:2], dtype=torch.float32, device=device)
             spawn_margin = max(0.03, self.source_bowl_wall_thickness + 0.026)
-            spawn_r = max(0.02, self.bowl_inner_radius - spawn_margin)
+            base_spawn_r = max(0.02, self.bowl_inner_radius - spawn_margin)
+            spawn_jitter = self.dr_config.objects.spawn_radius_jitter if self.domain_randomization and self.dr_config.objects.enabled else 0.0
             min_sep = 0.045
             xyz_store: list[torch.Tensor] = []
             for i, actor in enumerate(self.objects):
                 xy = torch.zeros((self.num_envs, 2), device=device)
                 for env_i in range(self.num_envs):
+                    spawn_r = base_spawn_r
+                    if spawn_jitter > 0.0:
+                        spawn_r = max(0.02, base_spawn_r + float(torch.empty((), device=device).uniform_(-spawn_jitter, spawn_jitter).item()))
                     best_xy = None
                     for _ in range(25):
                         theta = float(torch.rand((1,), device=device).item()) * 2.0 * np.pi
@@ -375,6 +480,10 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                 )
                 qs = torch.zeros((self.num_envs, 4), device=self.device)
                 qs[:, 0] = 1.0
+                if self.domain_randomization and self.dr_config.objects.enabled and self.dr_config.objects.randomize_spawn_yaw and self.object_shape_names[i] != "sphere":
+                    yaw = torch.rand((self.num_envs,), device=self.device) * (2.0 * np.pi)
+                    qs[:, 0] = torch.cos(yaw * 0.5)
+                    qs[:, 3] = torch.sin(yaw * 0.5)
                 actor.set_pose(Pose.create_from_pq(p=xyz, q=qs))
                 xyz_store.append(xyz)
 
@@ -452,6 +561,33 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         for actor in self.objects:
             pos.append(actor.pose.p)
         return torch.stack(pos, dim=1)
+
+    def _sample_placement_targets(self) -> torch.Tensor:
+        """Sample per-object drop targets inside the tray."""
+        targets = torch.zeros((self.num_envs, self.object_count_max, 3), dtype=torch.float32, device=self.device)
+        tray_center = torch.tensor(self.tray_center_np, dtype=torch.float32, device=self.device)
+        if not (self.domain_randomization and self.dr_config.placement.enabled):
+            targets[:] = tray_center
+            targets[..., 2] = float(self.dr_config.placement.target_z)
+            return targets
+
+        cfg = self.dr_config.placement
+        half_xy = torch.tensor(self.tray_size_xy_np, dtype=torch.float32, device=self.device) * 0.5
+        usable = torch.clamp(half_xy - float(cfg.target_xy_margin), min=0.005)
+        min_sep = float(cfg.min_target_separation)
+        for env_i in range(self.num_envs):
+            placed_xy: list[torch.Tensor] = []
+            for obj_i in range(self.object_count_max):
+                best_xy = tray_center[:2]
+                for _ in range(50):
+                    xy = tray_center[:2] + (torch.rand((2,), device=self.device) * 2.0 - 1.0) * usable
+                    if all(float(torch.linalg.norm(xy - prev).item()) >= min_sep for prev in placed_xy):
+                        best_xy = xy
+                        break
+                placed_xy.append(best_xy)
+                targets[env_i, obj_i, :2] = best_xy
+                targets[env_i, obj_i, 2] = float(cfg.target_z)
+        return targets
 
     def _apply_scripted_grasp_assist(self) -> None:
         """Carry near grasped objects for scripted demonstration collection."""
@@ -537,6 +673,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         info["placed_mask"] = self._placed_mask
         info["grasped_mask"] = grasped_mask
         info["obj_pos"] = obj_pos
+        info["place_targets"] = self._placement_targets
 
     def evaluate(self):
         info = {}
@@ -635,6 +772,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             observation_state_object=obj_pos,
             observation_state_object_mask=self._active_object_mask.float(),
             observation_state_placed_mask=self._placed_mask.float(),
+            observation_state_place_targets=self._placement_targets.reshape(self.num_envs, -1),
             observation_state_task_progress=info["success_fraction"].unsqueeze(-1),
         )
         return obs

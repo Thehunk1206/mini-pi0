@@ -154,6 +154,11 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
     obj_pos = to_numpy(uw._get_object_pos_tensor()).reshape(num_envs, -1).astype(np.float32)
     active = to_numpy(uw._active_object_mask).astype(np.float32)
     placed = to_numpy(uw._placed_mask).astype(np.float32)
+    place_targets_raw = getattr(uw, "_placement_targets", None)
+    if place_targets_raw is None:
+        place_targets = np.zeros_like(obj_pos, dtype=np.float32)
+    else:
+        place_targets = to_numpy(place_targets_raw).reshape(num_envs, -1).astype(np.float32)
     frac = to_numpy(uw._last_success_fraction).astype(np.float32)
 
     sensor_frames: dict[str, np.ndarray] = {}
@@ -192,6 +197,7 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
             "observation.state.object": obj_pos[i],
             "observation.state.object_mask": active[i],
             "observation.state.placed_mask": placed[i],
+            "observation.state.place_targets": place_targets[i],
             "observation.state.task_progress": np.array([frac[i]], dtype=np.float32),
         }
         obs_i: dict[str, np.ndarray] = {}
@@ -200,7 +206,13 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
             obs_i[key] = frame[i][..., :3]
         for key in state_keys:
             obs_i[key] = np.asarray(default_state.get(key, np.zeros((1,), dtype=np.float32)), dtype=np.float32)
-        for key in ("observation.state.object", "observation.state.object_mask", "observation.state.placed_mask", "observation.state.task_progress"):
+        for key in (
+            "observation.state.object",
+            "observation.state.object_mask",
+            "observation.state.placed_mask",
+            "observation.state.place_targets",
+            "observation.state.task_progress",
+        ):
             obs_i[key] = np.asarray(default_state[key], dtype=np.float32)
         out_batch.append(obs_i)
     return out_batch

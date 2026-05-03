@@ -124,6 +124,11 @@ class ManiSkill3Adapter(SimulatorAdapter):
             grasped_mask = np.zeros_like(placed_mask, dtype=np.float32)
 
         sensor_frames = self._extract_sensor_frames()
+        place_targets = getattr(uw, "_placement_targets", None)
+        if place_targets is not None:
+            place_targets_np = self._to_numpy(place_targets)[0].reshape(-1).astype(np.float32)
+        else:
+            place_targets_np = np.zeros_like(obj_flat, dtype=np.float32)
         frame = None
         camera_order: list[str] = []
         for name in self._preferred_camera_names:
@@ -165,6 +170,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
             "observation.state.object_mask": obj_mask,
             "observation.state.placed_mask": placed_mask,
             "observation.state.grasped_mask": grasped_mask,
+            "observation.state.place_targets": place_targets_np,
             "observation.state.task_progress": np.array([frac], dtype=np.float32),
         }
 
@@ -176,6 +182,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
             "observation.state.object_mask",
             "observation.state.placed_mask",
             "observation.state.grasped_mask",
+            "observation.state.place_targets",
             "observation.state.task_progress",
         ):
             out[key] = np.asarray(default_state[key], dtype=np.float32)

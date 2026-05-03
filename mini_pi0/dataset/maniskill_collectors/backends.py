@@ -124,6 +124,7 @@ def collect_single_scripted_episode(
                 "observation.state.object",
                 "observation.state.object_mask",
                 "observation.state.placed_mask",
+                "observation.state.place_targets",
                 "observation.state.task_progress",
             ])
             if k in obs
@@ -214,6 +215,7 @@ def collect_vectorized_scripted_episodes(
                     "observation.state.object",
                     "observation.state.object_mask",
                     "observation.state.placed_mask",
+                    "observation.state.place_targets",
                     "observation.state.task_progress",
                 ])
                 if k in obs_i

@@ -64,6 +64,41 @@ simulator:
     # Active object spawn now uses in-bowl sampling.
     spawn_min: [-0.10, -0.22]
     spawn_max: [0.10, 0.22]
+    domain_randomization:
+      enabled: true
+      profile: conservative
+      camera:
+        enabled: true
+        base_pos_jitter: [0.015, 0.015, 0.010]
+        base_target_jitter: [0.015, 0.015, 0.010]
+        hand_pos_jitter: [0.004, 0.004, 0.004]
+        fov_jitter_deg: 4.0
+      lighting:
+        enabled: true
+        ambient_range: [0.25, 0.65]
+        directional_intensity_range: [0.6, 1.4]
+        directional_yaw_range_deg: [-25, 25]
+      visual:
+        enabled: true
+        object_color_jitter: 0.35
+        tray_color_jitter: 0.12
+        bowl_color_jitter: 0.10
+        table_color_jitter: 0.10
+      objects:
+        enabled: true
+        randomize_active_slots: true
+        randomize_spawn_yaw: true
+        spawn_radius_jitter: 0.008
+      placement:
+        enabled: true
+        target_xy_margin: 0.045
+        target_z: 0.065
+        min_target_separation: 0.055
+      physics:
+        enabled: true
+        object_mass_scale_range: [0.85, 1.15]
+        object_friction_range: [0.7, 1.3]
+        object_restitution_range: [0.0, 0.05]
     reward:
       progress: 8.0
       place_bonus: 4.0
@@ -91,11 +126,12 @@ robot:
     - robot0_eef_quat
     - robot0_gripper_qpos
     - observation.state.object
+    - observation.state.place_targets
 
 # Example training data path from collector command.
 data:
   format: robomimic_hdf5
-  robomimic_hdf5: artifacts/physical_scripted_handcam_bowlfix_placevol_2eps_obj2to4_h700_640.hdf5
+  robomimic_hdf5: artifacts/physical_scripted_dr_conservative_2eps_obj2to4_h700_640.hdf5
   robomimic_data_group: data
   fallback_image_hw: [640, 640]
   n_demos: 200

@@ -130,6 +130,7 @@ class ScriptedMultiObjectOracle:
         obj = np.asarray(obs.get("observation.state.object"), dtype=np.float32).reshape(-1, 3)
         obj_mask = np.asarray(obs.get("observation.state.object_mask"), dtype=np.float32).reshape(-1)
         placed = np.asarray(obs.get("observation.state.placed_mask"), dtype=np.float32).reshape(-1)
+        place_targets = np.asarray(obs.get("observation.state.place_targets", np.array([], dtype=np.float32)), dtype=np.float32)
         grasped_mask = np.asarray(obs.get("observation.state.grasped_mask", np.zeros_like(placed)), dtype=np.float32).reshape(-1)
         gripper_qpos = np.asarray(obs.get("robot0_gripper_qpos", np.zeros((2,), dtype=np.float32)), dtype=np.float32).reshape(-1)
 
@@ -146,6 +147,10 @@ class ScriptedMultiObjectOracle:
             return action
 
         target = obj[self.target_idx]
+        if place_targets.size >= obj.size:
+            drop_target = place_targets.reshape(-1, 3)[self.target_idx].astype(np.float32)
+        else:
+            drop_target = self.tray_center + np.array([0.0, 0.0, 0.065], dtype=np.float32)
         current_closing = self._closing_axis_xy(eef_quat)
         desired_closing = self._desired_closing_axis_xy(self.target_idx, obj, obj_mask, placed)
         yaw_error = np.arctan2(
@@ -160,9 +165,9 @@ class ScriptedMultiObjectOracle:
         pre_grasp = target + np.array([0.0, 0.0, 0.045], dtype=np.float32)
         grasp = target + np.array([0.0, 0.0, 0.004], dtype=np.float32)
         lift_goal = target + np.array([0.0, 0.0, 0.15], dtype=np.float32)
-        tray_above = self.tray_center + np.array([0.0, 0.0, 0.16], dtype=np.float32)
-        tray_drop = self.tray_center + np.array([0.0, 0.0, 0.065], dtype=np.float32)
-        retreat = self.tray_center + np.array([0.0, 0.0, 0.18], dtype=np.float32)
+        tray_above = drop_target + np.array([0.0, 0.0, 0.095], dtype=np.float32)
+        tray_drop = drop_target
+        retreat = drop_target + np.array([0.0, 0.0, 0.115], dtype=np.float32)
 
         def delta(goal: np.ndarray, gain: float = 4.0) -> np.ndarray:
             d = (goal - eef) * gain
