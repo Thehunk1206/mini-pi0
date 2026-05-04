@@ -36,6 +36,49 @@ class RewardWeights:
     step_cost: float = 0.01
 
 
+def _render_material(
+    color: list[float],
+    *,
+    roughness: float = 0.85,
+    metallic: float = 0.0,
+    specular: float = 0.25,
+) -> sapien.render.RenderMaterial:
+    """Create a SAPIEN material with stable PBR-like parameters."""
+    mat = sapien.render.RenderMaterial()
+    mat.set_base_color(color)
+    mat.set_roughness(float(np.clip(roughness, 0.0, 1.0)))
+    mat.set_metallic(float(np.clip(metallic, 0.0, 1.0)))
+    mat.set_specular(float(np.clip(specular, 0.0, 1.0)))
+    return mat
+
+
+def _build_material_box(
+    scene,
+    *,
+    half_sizes: list[float],
+    material: sapien.render.RenderMaterial,
+    name: str,
+    body_type: str,
+    add_collision: bool,
+    initial_pose: sapien.Pose,
+):
+    """Build a box actor using a configured render material."""
+    builder = scene.create_actor_builder()
+    if add_collision:
+        builder.add_box_collision(half_size=half_sizes)
+    builder.add_box_visual(half_size=half_sizes, material=material)
+    if body_type == "dynamic":
+        builder.set_initial_pose(initial_pose)
+        return builder.build(name=name)
+    if body_type == "kinematic":
+        builder.set_initial_pose(initial_pose)
+        return builder.build_kinematic(name=name)
+    if body_type == "static":
+        builder.set_initial_pose(initial_pose)
+        return builder.build_static(name=name)
+    raise ValueError(f"Unknown body type {body_type}")
+
+
 @register_env("MiniPi0MultiObjectTray-v1", max_episode_steps=1000, override=True)
 class MiniPi0MultiObjectTrayEnv(BaseEnv):
     """Custom ManiSkill task: pick random objects and place all in tray.
@@ -218,7 +261,8 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             shadow_scale=5,
             shadow_map_size=2048,
         )
-        self.scene.add_directional_light([0, 0, -1], [0.7, 0.7, 0.7])
+        self.scene.add_directional_light([-0.5, -0.25, -1], [0.45, 0.42, 0.38])
+        self.scene.add_directional_light([0.25, 0.65, -1], [0.25, 0.27, 0.30])
 
     def _np_uniform(self, low: Any, high: Any) -> np.ndarray | float:
         """Sample from the environment RNG if available, otherwise numpy RNG."""
@@ -237,6 +281,19 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         if jitter > 0.0:
             rgb = np.clip(rgb + rng.uniform(-jitter, jitter, size=3), 0.05, 0.95)
         return rgb.tolist() + [float(base[3] if len(base) > 3 else 1.0)]
+
+    @staticmethod
+    def _material_for_shape(shape: str, color: list[float], rng: np.random.Generator | None = None) -> sapien.render.RenderMaterial:
+        """Return muted object material presets by shape."""
+        roughness = 0.72
+        specular = 0.18
+        if rng is not None:
+            roughness = float(np.clip(roughness + rng.uniform(-0.08, 0.08), 0.55, 0.9))
+            specular = float(np.clip(specular + rng.uniform(-0.06, 0.06), 0.08, 0.35))
+        if shape == "sphere":
+            roughness = min(0.82, roughness + 0.05)
+            specular = min(0.35, specular + 0.08)
+        return _render_material(color, roughness=roughness, metallic=0.0, specular=specular)
 
     def _build_randomized_object(self, idx: int, shape: str, base_color: list[float]) -> Any:
         """Build one logical object, optionally merged from per-subscene variants."""
@@ -258,15 +315,16 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                 restitution=restitution,
             )
             builder = self.scene.create_actor_builder()
+            render_mat = self._material_for_shape(shape, color, rng)
             if shape == "cube":
                 builder.add_box_collision(half_size=[0.02] * 3, material=material, density=1000 * mass_scale)
-                builder.add_box_visual(half_size=[0.02] * 3, material=sapien.render.RenderMaterial(base_color=color))
+                builder.add_box_visual(half_size=[0.02] * 3, material=render_mat)
             elif shape == "sphere":
                 builder.add_sphere_collision(radius=0.022, material=material, density=1000 * mass_scale)
-                builder.add_sphere_visual(radius=0.022, material=sapien.render.RenderMaterial(base_color=color))
+                builder.add_sphere_visual(radius=0.022, material=render_mat)
             else:
                 builder.add_cylinder_collision(radius=0.020, half_length=0.020, material=material, density=1000 * mass_scale)
-                builder.add_cylinder_visual(radius=0.020, half_length=0.020, material=sapien.render.RenderMaterial(base_color=color))
+                builder.add_cylinder_visual(radius=0.020, half_length=0.020, material=render_mat)
             builder.set_scene_idxs([scene_i])
             builder.initial_pose = sapien.Pose(p=[5, 5, 5])
             actor = builder.build(name=f"obj_{idx:02d}_{shape}_{scene_i}")
@@ -279,11 +337,19 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
     def _build_shared_object(self, idx: int, shape: str, color: list[float]) -> Any:
         """Build one shared primitive object for non-randomized runs."""
         name = f"obj_{idx:02d}_{shape}"
+        material = self._material_for_shape(shape, color)
+        builder = self.scene.create_actor_builder()
         if shape == "cube":
-            return actors.build_cube(self.scene, half_size=0.02, color=color, name=name, initial_pose=sapien.Pose(p=[5, 5, 5]))
-        if shape == "sphere":
-            return actors.build_sphere(self.scene, radius=0.022, color=color, name=name, initial_pose=sapien.Pose(p=[5, 5, 5]))
-        return actors.build_cylinder(self.scene, radius=0.020, half_length=0.020, color=color, name=name, initial_pose=sapien.Pose(p=[5, 5, 5]))
+            builder.add_box_collision(half_size=[0.02] * 3)
+            builder.add_box_visual(half_size=[0.02] * 3, material=material)
+        elif shape == "sphere":
+            builder.add_sphere_collision(radius=0.022)
+            builder.add_sphere_visual(radius=0.022, material=material)
+        else:
+            builder.add_cylinder_collision(radius=0.020, half_length=0.020)
+            builder.add_cylinder_visual(radius=0.020, half_length=0.020, material=material)
+        builder.set_initial_pose(sapien.Pose(p=[5, 5, 5]))
+        return builder.build(name=name)
 
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(env=self, robot_init_qpos_noise=self.robot_init_qpos_noise)
@@ -292,9 +358,9 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         self.objects: list[Any] = []
         self.object_shape_names: list[str] = []
         base_colors = {
-            "cube": [0.90, 0.20, 0.20, 1.0],
-            "sphere": [0.18, 0.56, 0.88, 1.0],
-            "cone": [0.85, 0.74, 0.21, 1.0],
+            "cube": [0.64, 0.26, 0.22, 1.0],
+            "sphere": [0.20, 0.43, 0.58, 1.0],
+            "cone": [0.68, 0.59, 0.30, 1.0],
         }
 
         for idx in range(self.object_count_max):
@@ -311,20 +377,20 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         wall_half_h = wh * 0.5
         base_z = float(self.tray_center_np[2])
         rng0 = self._batched_episode_rng[0] if self.domain_randomization else np.random.default_rng(0)
-        tray_color = [0.25, 0.25, 0.28, 1.0]
-        tray_wall_color = [0.18, 0.18, 0.20, 1.0]
-        bowl_wall_color = [0.35, 0.35, 0.35, 0.0]
-        bowl_color = [1.0, 1.0, 1.0, 1.0]
+        tray_color = [0.31, 0.33, 0.34, 1.0]
+        tray_wall_color = [0.22, 0.23, 0.24, 1.0]
+        bowl_wall_color = [0.40, 0.39, 0.36, 0.0]
+        bowl_color = [0.70, 0.67, 0.61, 1.0]
         if self.domain_randomization and self.dr_config.visual.enabled:
             tray_color = self._jitter_color(tray_color, self.dr_config.visual.tray_color_jitter, rng0)
             tray_wall_color = self._jitter_color(tray_wall_color, self.dr_config.visual.tray_color_jitter, rng0)
             bowl_wall_color = self._jitter_color(bowl_wall_color, self.dr_config.visual.bowl_color_jitter, rng0)
             bowl_color = self._jitter_color(bowl_color, self.dr_config.visual.bowl_color_jitter, rng0)
 
-        self.tray = actors.build_box(
+        self.tray = _build_material_box(
             self.scene,
             half_sizes=[sx, sy, tray_base_half_z],
-            color=tray_color,
+            material=_render_material(tray_color, roughness=0.78, metallic=0.05, specular=0.20),
             name="tray_base",
             body_type="kinematic",
             add_collision=True,
@@ -339,10 +405,10 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
         ]
         for rel_p, hs, nm in wall_specs:
             p = (self.tray_center_np + np.asarray(rel_p, dtype=np.float32)).tolist()
-            wall = actors.build_box(
+            wall = _build_material_box(
                 self.scene,
                 half_sizes=hs,
-                color=tray_wall_color,
+                material=_render_material(tray_wall_color, roughness=0.72, metallic=0.08, specular=0.18),
                 name=nm,
                 body_type="kinematic",
                 add_collision=True,
@@ -366,7 +432,7 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
             filename=os.path.join(bowl_assets_dir, "frl_apartment_bowl_07.glb"),
             scale=[1.0, 1.0, 1.0],
             pose=sapien.Pose(q=bowl_fix_q),
-            material=sapien.render.RenderMaterial(base_color=bowl_color),
+            material=_render_material(bowl_color, roughness=0.82, metallic=0.0, specular=0.22),
         )
         bowl_pose_p = self.bowl_center_np.copy()
         bowl_pose_p[2] += self.bowl_table_z_offset
@@ -388,10 +454,10 @@ class MiniPi0MultiObjectTrayEnv(BaseEnv):
                     ],
                     dtype=np.float32,
                 )
-                wall = actors.build_box(
+                wall = _build_material_box(
                     self.scene,
                     half_sizes=[self.source_bowl_wall_thickness * 0.5, segment_half_len, wall_half_h],
-                    color=bowl_wall_color,
+                    material=_render_material(bowl_wall_color, roughness=0.86, metallic=0.0, specular=0.12),
                     name=f"source_bowl_containment_{wall_idx:02d}",
                     body_type="kinematic",
                     add_collision=True,

@@ -7,14 +7,18 @@ task plugins decide which backend to call.
 from __future__ import annotations
 
 import copy
+import contextlib
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import gymnasium as gym
 import numpy as np
 import sapien
+import torch
+from mani_skill.utils.structs import Pose
 
 from mini_pi0.config.schema import RootConfig
 from mini_pi0.sim.registry import make_sim_adapter
@@ -26,7 +30,20 @@ from .common import (
     normalize_info_batched,
     to_numpy,
 )
-from .policy import ScriptedMultiObjectOracle
+from .policy import OracleOptions, OracleProfile, ScriptedMultiObjectOracle
+
+
+@dataclass(frozen=True)
+class VectorizedOracleSettings:
+    """Profile options for vectorized scripted oracle collection."""
+
+    options: OracleOptions = OracleOptions()
+    profile_type: str = OracleProfile.CORE.value
+    difficulty: str = "balanced"
+    perturbation_types: tuple[str, ...] = ("none",)
+    force_perturbation_type: str | None = None
+    displacement_scale: float = 1.0
+    seed: int = 0
 
 
 def _resolve_scripted_control_mode(ep_cfg: RootConfig) -> str:
@@ -64,6 +81,77 @@ def _project_scripted_action(action7: np.ndarray, low: np.ndarray, high: np.ndar
         if dim > 0:
             out[-1] = a[6]
     return np.clip(out, lo, hi)
+
+
+def _first_unplaced_target(obs: dict[str, np.ndarray]) -> int | None:
+    """Return the first active object not yet placed in the tray."""
+    mask = np.asarray(obs.get("observation.state.object_mask", []), dtype=np.float32).reshape(-1)
+    placed = np.asarray(obs.get("observation.state.placed_mask", np.zeros_like(mask)), dtype=np.float32).reshape(-1)
+    for idx in range(min(len(mask), len(placed))):
+        if mask[idx] > 0.5 and placed[idx] < 0.5:
+            return idx
+    return None
+
+
+def _perturbation_magnitude(kind: str, settings: VectorizedOracleSettings) -> float:
+    """Map a perturbation name to its metric displacement magnitude."""
+    if kind == "object_displace_2cm":
+        return 0.02 * float(settings.displacement_scale)
+    if kind in {"object_displace_5cm", "midtask_nudge"}:
+        return 0.05 * float(settings.displacement_scale)
+    if kind == "bowl_escape":
+        return 0.18
+    return 0.0
+
+
+def _nudge_vectorized_object(
+    env: Any,
+    *,
+    env_idx: int,
+    obj_idx: int,
+    magnitude: float,
+    rng: np.random.Generator,
+    bowl_escape: bool,
+) -> float:
+    """Move one object's pose for a single sub-env in a vectorized scene."""
+    uw = env.unwrapped
+    if obj_idx < 0 or obj_idx >= len(uw.objects):
+        return 0.0
+    actor = uw.objects[obj_idx]
+    pose_p = actor.pose.p.clone()
+    pose_q = actor.pose.q.clone()
+    old_xy = pose_p[env_idx, :2].clone()
+    if bowl_escape:
+        bowl_center = np.asarray(getattr(uw, "bowl_center_np", [0.05, -0.28, 0.0]), dtype=np.float32)
+        x_offset = float(rng.uniform(-0.055, 0.055))
+        target_xy = torch.tensor(
+            [float(bowl_center[0] + x_offset), float(bowl_center[1] + 0.18)],
+            dtype=torch.float32,
+            device=pose_p.device,
+        )
+        pose_p[env_idx, 0] = target_xy[0]
+        pose_p[env_idx, 1] = target_xy[1]
+        pose_p[env_idx, 2] = torch.clamp(pose_p[env_idx, 2], 0.035, 0.055)
+    else:
+        theta = float(rng.uniform(0.0, 2.0 * np.pi))
+        delta = torch.tensor(
+            [magnitude * np.cos(theta), magnitude * np.sin(theta), 0.0],
+            dtype=torch.float32,
+            device=pose_p.device,
+        )
+        pose_p[env_idx, :3] = pose_p[env_idx, :3] + delta
+        pose_p[env_idx, 0] = torch.clamp(pose_p[env_idx, 0], -0.10, 0.18)
+        pose_p[env_idx, 1] = torch.clamp(pose_p[env_idx, 1], -0.36, 0.36)
+        target_xy = pose_p[env_idx, :2]
+    actor.set_pose(Pose.create_from_pq(p=pose_p, q=pose_q))
+    with contextlib.suppress(Exception):
+        lin = actor.linear_velocity.clone()
+        ang = actor.angular_velocity.clone()
+        lin[env_idx, :] = 0.0
+        ang[env_idx, :] = 0.0
+        actor.set_linear_velocity(lin)
+        actor.set_angular_velocity(ang)
+    return float(torch.linalg.norm(target_xy - old_xy).item())
 
 
 def mplib_runtime_check() -> bool:
@@ -155,6 +243,7 @@ def collect_vectorized_scripted_episodes(
     episodes_target: int,
     max_steps: int,
     only_success: bool,
+    oracle_settings: VectorizedOracleSettings | None = None,
 ) -> list[tuple[EpisodeBuffer, dict[str, Any]]]:
     """Collect multiple episodes using ManiSkill vectorized env stepping.
 
@@ -166,6 +255,7 @@ def collect_vectorized_scripted_episodes(
         episodes_target: Target number of finalized episodes to return.
         max_steps: Maximum rollout steps before stopping this trial.
         only_success: Whether to retain only successful completed episodes.
+        oracle_settings: Optional profile, noise, and perturbation settings.
 
     Returns:
         List of finalized `(EpisodeBuffer, final_info)` episodes.
@@ -194,19 +284,59 @@ def collect_vectorized_scripted_episodes(
     low = space_lo[0] if space_lo.ndim == 2 else space_lo
     high = space_hi[0] if space_hi.ndim == 2 else space_hi
 
+    settings = oracle_settings or VectorizedOracleSettings(seed=int(ep_cfg.experiment.seed))
     tray_center = np.asarray(ep_cfg.simulator.env_kwargs.get("tray_center", [0.62, 0.0, 0.0]), dtype=np.float32)
-    policies = [ScriptedMultiObjectOracle(tray_center=tray_center) for _ in range(num_envs)]
-    for policy in policies:
-        policy.reset()
+    rngs = [np.random.default_rng(int(settings.seed) + 1009 * i) for i in range(num_envs)]
+    policies = [
+        ScriptedMultiObjectOracle(tray_center=tray_center, options=settings.options, rng=rngs[i])
+        for i in range(num_envs)
+    ]
+    episode_counts = [0 for _ in range(num_envs)]
+    perturbation_types = ["" for _ in range(num_envs)]
+    perturbation_magnitudes = [0.0 for _ in range(num_envs)]
+    perturbation_triggers = [-1 for _ in range(num_envs)]
+    perturbation_applied = [True for _ in range(num_envs)]
+    episode_steps = [0 for _ in range(num_envs)]
+    active = [True for _ in range(num_envs)]
+
+    def reset_oracle_state(env_idx: int) -> None:
+        policies[env_idx].reset()
+        episode_counts[env_idx] += 1
+        choices = settings.perturbation_types or ("none",)
+        kind = str(settings.force_perturbation_type or rngs[env_idx].choice(choices))
+        perturbation_types[env_idx] = kind
+        perturbation_magnitudes[env_idx] = _perturbation_magnitude(kind, settings)
+        perturbation_triggers[env_idx] = int(rngs[env_idx].choice([55, 110, 165]))
+        perturbation_applied[env_idx] = kind in {"none", "grasp_noise", "action_noise"}
+        episode_steps[env_idx] = 0
+        active[env_idx] = True
 
     buffers = [EpisodeBuffer(obs=[], actions=[], rewards=[], dones=[], info_rows=[]) for _ in range(num_envs)]
     finalized: list[tuple[EpisodeBuffer, dict[str, Any]]] = []
+    for i in range(num_envs):
+        reset_oracle_state(i)
 
     for _ in range(int(max_steps)):
         obs_batch = canonical_obs_batch_from_raw_env(env, image_keys=image_keys, state_keys=state_keys, raw_obs=raw_obs)
         acts = []
         for i in range(num_envs):
+            if not active[i]:
+                acts.append(np.zeros_like(low, dtype=np.float32))
+                continue
             obs_i = obs_batch[i]
+            if not perturbation_applied[i] and episode_steps[i] >= perturbation_triggers[i]:
+                target_idx = policies[i].target_idx if policies[i].target_idx is not None else _first_unplaced_target(obs_i)
+                if target_idx is not None:
+                    moved = _nudge_vectorized_object(
+                        env,
+                        env_idx=i,
+                        obj_idx=int(target_idx),
+                        magnitude=float(perturbation_magnitudes[i]),
+                        rng=rngs[i],
+                        bowl_escape=perturbation_types[i] == "bowl_escape",
+                    )
+                    perturbation_magnitudes[i] = float(moved or perturbation_magnitudes[i])
+                perturbation_applied[i] = True
             act7 = policies[i].act(obs_i).astype(np.float32)
             act_i = _project_scripted_action(act7, low, high)
             buffers[i].obs.append({
@@ -230,8 +360,11 @@ def collect_vectorized_scripted_episodes(
         info_rows = normalize_info_batched(dict(info), num_envs=num_envs)
 
         for i in range(num_envs):
+            if not active[i]:
+                continue
             buffers[i].actions.append(actions_np[i])
             buffers[i].rewards.append(float(rew[i]))
+            episode_steps[i] += 1
             done_i = bool(ter[i] or tru[i] or float(info_rows[i].get("success_fraction", 0.0)) >= 1.0 - 1e-6)
             buffers[i].dones.append(1 if done_i else 0)
             info_rows[i]["success"] = bool(float(info_rows[i].get("success_fraction", 0.0)) >= 1.0 - 1e-6)
@@ -241,13 +374,25 @@ def collect_vectorized_scripted_episodes(
                 fi = dict(info_rows[i])
                 fi.setdefault("placed_count", int(np.sum(obs_batch[i]["observation.state.placed_mask"] > 0.5)))
                 fi.setdefault("total_objects", int(np.sum(obs_batch[i]["observation.state.object_mask"] > 0.5)))
+                fi.update(policies[i].telemetry())
+                fi.update(
+                    {
+                        "profile_type": str(settings.profile_type),
+                        "difficulty": str(settings.difficulty),
+                        "seed": int(settings.seed) + int(i) + 100000 * int(episode_counts[i]),
+                        "perturbation_type": str(perturbation_types[i]),
+                        "perturbation_magnitude": float(perturbation_magnitudes[i]),
+                    }
+                )
                 if (not only_success) or bool(fi.get("success", False)):
                     finalized.append((buffers[i], fi))
                 buffers[i] = EpisodeBuffer(obs=[], actions=[], rewards=[], dones=[], info_rows=[])
-                policies[i].reset()
+                active[i] = False
                 if len(finalized) >= int(episodes_target):
                     env.close()
                     return finalized
+        if not any(active):
+            break
 
     env.close()
     return finalized

@@ -1,6 +1,6 @@
 experiment:
-  name: maniskill3-multiobject-tray-fm
-  seed: 0
+  name: maniskill3-multiobject-tray-minipi05
+  seed: 42
   runs_root: runs
 
 simulator:
@@ -9,14 +9,14 @@ simulator:
   robot: panda
   controller: pd_ee_delta_pose
   control_freq: 20
-  horizon: 700
+  horizon: 1000
   reward_shaping: true
   has_renderer: false
   has_offscreen_renderer: true
   use_camera_obs: true
   camera_names: [base_camera, hand_camera]
-  camera_width: 640
-  camera_height: 640
+  camera_width: 256
+  camera_height: 256
   env_kwargs:
     obs_mode: rgbd
     reward_mode: dense
@@ -48,12 +48,12 @@ simulator:
     source_bowl_wall_radius_offset: 0.025
     scripted_grasp_assist: false
     grasp_assist_z_offset: -0.04
-    # Force actual sensor outputs to 640x640 for dataset collection.
-    sensor_width: 640
-    sensor_height: 640
+    # Force actual sensor outputs to 256x256 for dataset collection.
+    sensor_width: 256
+    sensor_height: 256
     # Optional: preview/render camera resolution for recordings.
-    render_width: 640
-    render_height: 640
+    render_width: 256
+    render_height: 256
     reset_settle_steps: 18
     tray_z_tol: 0.03
     tray_place_min_z: 0.012
@@ -131,12 +131,26 @@ robot:
 # Example training data path from collector command.
 data:
   format: robomimic_hdf5
-  robomimic_hdf5: artifacts/physical_scripted_dr_conservative_2eps_obj2to4_h700_640.hdf5
+  robomimic_hdf5: data/robomimic/custom/maniskill3_multiobject/ph/dataset_600.hdf5
   robomimic_data_group: data
-  fallback_image_hw: [640, 640]
-  n_demos: 200
+  fallback_image_hw: [256, 256]
+  n_demos: 600
   chunk_size: 16
-  action_stats_path: action_stats.json
+  action_stats_path: data/robomimic/custom/maniskill3_multiobject/ph/dataset_600_action_stats.json
+
+
+dataset_collection:
+  output_hdf5: data/robomimic/custom/maniskill3_multiobject/ph/dataset_600.hdf5
+  total_episodes: 600
+  num_envs: 128
+  max_steps: 1000
+  only_success: true
+  reject_long_episodes: true
+  mix:
+    core: 0.5
+    recovery: 0.25
+    suboptimal: 0.25
+  difficulty: balanced
 
 model:
   name: mini_pi05
@@ -150,52 +164,61 @@ model:
   pretrained_local_files_only: false
 
 train:
-  epochs: 100
-  batch_size: 128
+  epochs: 150
+  batch_size: 16
   lr: 0.0001
   lr_backbone: 0.00001
   lr_expert: 0.0001
   freeze_backbone_steps: 2000
+  lr_scheduler: cosine
+  scheduler_t_max: null
+  scheduler_eta_min: 0.000001
   image_aug_enable: true
   image_aug_crop_scale: 0.92
-  image_aug_brightness: 0.20
-  image_aug_contrast: 0.20
-  image_aug_saturation: 0.20
-  action_noise_std: 0.02
-  action_noise_clip: 1.5
+  image_aug_brightness: 0.15
+  image_aug_contrast: 0.15
+  image_aug_saturation: 0.12
+  action_noise_std: 0.0
+  action_noise_clip: 0.0
   weight_decay: 0.0001
-  num_workers: 0
-  persistent_workers: false
+  num_workers: 4
+  persistent_workers: true
   save_best: true
   save_best_min_delta: 0.0001
   grad_clip_norm: 1.0
+  val_ratio: 0.1
+  ema_decay: 0.999
+  checkpoint_use_ema: true
   model_print_depth: 2
   ckpt_dir: checkpoints
   device: auto
 
 eval:
   checkpoint: checkpoints/best.pt
-  action_stats_path: action_stats.json
-  n_episodes: 20
+  action_stats_path: data/robomimic/custom/maniskill3_multiobject/ph/dataset_600_action_stats.json
+  n_episodes: 50
   execute_steps: 6
-  n_flow_steps: 12
-  max_steps: 300
+  n_flow_steps: 10
+  max_steps: 1000
   strict_parity: true
+  action_smoothing_alpha: 0.10
   record: false
   record_grid: false
   grid_size: 3
   grid_fps: 20
   grid_width: 256
   grid_height: 256
+  verbose: true
+  log_every_episodes: 1
   device: auto
 
-deploy:
-  mode: sim
-  checkpoint: checkpoints/best.pt
-  action_stats_path: action_stats.json
-  execute_steps: 4
-  n_flow_steps: 12
-  max_steps: 300
-  strict_parity: true
-  record_path: null
-  device: auto
+# deploy:
+#   mode: sim
+#   checkpoint: checkpoints/best.pt
+#   action_stats_path: action_stats.json
+#   execute_steps: 4
+#   n_flow_steps: 12
+#   max_steps: 300
+#   strict_parity: true
+#   record_path: null
+#   device: auto

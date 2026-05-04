@@ -109,6 +109,22 @@ def write_episode(group, demo_idx: int, ep: EpisodeBuffer, final_info: dict[str,
     demo.attrs["total_objects"] = int(final_info.get("total_objects", 0))
     demo.attrs["final_success_fraction"] = float(final_info.get("success_fraction", 0.0))
     demo.attrs["collector_type"] = str(final_info.get("collector_type", "scripted"))
+    for attr_name in (
+        "profile_type",
+        "difficulty",
+        "seed",
+        "perturbation_type",
+        "perturbation_magnitude",
+        "oracle_retry_count",
+        "oracle_phase_timeout_count",
+        "oracle_target_switch_count",
+        "oracle_max_phase_steps",
+    ):
+        if attr_name in final_info:
+            value = final_info[attr_name]
+            if value is None:
+                continue
+            demo.attrs[attr_name] = value
 
     demo.create_dataset("actions", data=np.asarray(ep.actions, dtype=np.float32))
     demo.create_dataset("rewards", data=np.asarray(ep.rewards, dtype=np.float32))

@@ -178,6 +178,32 @@ class DataConfig:
 
 
 @dataclass
+class DatasetCollectionConfig:
+    """High-level oracle dataset mixture collection settings.
+
+    Attributes:
+        output_hdf5: Destination robomimic-style HDF5 path.
+        total_episodes: Number of accepted success-only episodes to write.
+        num_envs: Number of parallel ManiSkill envs for scripted collection.
+        max_steps: Per-trial rollout budget.
+        only_success: Whether to retain only successful rollouts.
+        reject_long_episodes: Reject trajectories above a profile length limit.
+        mix: Ratios for core, recovery, and suboptimal demos.
+        difficulty: Internal perturbation/noise preset.
+    """
+
+    output_hdf5: str = "artifacts/physical_scripted_oracle_mix_500_obj2to4_h700_640.hdf5"
+    total_episodes: int = 500
+    num_envs: int = 1
+    max_steps: int = 700
+    only_success: bool = True
+    reject_long_episodes: bool = True
+    mix: dict[str, float] = field(default_factory=lambda: {"core": 0.65, "recovery": 0.25, "suboptimal": 0.10})
+    difficulty: str = "balanced"
+    force_perturbation_type: str | None = None
+
+
+@dataclass
 class ModelConfig:
     """Flow-matching action model architecture configuration.
 
@@ -456,6 +482,7 @@ class RootConfig:
         task: Task-level object randomization and overrides.
         robot: Canonical robot schema.
         data: Dataset and preprocessing settings.
+        dataset_collection: Oracle mixture collection settings.
         vision: Vision encoder settings for feature precompute/runtime extraction.
         model: Model architecture settings.
         train: Training loop controls.
@@ -468,6 +495,7 @@ class RootConfig:
     task: TaskConfig = field(default_factory=TaskConfig)
     robot: RobotConfig = field(default_factory=RobotConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    dataset_collection: DatasetCollectionConfig = field(default_factory=DatasetCollectionConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)

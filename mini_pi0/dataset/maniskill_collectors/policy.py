@@ -2,7 +2,32 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
+
 import numpy as np
+
+
+class OracleProfile(str, Enum):
+    """Supported scripted oracle dataset collection profiles."""
+
+    CORE = "core"
+    RECOVERY = "recovery"
+    SUBOPTIMAL = "suboptimal"
+
+
+@dataclass(frozen=True)
+class OracleOptions:
+    """Runtime options used to diversify scripted oracle trajectories."""
+
+    profile: OracleProfile = OracleProfile.CORE
+    action_noise_std: float = 0.0
+    action_noise_clip: float = 0.0
+    speed_scale: float = 1.0
+    grasp_pose_noise_xy: float = 0.0
+    grasp_pose_noise_z: float = 0.0
+    grasp_angle_jitter_deg: float = 0.0
+    allow_regrasp: bool = True
 
 
 class ScriptedMultiObjectOracle:
@@ -12,16 +37,24 @@ class ScriptedMultiObjectOracle:
     deltas and last dimension controls gripper open/close.
     """
 
-    def __init__(self, tray_center: np.ndarray):
+    def __init__(self, tray_center: np.ndarray, options: OracleOptions | None = None, rng: np.random.Generator | None = None):
         self.tray_center = tray_center.astype(np.float32)
+        self.options = options or OracleOptions()
+        self.rng = rng or np.random.default_rng()
         self.target_idx = None
         self.phase = "select_target"
         self.phase_step = 0
         self.retry_count = 0
+        self.retry_count_total = 0
+        self.phase_timeout_count = 0
+        self.target_switch_count = 0
+        self.max_phase_steps = 0
         self.prev_target_pos = None
         self.lift_reference_z = None
         self.open_hold_steps = 0
         self.closed_hold_steps = 0
+        self._grasp_noise = np.zeros((3,), dtype=np.float32)
+        self._yaw_jitter = 0.0
 
     def reset(self) -> None:
         """Reset finite-state controller internals for a fresh episode.
@@ -32,10 +65,25 @@ class ScriptedMultiObjectOracle:
         self.phase = "select_target"
         self.phase_step = 0
         self.retry_count = 0
+        self.retry_count_total = 0
+        self.phase_timeout_count = 0
+        self.target_switch_count = 0
+        self.max_phase_steps = 0
         self.prev_target_pos = None
         self.lift_reference_z = None
         self.open_hold_steps = 0
         self.closed_hold_steps = 0
+        self._grasp_noise = np.zeros((3,), dtype=np.float32)
+        self._yaw_jitter = 0.0
+
+    def telemetry(self) -> dict[str, int]:
+        """Return quality-filter telemetry for the current rollout."""
+        return {
+            "oracle_retry_count": int(self.retry_count_total),
+            "oracle_phase_timeout_count": int(self.phase_timeout_count),
+            "oracle_target_switch_count": int(self.target_switch_count),
+            "oracle_max_phase_steps": int(self.max_phase_steps),
+        }
 
     def _pick_target(self, obs: dict[str, np.ndarray]) -> int | None:
         """Select nearest active, not-yet-placed object index.
@@ -135,9 +183,13 @@ class ScriptedMultiObjectOracle:
         gripper_qpos = np.asarray(obs.get("robot0_gripper_qpos", np.zeros((2,), dtype=np.float32)), dtype=np.float32).reshape(-1)
 
         self.phase_step += 1
+        self.max_phase_steps = max(self.max_phase_steps, int(self.phase_step))
 
         if self.target_idx is None or self.target_idx >= len(placed) or placed[self.target_idx] > 0.5:
+            prev_target_idx = self.target_idx
             self.target_idx = self._pick_target(obs)
+            if prev_target_idx is not None and self.target_idx is not None and self.target_idx != prev_target_idx:
+                self.target_switch_count += 1
             self.phase = "select_target"
             self.phase_step = 0
             self.retry_count = 0
@@ -147,6 +199,7 @@ class ScriptedMultiObjectOracle:
             return action
 
         target = obj[self.target_idx]
+        target_for_grasp = target + self._grasp_noise
         if place_targets.size >= obj.size:
             drop_target = place_targets.reshape(-1, 3)[self.target_idx].astype(np.float32)
         else:
@@ -158,19 +211,20 @@ class ScriptedMultiObjectOracle:
             float(np.dot(current_closing, desired_closing)),
         )
         yaw_error = self._wrap_symmetric_yaw_error(float(yaw_error))
+        yaw_error += self._yaw_jitter
         # Positive Z action produced negative world yaw in the Panda controller
         # probe, so this sign compensates that mapping.
         yaw_action = float(np.clip(-4.0 * yaw_error, -1.0, 1.0))
-        above = target + np.array([0.0, 0.0, 0.11], dtype=np.float32)
-        pre_grasp = target + np.array([0.0, 0.0, 0.045], dtype=np.float32)
-        grasp = target + np.array([0.0, 0.0, 0.004], dtype=np.float32)
+        above = target_for_grasp + np.array([0.0, 0.0, 0.11], dtype=np.float32)
+        pre_grasp = target_for_grasp + np.array([0.0, 0.0, 0.045], dtype=np.float32)
+        grasp = target_for_grasp + np.array([0.0, 0.0, 0.004], dtype=np.float32)
         lift_goal = target + np.array([0.0, 0.0, 0.15], dtype=np.float32)
         tray_above = drop_target + np.array([0.0, 0.0, 0.095], dtype=np.float32)
         tray_drop = drop_target
         retreat = drop_target + np.array([0.0, 0.0, 0.115], dtype=np.float32)
 
         def delta(goal: np.ndarray, gain: float = 4.0) -> np.ndarray:
-            d = (goal - eef) * gain
+            d = (goal - eef) * gain * float(max(0.1, self.options.speed_scale))
             d = np.clip(d, -1.0, 1.0)
             return d.astype(np.float32)
 
@@ -185,6 +239,8 @@ class ScriptedMultiObjectOracle:
 
         if self.phase_step > 90:
             self.retry_count += 1
+            self.retry_count_total += 1
+            self.phase_timeout_count += 1
             transition("select_target")
             if self.retry_count > 4:
                 self.target_idx = None
@@ -195,6 +251,15 @@ class ScriptedMultiObjectOracle:
             self.lift_reference_z = float(target[2])
             self.open_hold_steps = 0
             self.closed_hold_steps = 0
+            self._grasp_noise = np.array(
+                [
+                    self.rng.uniform(-self.options.grasp_pose_noise_xy, self.options.grasp_pose_noise_xy),
+                    self.rng.uniform(-self.options.grasp_pose_noise_xy, self.options.grasp_pose_noise_xy),
+                    self.rng.uniform(-self.options.grasp_pose_noise_z, self.options.grasp_pose_noise_z),
+                ],
+                dtype=np.float32,
+            )
+            self._yaw_jitter = float(np.deg2rad(self.rng.uniform(-self.options.grasp_angle_jitter_deg, self.options.grasp_angle_jitter_deg)))
             transition("approach_above")
             action[6] = 1.0
             return action
@@ -230,6 +295,7 @@ class ScriptedMultiObjectOracle:
                 transition("to_tray_above")
             elif self.phase_step > 45:
                 self.retry_count += 1
+                self.retry_count_total += 1
                 transition("select_target")
         elif self.phase == "to_tray_above":
             action[:3] = delta(tray_above, gain=3.0)
@@ -256,10 +322,18 @@ class ScriptedMultiObjectOracle:
                     self.retry_count = 0
                 else:
                     self.retry_count += 1
+                    self.retry_count_total += 1
                 self.target_idx = None
                 transition("select_target")
         else:
             transition("select_target")
             action[6] = 1.0
+
+        if self.options.action_noise_std > 0.0:
+            noise = self.rng.normal(0.0, self.options.action_noise_std, size=action.shape).astype(np.float32)
+            if self.options.action_noise_clip > 0.0:
+                noise = np.clip(noise, -self.options.action_noise_clip, self.options.action_noise_clip)
+            noise[6] = 0.0
+            action = action + noise
 
         return np.clip(action, -1.0, 1.0)

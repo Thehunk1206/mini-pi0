@@ -6,6 +6,7 @@ from typing import Any
 
 from mini_pi0.config.io import load_config
 from mini_pi0.dataset.maniskill_collect import collect_maniskill_demos
+from mini_pi0.dataset.maniskill_oracle_mixture import collect_maniskill_oracle_mixture
 from mini_pi0.dataset.episodes import list_supported_dataset_formats
 from mini_pi0.dataset.robomimic_download import download_robomimic_dataset
 from mini_pi0.dataset.robot_dataset_mapping import build_robot_dataset_mapping
@@ -553,6 +554,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_collect_ms.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
     p_collect_ms.add_argument("--append", action=argparse.BooleanOptionalAction, default=False)
 
+    p_collect_mix = sub.add_parser(
+        "collect-maniskill-oracle-mixture",
+        help="Collect a simplified success-only ManiSkill oracle mixture dataset",
+    )
+    _add_common_config_args(p_collect_mix)
+    p_collect_mix.add_argument("--run_name", default=None)
+    p_collect_mix.add_argument("--seed", type=int, default=None)
+    p_collect_mix.add_argument("--output_hdf5", default=None)
+    p_collect_mix.add_argument("--total_episodes", type=int, default=None)
+    p_collect_mix.add_argument("--num_envs", type=int, default=None)
+    p_collect_mix.add_argument("--max_steps", type=int, default=None)
+    p_collect_mix.add_argument("--difficulty", choices=["safe", "balanced", "aggressive"], default=None)
+    p_collect_mix.add_argument("--force_perturbation", default=None)
+    p_collect_mix.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
+
     return p
 
 
@@ -667,6 +683,24 @@ def main(argv: list[str] | None = None) -> int:
             overwrite=bool(args.overwrite),
             append=bool(args.append),
         )
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "collect-maniskill-oracle-mixture":
+        overrides = list(args.overrides or [])
+        _append_override(overrides, "experiment.name", args.run_name)
+        _append_override(overrides, "experiment.seed", args.seed)
+        _append_override(overrides, "simulator.backend", "maniskill3")
+        _append_override(overrides, "dataset_collection.output_hdf5", args.output_hdf5)
+        _append_override(overrides, "dataset_collection.total_episodes", args.total_episodes)
+        _append_override(overrides, "dataset_collection.num_envs", args.num_envs)
+        _append_override(overrides, "dataset_collection.max_steps", args.max_steps)
+        _append_override(overrides, "dataset_collection.difficulty", args.difficulty)
+        _append_override(overrides, "dataset_collection.force_perturbation_type", args.force_perturbation)
+        if args.max_steps is not None:
+            _append_override(overrides, "simulator.horizon", args.max_steps)
+        cfg = load_config(args.config, overrides=overrides)
+        out = collect_maniskill_oracle_mixture(cfg, overwrite=bool(args.overwrite))
         print(json.dumps(out, indent=2, sort_keys=True))
         return 0
 
