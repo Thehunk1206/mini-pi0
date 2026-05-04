@@ -125,8 +125,6 @@ robot:
     - robot0_eef_pos
     - robot0_eef_quat
     - robot0_gripper_qpos
-    - observation.state.object
-    - observation.state.place_targets
 
 # Example training data path from collector command.
 data:
@@ -162,10 +160,11 @@ model:
   pretrained_model_name_or_path: HuggingFaceTB/SmolVLM-256M-Instruct
   pretrained_variant: 256M
   pretrained_local_files_only: false
+  dtype: bfloat16
 
 train:
-  epochs: 150
-  batch_size: 16
+  epochs: 100
+  batch_size: 64
   lr: 0.0001
   lr_backbone: 0.00001
   lr_expert: 0.0001
@@ -181,7 +180,7 @@ train:
   action_noise_std: 0.0
   action_noise_clip: 0.0
   weight_decay: 0.0001
-  num_workers: 4
+  num_workers: 32
   persistent_workers: true
   save_best: true
   save_best_min_delta: 0.0001
@@ -197,17 +196,17 @@ eval:
   checkpoint: checkpoints/best.pt
   action_stats_path: data/robomimic/custom/maniskill3_multiobject/ph/dataset_600_action_stats.json
   n_episodes: 50
-  execute_steps: 6
+  execute_steps: 8
   n_flow_steps: 10
   max_steps: 1000
   strict_parity: true
   action_smoothing_alpha: 0.10
   record: false
-  record_grid: false
+  record_grid: true
   grid_size: 3
   grid_fps: 20
-  grid_width: 256
-  grid_height: 256
+  grid_width: 768
+  grid_height: 768
   verbose: true
   log_every_episodes: 1
   device: auto

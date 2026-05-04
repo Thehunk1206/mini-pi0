@@ -55,7 +55,10 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
         num_cameras = 1
         if isinstance(model_cfg, RootConfig):
             num_cameras = max(1, len(effective_image_keys(model_cfg.robot)))
-        dtype = "bfloat16" if torch.cuda.is_available() else "float32"
+        requested_dtype = getattr(cfg, "dtype", None)
+        dtype = str(requested_dtype).strip().lower() if requested_dtype else ("bfloat16" if torch.cuda.is_available() else "float32")
+        if dtype not in {"float32", "bfloat16"}:
+            raise ValueError(f"Unsupported mini_pi05 dtype {dtype!r}; expected float32 or bfloat16")
         pi05_cfg = MiniPI05Config(
             action_dim=int(cfg.action_dim),
             action_horizon=int(cfg.chunk_size),

@@ -48,6 +48,12 @@ except Exception:
     tqdm = None
 
 
+def _model_forward_context(model: torch.nn.Module, device: torch.device):
+    """Use bf16 autocast for MiniPI05's mixed fp32/bf16 backbone."""
+    enabled = isinstance(model, PI05SmolVLM) and device.type == "cuda"
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=enabled)
+
+
 def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[EpisodeData], dict[str, Any], Any, Any | None, Path]:
     """Load data, align config dims, build action-chunk dataset, and split train/val."""
     print(
@@ -350,7 +356,8 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             img = _augment_image_batch(img, cfg)
             actions = _augment_actions(actions, cfg)
 
-            loss = model(img, prop, actions)
+            with _model_forward_context(model, device):
+                loss = model(img, prop, actions)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if float(cfg.train.grad_clip_norm) > 0:
@@ -387,7 +394,8 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
                     img = img.to(device)
                     prop = prop.to(device)
                     actions = actions.to(device)
-                    val_total += float(model(img, prop, actions).item())
+                    with _model_forward_context(model, device):
+                        val_total += float(model(img, prop, actions).item())
                     val_steps += 1
             val_avg = val_total / max(1, val_steps)
             if backup_state is not None:

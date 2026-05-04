@@ -12,7 +12,14 @@ import torch
 
 from mini_pi0.config.schema import RootConfig
 from mini_pi0.dataset.obs_processor import ObsProcessor
+from mini_pi0.models.mini_pi05 import PI05SmolVLM
 from mini_pi0.sim.base import SimulatorAdapter
+
+
+def _model_forward_context(model: torch.nn.Module, device: torch.device):
+    """Use bf16 autocast for MiniPI05's mixed fp32/bf16 backbone."""
+    enabled = isinstance(model, PI05SmolVLM) and device.type == "cuda"
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=enabled)
 
 
 def _ensure_uint8(frame: np.ndarray) -> np.ndarray:
@@ -241,7 +248,7 @@ def evaluate(
                 execute_steps, n_flow_steps, smooth_alpha_chunk = _resolve_eval_rollout_controls(cfg, steps)
                 img, prop = processor.obs_to_tensors(obs)
                 t0 = time.perf_counter()
-                with torch.no_grad():
+                with torch.no_grad(), _model_forward_context(model, img.device):
                     chunk = model.sample(img, prop, n_steps=n_flow_steps).squeeze(0)
                 t_infer += time.perf_counter() - t0
                 chunks += 1
@@ -443,7 +450,7 @@ def record_episode(
     for _ in range(step_budget):
         if not action_buffer:
             img, prop = processor.obs_to_tensors(obs)
-            with torch.no_grad():
+            with torch.no_grad(), _model_forward_context(model, img.device):
                 chunk = model.sample(img, prop, n_steps=int(cfg.eval.n_flow_steps)).squeeze(0)
             chunk = processor.denormalize(chunk).detach().cpu().numpy()
             proposed = []

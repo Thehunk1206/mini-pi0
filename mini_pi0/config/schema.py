@@ -233,6 +233,8 @@ class ModelConfig:
         pretrained_variant: Backbone shape hint used for ``mini_pi05`` pretrained
             loading (``256M`` or ``500M``).
         pretrained_local_files_only: Restrict Hugging Face loading to local cache only.
+        dtype: Runtime dtype for models that support it, especially ``mini_pi05``
+            (``float32`` or ``bfloat16``).
     """
 
     name: str = "mini_pi0_fm"
@@ -258,6 +260,7 @@ class ModelConfig:
     pretrained_model_name_or_path: str | None = None
     pretrained_variant: str = "256M"
     pretrained_local_files_only: bool = False
+    dtype: str | None = None
 
 
 @dataclass
