@@ -94,6 +94,10 @@ Detailed guide:
 - [docs/ROBOT_DATASET_MAPPING.md](docs/ROBOT_DATASET_MAPPING.md)
 - [docs/SIMULATION.md](docs/SIMULATION.md)
 
+For ManiSkill3 scripted oracle mixture collection, recovery/suboptimal demo
+profiles, domain randomization, and HDF5 visualization, follow
+[docs/DATASETS.md](docs/DATASETS.md#maniskill-oracle-mixture-data-collection).
+
 Download robomimic example:
 
 ```bash
