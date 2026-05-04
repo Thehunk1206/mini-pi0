@@ -178,6 +178,32 @@ class DataConfig:
 
 
 @dataclass
+class DatasetCollectionConfig:
+    """High-level oracle dataset mixture collection settings.
+
+    Attributes:
+        output_hdf5: Destination robomimic-style HDF5 path.
+        total_episodes: Number of accepted success-only episodes to write.
+        num_envs: Number of parallel ManiSkill envs for scripted collection.
+        max_steps: Per-trial rollout budget.
+        only_success: Whether to retain only successful rollouts.
+        reject_long_episodes: Reject trajectories above a profile length limit.
+        mix: Ratios for core, recovery, and suboptimal demos.
+        difficulty: Internal perturbation/noise preset.
+    """
+
+    output_hdf5: str = "artifacts/physical_scripted_oracle_mix_500_obj2to4_h700_640.hdf5"
+    total_episodes: int = 500
+    num_envs: int = 1
+    max_steps: int = 700
+    only_success: bool = True
+    reject_long_episodes: bool = True
+    mix: dict[str, float] = field(default_factory=lambda: {"core": 0.65, "recovery": 0.25, "suboptimal": 0.10})
+    difficulty: str = "balanced"
+    force_perturbation_type: str | None = None
+
+
+@dataclass
 class ModelConfig:
     """Flow-matching action model architecture configuration.
 
@@ -202,6 +228,11 @@ class ModelConfig:
         use_context_layernorm: Apply LayerNorm to context tokens before denoiser.
         vision_token_grid_size: Spatial token grid size per side for image-mode context.
         use_dit_adaln: Enable DiT-style timestep-conditioned AdaLN modulation in denoiser blocks.
+        pretrained_model_name_or_path: Optional SmolVLM checkpoint id/path used when
+            ``name=mini_pi05``. If null, ``mini_pi05`` starts from random init.
+        pretrained_variant: Backbone shape hint used for ``mini_pi05`` pretrained
+            loading (``256M`` or ``500M``).
+        pretrained_local_files_only: Restrict Hugging Face loading to local cache only.
     """
 
     name: str = "mini_pi0_fm"
@@ -224,6 +255,9 @@ class ModelConfig:
     use_context_layernorm: bool = True
     vision_token_grid_size: int = 4
     use_dit_adaln: bool = True
+    pretrained_model_name_or_path: str | None = None
+    pretrained_variant: str = "256M"
+    pretrained_local_files_only: bool = False
 
 
 @dataclass
@@ -278,6 +312,23 @@ class TrainConfig:
         val_ratio: Fraction of training samples reserved for validation (0 disables validation).
         ema_decay: Exponential moving average decay for model weights (0 disables EMA).
         checkpoint_use_ema: Save EMA weights into checkpoint model payload when EMA is enabled.
+        lr_backbone: Optional override LR for pretrained VLM backbone params.
+            When null, falls back to ``lr * 0.1`` for ``mini_pi05``.
+        lr_expert: Optional override LR for action expert/head params.
+            When null, falls back to ``lr`` for ``mini_pi05``.
+        freeze_backbone_steps: Number of initial optimizer steps to keep
+            ``mini_pi05`` VLM backbone frozen before unfreezing for finetuning.
+        image_aug_enable: Enable training-time image augmentation.
+        image_aug_crop_scale: Random resized-crop scale lower bound in (0, 1].
+            1.0 disables random crop.
+        image_aug_brightness: Symmetric brightness jitter magnitude.
+            Final factor sampled in ``[1-x, 1+x]``.
+        image_aug_contrast: Symmetric contrast jitter magnitude.
+        image_aug_saturation: Symmetric saturation jitter magnitude.
+        action_noise_std: Standard deviation of Gaussian action noise injected
+            into training targets (normalized action space).
+        action_noise_clip: Optional absolute clipping after action noise.
+            0 disables clipping.
         device: Requested torch device (``auto``, ``cpu``, ``cuda``, ``mps``).
     """
 
@@ -301,6 +352,16 @@ class TrainConfig:
     val_ratio: float = 0.1
     ema_decay: float = 0.0
     checkpoint_use_ema: bool = True
+    lr_backbone: float | None = None
+    lr_expert: float | None = None
+    freeze_backbone_steps: int = 0
+    image_aug_enable: bool = False
+    image_aug_crop_scale: float = 1.0
+    image_aug_brightness: float = 0.0
+    image_aug_contrast: float = 0.0
+    image_aug_saturation: float = 0.0
+    action_noise_std: float = 0.0
+    action_noise_clip: float = 0.0
     device: str = "auto"
 
 
@@ -421,6 +482,7 @@ class RootConfig:
         task: Task-level object randomization and overrides.
         robot: Canonical robot schema.
         data: Dataset and preprocessing settings.
+        dataset_collection: Oracle mixture collection settings.
         vision: Vision encoder settings for feature precompute/runtime extraction.
         model: Model architecture settings.
         train: Training loop controls.
@@ -433,6 +495,7 @@ class RootConfig:
     task: TaskConfig = field(default_factory=TaskConfig)
     robot: RobotConfig = field(default_factory=RobotConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    dataset_collection: DatasetCollectionConfig = field(default_factory=DatasetCollectionConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)

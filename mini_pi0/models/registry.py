@@ -10,10 +10,12 @@ from torch import nn
 from mini_pi0.config.schema import ModelConfig, RootConfig, effective_image_keys
 from mini_pi0.models.crossflow import CrossFlowActionModel
 from mini_pi0.models.fm import MiniPi0FlowMatching
+from mini_pi0.models.mini_pi05 import MiniPI05Config, PI05SmolVLM, load_minipi05_from_smolvlm
 
 _MODEL_REGISTRY = {
     "mini_pi0_fm": MiniPi0FlowMatching,
     "mini_pi0_crossflow": CrossFlowActionModel,
+    "mini_pi05": PI05SmolVLM,
 }
 
 
@@ -45,6 +47,39 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
     if key not in _MODEL_REGISTRY:
         raise ValueError(f"Unknown model '{cfg.name}'. Options: {list_models()}")
     cls = _MODEL_REGISTRY[key]
+    if key == "mini_pi05":
+        if str(cfg.obs_mode).strip().lower() not in {"image"}:
+            raise ValueError(
+                "mini_pi05 currently supports obs_mode=image only in this training infra."
+            )
+        num_cameras = 1
+        if isinstance(model_cfg, RootConfig):
+            num_cameras = max(1, len(effective_image_keys(model_cfg.robot)))
+        dtype = "bfloat16" if torch.cuda.is_available() else "float32"
+        pi05_cfg = MiniPI05Config(
+            action_dim=int(cfg.action_dim),
+            action_horizon=int(cfg.chunk_size),
+            num_cameras=int(num_cameras),
+            state_dim=int(cfg.prop_dim),
+            dtype=dtype,
+        )
+        pretrained_path = getattr(cfg, "pretrained_model_name_or_path", None)
+        if pretrained_path:
+            variant = str(getattr(cfg, "pretrained_variant", "256M"))
+            local_only = bool(getattr(cfg, "pretrained_local_files_only", False))
+            return load_minipi05_from_smolvlm(
+                pretrained_model_name_or_path=str(pretrained_path),
+                variant=("500M" if variant.upper() == "500M" else "256M"),
+                action_dim=int(cfg.action_dim),
+                action_horizon=int(cfg.chunk_size),
+                num_cameras=int(num_cameras),
+                state_dim=int(cfg.prop_dim),
+                dtype=dtype,
+                device="cpu",
+                local_files_only=local_only,
+            )
+        return cls(pi05_cfg)
+
     kwargs = dict(
         action_dim=cfg.action_dim,
         prop_dim=cfg.prop_dim,
@@ -155,6 +190,9 @@ def build_checkpoint_payload(
             "use_context_layernorm": getattr(cfg.model, "use_context_layernorm", True),
             "vision_token_grid_size": getattr(cfg.model, "vision_token_grid_size", 4),
             "use_dit_adaln": getattr(cfg.model, "use_dit_adaln", True),
+            "pretrained_model_name_or_path": getattr(cfg.model, "pretrained_model_name_or_path", None),
+            "pretrained_variant": getattr(cfg.model, "pretrained_variant", "256M"),
+            "pretrained_local_files_only": getattr(cfg.model, "pretrained_local_files_only", False),
         },
         "sim_backend": cfg.simulator.backend,
         "sim_config": {

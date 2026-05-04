@@ -1,0 +1,625 @@
+"""Low-level collector backends for ManiSkill data generation.
+
+Backends here execute rollout mechanics (scripted or mplib planning) while
+task plugins decide which backend to call.
+"""
+
+from __future__ import annotations
+
+import copy
+import contextlib
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from typing import Any
+
+import gymnasium as gym
+import numpy as np
+import sapien
+import torch
+from mani_skill.utils.structs import Pose
+
+from mini_pi0.config.schema import RootConfig
+from mini_pi0.sim.registry import make_sim_adapter
+from .common import (
+    EpisodeBuffer,
+    canonical_obs_batch_from_raw_env,
+    canonical_obs_from_raw_env,
+    normalize_info,
+    normalize_info_batched,
+    to_numpy,
+)
+from .policy import OracleOptions, OracleProfile, ScriptedMultiObjectOracle
+
+
+@dataclass(frozen=True)
+class VectorizedOracleSettings:
+    """Profile options for vectorized scripted oracle collection."""
+
+    options: OracleOptions = OracleOptions()
+    profile_type: str = OracleProfile.CORE.value
+    difficulty: str = "balanced"
+    perturbation_types: tuple[str, ...] = ("none",)
+    force_perturbation_type: str | None = None
+    displacement_scale: float = 1.0
+    seed: int = 0
+
+
+def _resolve_scripted_control_mode(ep_cfg: RootConfig) -> str:
+    """Resolve scripted rollout control mode with stable defaults."""
+    env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
+    explicit = env_kwargs.get("scripted_control_mode")
+    if explicit is not None:
+        return str(explicit)
+    current = str(ep_cfg.simulator.controller)
+    if current in {"pd_ee_delta_pose", "pd_ee_pose"}:
+        return "pd_ee_delta_pos"
+    return current
+
+
+def _project_scripted_action(action7: np.ndarray, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+    """Map canonical 7D scripted action to current env action-space dimension."""
+    lo = np.asarray(low, dtype=np.float32).reshape(-1)
+    hi = np.asarray(high, dtype=np.float32).reshape(-1)
+    dim = int(lo.shape[0])
+    a = np.asarray(action7, dtype=np.float32).reshape(-1)
+    if a.shape[0] < 7:
+        raise ValueError(f"Expected scripted action with >=7 dims, got {a.shape[0]}")
+
+    if dim == 7:
+        out = a.copy()
+    elif dim == 4:
+        out = np.asarray([a[0], a[1], a[2], a[6]], dtype=np.float32)
+    elif dim == 3:
+        out = np.asarray([a[0], a[1], a[2]], dtype=np.float32)
+    elif dim == 6:
+        out = np.asarray([a[0], a[1], a[2], a[3], a[4], a[5]], dtype=np.float32)
+    else:
+        out = np.zeros((dim,), dtype=np.float32)
+        out[: min(3, dim)] = a[: min(3, dim)]
+        if dim > 0:
+            out[-1] = a[6]
+    return np.clip(out, lo, hi)
+
+
+def _first_unplaced_target(obs: dict[str, np.ndarray]) -> int | None:
+    """Return the first active object not yet placed in the tray."""
+    mask = np.asarray(obs.get("observation.state.object_mask", []), dtype=np.float32).reshape(-1)
+    placed = np.asarray(obs.get("observation.state.placed_mask", np.zeros_like(mask)), dtype=np.float32).reshape(-1)
+    for idx in range(min(len(mask), len(placed))):
+        if mask[idx] > 0.5 and placed[idx] < 0.5:
+            return idx
+    return None
+
+
+def _perturbation_magnitude(kind: str, settings: VectorizedOracleSettings) -> float:
+    """Map a perturbation name to its metric displacement magnitude."""
+    if kind == "object_displace_2cm":
+        return 0.02 * float(settings.displacement_scale)
+    if kind in {"object_displace_5cm", "midtask_nudge"}:
+        return 0.05 * float(settings.displacement_scale)
+    if kind == "bowl_escape":
+        return 0.18
+    return 0.0
+
+
+def _nudge_vectorized_object(
+    env: Any,
+    *,
+    env_idx: int,
+    obj_idx: int,
+    magnitude: float,
+    rng: np.random.Generator,
+    bowl_escape: bool,
+) -> float:
+    """Move one object's pose for a single sub-env in a vectorized scene."""
+    uw = env.unwrapped
+    if obj_idx < 0 or obj_idx >= len(uw.objects):
+        return 0.0
+    actor = uw.objects[obj_idx]
+    pose_p = actor.pose.p.clone()
+    pose_q = actor.pose.q.clone()
+    old_xy = pose_p[env_idx, :2].clone()
+    if bowl_escape:
+        bowl_center = np.asarray(getattr(uw, "bowl_center_np", [0.05, -0.28, 0.0]), dtype=np.float32)
+        x_offset = float(rng.uniform(-0.055, 0.055))
+        target_xy = torch.tensor(
+            [float(bowl_center[0] + x_offset), float(bowl_center[1] + 0.18)],
+            dtype=torch.float32,
+            device=pose_p.device,
+        )
+        pose_p[env_idx, 0] = target_xy[0]
+        pose_p[env_idx, 1] = target_xy[1]
+        pose_p[env_idx, 2] = torch.clamp(pose_p[env_idx, 2], 0.035, 0.055)
+    else:
+        theta = float(rng.uniform(0.0, 2.0 * np.pi))
+        delta = torch.tensor(
+            [magnitude * np.cos(theta), magnitude * np.sin(theta), 0.0],
+            dtype=torch.float32,
+            device=pose_p.device,
+        )
+        pose_p[env_idx, :3] = pose_p[env_idx, :3] + delta
+        pose_p[env_idx, 0] = torch.clamp(pose_p[env_idx, 0], -0.10, 0.18)
+        pose_p[env_idx, 1] = torch.clamp(pose_p[env_idx, 1], -0.36, 0.36)
+        target_xy = pose_p[env_idx, :2]
+    actor.set_pose(Pose.create_from_pq(p=pose_p, q=pose_q))
+    with contextlib.suppress(Exception):
+        lin = actor.linear_velocity.clone()
+        ang = actor.angular_velocity.clone()
+        lin[env_idx, :] = 0.0
+        ang[env_idx, :] = 0.0
+        actor.set_linear_velocity(lin)
+        actor.set_angular_velocity(ang)
+    return float(torch.linalg.norm(target_xy - old_xy).item())
+
+
+def mplib_runtime_check() -> bool:
+    """Return True when mplib planner can be constructed in current runtime.
+
+    This runs a tiny subprocess probe so a native mplib initialization failure
+    cannot crash the current Python process.
+    """
+    code = (
+        "import mplib\n"
+        "urdf='"
+        ".venv/lib/python3.11/site-packages/mani_skill/assets/robots/panda/panda_v2.urdf"
+        "'\n"
+        "mplib.Planner(urdf=urdf, move_group='panda_hand_tcp')\n"
+        "print('ok')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    return proc.returncode == 0 and "ok" in proc.stdout
+
+
+def collect_single_scripted_episode(
+    ep_cfg: RootConfig,
+    *,
+    image_keys: list[str],
+    state_keys: list[str],
+    max_steps: int,
+) -> tuple[EpisodeBuffer, dict[str, Any]]:
+    """Collect one episode with the scripted oracle through sim adapter API.
+
+    Args:
+        ep_cfg: Runtime config for this episode seed.
+        image_keys: Canonical image keys to capture.
+        state_keys: Canonical state keys to capture.
+        max_steps: Maximum environment steps before forced stop.
+
+    Returns:
+        `(EpisodeBuffer, final_info)` for one trajectory.
+    """
+    tray_center = np.asarray(ep_cfg.simulator.env_kwargs.get("tray_center", [0.62, 0.0, 0.0]), dtype=np.float32)
+    policy = ScriptedMultiObjectOracle(tray_center=tray_center)
+    run_cfg = copy.deepcopy(ep_cfg)
+    run_cfg.simulator.controller = _resolve_scripted_control_mode(ep_cfg)
+    run_cfg.simulator.env_kwargs = dict(run_cfg.simulator.env_kwargs or {})
+    run_cfg.simulator.env_kwargs.pop("scripted_control_mode", None)
+    run_cfg.simulator.env_kwargs["control_mode"] = str(run_cfg.simulator.controller)
+    adapter = make_sim_adapter(run_cfg)
+    obs = adapter.reset(seed=ep_cfg.experiment.seed)
+    policy.reset()
+    low, high = adapter.action_spec()
+
+    buf = EpisodeBuffer(obs=[], actions=[], rewards=[], dones=[], info_rows=[])
+    final_info: dict[str, Any] = {"success": False, "success_fraction": 0.0, "placed_count": 0, "total_objects": 0}
+
+    for _ in range(int(max_steps)):
+        buf.obs.append({
+            k: np.asarray(obs[k])
+            for k in set(image_keys + state_keys + [
+                "observation.state.object",
+                "observation.state.object_mask",
+                "observation.state.placed_mask",
+                "observation.state.place_targets",
+                "observation.state.task_progress",
+            ])
+            if k in obs
+        })
+        action7 = policy.act(obs)
+        action = _project_scripted_action(action7, low, high)
+        step = adapter.step(action)
+        buf.actions.append(action.astype(np.float32))
+        buf.rewards.append(float(step.reward))
+        done = bool(step.done or adapter.check_success(step.info, step.obs))
+        buf.dones.append(1 if done else 0)
+        buf.info_rows.append(dict(step.info))
+        obs = step.obs
+        final_info = dict(step.info)
+        if done:
+            break
+
+    adapter.close()
+    return buf, final_info
+
+
+def collect_vectorized_scripted_episodes(
+    ep_cfg: RootConfig,
+    *,
+    image_keys: list[str],
+    state_keys: list[str],
+    num_envs: int,
+    episodes_target: int,
+    max_steps: int,
+    only_success: bool,
+    oracle_settings: VectorizedOracleSettings | None = None,
+) -> list[tuple[EpisodeBuffer, dict[str, Any]]]:
+    """Collect multiple episodes using ManiSkill vectorized env stepping.
+
+    Args:
+        ep_cfg: Runtime config for current collection trial.
+        image_keys: Canonical image keys to capture.
+        state_keys: Canonical state keys to capture.
+        num_envs: Number of vectorized environments to step in parallel.
+        episodes_target: Target number of finalized episodes to return.
+        max_steps: Maximum rollout steps before stopping this trial.
+        only_success: Whether to retain only successful completed episodes.
+        oracle_settings: Optional profile, noise, and perturbation settings.
+
+    Returns:
+        List of finalized `(EpisodeBuffer, final_info)` episodes.
+    """
+    import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
+
+    env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
+    env_kwargs.pop("scripted_control_mode", None)
+    task_id = str(ep_cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
+    control_mode = _resolve_scripted_control_mode(ep_cfg)
+    env = gym.make(
+        task_id,
+        num_envs=num_envs,
+        obs_mode=env_kwargs.pop("obs_mode", "rgbd"),
+        reward_mode=env_kwargs.pop("reward_mode", "dense"),
+        control_mode=env_kwargs.pop("control_mode", control_mode),
+        render_mode="none",
+        render_backend=env_kwargs.pop("render_backend", "gpu"),
+        sim_backend=env_kwargs.pop("sim_backend", "auto"),
+        robot_uids=env_kwargs.pop("robot_uids", str(ep_cfg.simulator.robot).lower()),
+        **env_kwargs,
+    )
+    raw_obs, _ = env.reset(seed=int(ep_cfg.experiment.seed))
+    space_lo = np.asarray(env.action_space.low, dtype=np.float32)
+    space_hi = np.asarray(env.action_space.high, dtype=np.float32)
+    low = space_lo[0] if space_lo.ndim == 2 else space_lo
+    high = space_hi[0] if space_hi.ndim == 2 else space_hi
+
+    settings = oracle_settings or VectorizedOracleSettings(seed=int(ep_cfg.experiment.seed))
+    tray_center = np.asarray(ep_cfg.simulator.env_kwargs.get("tray_center", [0.62, 0.0, 0.0]), dtype=np.float32)
+    rngs = [np.random.default_rng(int(settings.seed) + 1009 * i) for i in range(num_envs)]
+    policies = [
+        ScriptedMultiObjectOracle(tray_center=tray_center, options=settings.options, rng=rngs[i])
+        for i in range(num_envs)
+    ]
+    episode_counts = [0 for _ in range(num_envs)]
+    perturbation_types = ["" for _ in range(num_envs)]
+    perturbation_magnitudes = [0.0 for _ in range(num_envs)]
+    perturbation_triggers = [-1 for _ in range(num_envs)]
+    perturbation_applied = [True for _ in range(num_envs)]
+    episode_steps = [0 for _ in range(num_envs)]
+    active = [True for _ in range(num_envs)]
+
+    def reset_oracle_state(env_idx: int) -> None:
+        policies[env_idx].reset()
+        episode_counts[env_idx] += 1
+        choices = settings.perturbation_types or ("none",)
+        kind = str(settings.force_perturbation_type or rngs[env_idx].choice(choices))
+        perturbation_types[env_idx] = kind
+        perturbation_magnitudes[env_idx] = _perturbation_magnitude(kind, settings)
+        perturbation_triggers[env_idx] = int(rngs[env_idx].choice([55, 110, 165]))
+        perturbation_applied[env_idx] = kind in {"none", "grasp_noise", "action_noise"}
+        episode_steps[env_idx] = 0
+        active[env_idx] = True
+
+    buffers = [EpisodeBuffer(obs=[], actions=[], rewards=[], dones=[], info_rows=[]) for _ in range(num_envs)]
+    finalized: list[tuple[EpisodeBuffer, dict[str, Any]]] = []
+    for i in range(num_envs):
+        reset_oracle_state(i)
+
+    for _ in range(int(max_steps)):
+        obs_batch = canonical_obs_batch_from_raw_env(env, image_keys=image_keys, state_keys=state_keys, raw_obs=raw_obs)
+        acts = []
+        for i in range(num_envs):
+            if not active[i]:
+                acts.append(np.zeros_like(low, dtype=np.float32))
+                continue
+            obs_i = obs_batch[i]
+            if not perturbation_applied[i] and episode_steps[i] >= perturbation_triggers[i]:
+                target_idx = policies[i].target_idx if policies[i].target_idx is not None else _first_unplaced_target(obs_i)
+                if target_idx is not None:
+                    moved = _nudge_vectorized_object(
+                        env,
+                        env_idx=i,
+                        obj_idx=int(target_idx),
+                        magnitude=float(perturbation_magnitudes[i]),
+                        rng=rngs[i],
+                        bowl_escape=perturbation_types[i] == "bowl_escape",
+                    )
+                    perturbation_magnitudes[i] = float(moved or perturbation_magnitudes[i])
+                perturbation_applied[i] = True
+            act7 = policies[i].act(obs_i).astype(np.float32)
+            act_i = _project_scripted_action(act7, low, high)
+            buffers[i].obs.append({
+                k: np.asarray(obs_i[k])
+                for k in set(image_keys + state_keys + [
+                    "observation.state.object",
+                    "observation.state.object_mask",
+                    "observation.state.placed_mask",
+                    "observation.state.place_targets",
+                    "observation.state.task_progress",
+                ])
+                if k in obs_i
+            })
+            acts.append(act_i)
+
+        actions_np = np.stack(acts, axis=0)
+        raw_obs, reward, terminated, truncated, info = env.step(actions_np)
+        rew = to_numpy(reward).astype(np.float32).reshape(num_envs)
+        ter = to_numpy(terminated).astype(bool).reshape(num_envs)
+        tru = to_numpy(truncated).astype(bool).reshape(num_envs)
+        info_rows = normalize_info_batched(dict(info), num_envs=num_envs)
+
+        for i in range(num_envs):
+            if not active[i]:
+                continue
+            buffers[i].actions.append(actions_np[i])
+            buffers[i].rewards.append(float(rew[i]))
+            episode_steps[i] += 1
+            done_i = bool(ter[i] or tru[i] or float(info_rows[i].get("success_fraction", 0.0)) >= 1.0 - 1e-6)
+            buffers[i].dones.append(1 if done_i else 0)
+            info_rows[i]["success"] = bool(float(info_rows[i].get("success_fraction", 0.0)) >= 1.0 - 1e-6)
+            buffers[i].info_rows.append(info_rows[i])
+
+            if done_i:
+                fi = dict(info_rows[i])
+                fi.setdefault("placed_count", int(np.sum(obs_batch[i]["observation.state.placed_mask"] > 0.5)))
+                fi.setdefault("total_objects", int(np.sum(obs_batch[i]["observation.state.object_mask"] > 0.5)))
+                fi.update(policies[i].telemetry())
+                fi.update(
+                    {
+                        "profile_type": str(settings.profile_type),
+                        "difficulty": str(settings.difficulty),
+                        "seed": int(settings.seed) + int(i) + 100000 * int(episode_counts[i]),
+                        "perturbation_type": str(perturbation_types[i]),
+                        "perturbation_magnitude": float(perturbation_magnitudes[i]),
+                    }
+                )
+                if (not only_success) or bool(fi.get("success", False)):
+                    finalized.append((buffers[i], fi))
+                buffers[i] = EpisodeBuffer(obs=[], actions=[], rewards=[], dones=[], info_rows=[])
+                active[i] = False
+                if len(finalized) >= int(episodes_target):
+                    env.close()
+                    return finalized
+        if not any(active):
+            break
+
+    env.close()
+    return finalized
+
+
+def collect_single_mplib_episode(
+    ep_cfg: RootConfig,
+    *,
+    max_steps: int,
+    image_keys: list[str],
+    state_keys: list[str],
+) -> tuple[EpisodeBuffer, dict[str, Any]]:
+    """Collect one episode using mplib motion-planning primitives.
+
+    Args:
+        ep_cfg: Runtime config for this episode seed.
+        max_steps: Maximum action steps before forced stop.
+        image_keys: Canonical image keys to capture.
+        state_keys: Canonical state keys to capture.
+
+    Returns:
+        `(EpisodeBuffer, final_info)` for one planner-driven trajectory.
+    """
+    import mplib
+    from mani_skill.examples.motionplanning.base_motionplanner.utils import compute_grasp_info_by_obb, get_actor_obb
+
+    env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
+    env_kwargs["control_mode"] = "pd_joint_pos"
+    env_kwargs["obs_mode"] = env_kwargs.get("obs_mode", "rgbd")
+    env = gym.make(
+        str(ep_cfg.simulator.task or "MiniPi0MultiObjectTray-v1"),
+        obs_mode=env_kwargs.pop("obs_mode", "rgbd"),
+        reward_mode=env_kwargs.pop("reward_mode", "dense"),
+        control_mode=env_kwargs.pop("control_mode", "pd_joint_pos"),
+        render_mode="rgb_array",
+        render_backend=env_kwargs.pop("render_backend", "cpu"),
+        sim_backend=env_kwargs.pop("sim_backend", "cpu"),
+        robot_uids=env_kwargs.pop("robot_uids", "panda"),
+        **env_kwargs,
+    )
+    raw_obs, _ = env.reset(seed=int(ep_cfg.experiment.seed))
+    buf = EpisodeBuffer(obs=[], actions=[], rewards=[], dones=[], info_rows=[])
+    final_info: dict[str, Any] = {"success": False, "success_fraction": 0.0, "placed_count": 0, "total_objects": 0}
+    step_counter = {"n": 0}
+
+    orig_step = env.step
+
+    def recording_step(action):
+        """Step wrapper that records canonical obs/action/reward/info into buffer.
+
+        Args:
+            action: Action sent to wrapped env step.
+
+        Returns:
+            Original `(obs, reward, terminated, truncated, info)` tuple.
+        """
+        obs, reward, terminated, truncated, info = orig_step(action)
+        step_counter["n"] += 1
+        norm = normalize_info(dict(info))
+        can_obs = canonical_obs_from_raw_env(env, image_keys=image_keys, state_keys=state_keys, last_raw_obs=obs)
+        buf.obs.append(can_obs)
+        buf.actions.append(np.asarray(action, dtype=np.float32))
+        buf.rewards.append(float(np.asarray(reward).item()))
+        done = bool(np.asarray(terminated).item() or np.asarray(truncated).item())
+        if float(norm.get("success_fraction", 0.0)) >= 1.0 - 1e-6:
+            done = True
+        buf.dones.append(1 if done else 0)
+        norm["success"] = bool(float(norm.get("success_fraction", 0.0)) >= 1.0 - 1e-6)
+        buf.info_rows.append(norm)
+        return obs, reward, terminated, truncated, info
+
+    env.step = recording_step
+
+    uw = env.unwrapped
+    tray_center = np.asarray(uw.tray_center_np, dtype=np.float32)
+    urdf = ".venv/lib/python3.11/site-packages/mani_skill/assets/robots/panda/panda_v2.urdf"
+    srdf = ".venv/lib/python3.11/site-packages/mani_skill/assets/robots/panda/panda_v2.srdf"
+    planner = mplib.Planner(
+        urdf=urdf,
+        srdf=srdf,
+        user_link_names=[lnk.get_name() for lnk in uw.agent.robot.get_links()],
+        user_joint_names=[j.get_name() for j in uw.agent.robot.get_active_joints()],
+        move_group="panda_hand_tcp",
+    )
+    planner.set_base_pose(mplib.Pose(to_numpy(uw.agent.robot.pose.p)[0].astype(np.float64), to_numpy(uw.agent.robot.pose.q)[0].astype(np.float64)))
+
+    lo = np.asarray(env.action_space.low, dtype=np.float32)
+    hi = np.asarray(env.action_space.high, dtype=np.float32)
+    gripper_open = float(hi[-1])
+    gripper_closed = float(lo[-1])
+
+    def to_pose(sp_pose: sapien.Pose):
+        """Convert SAPIEN pose to mplib pose.
+
+        Args:
+            sp_pose: Pose object in SAPIEN format.
+
+        Returns:
+            Equivalent pose in mplib format.
+        """
+        return mplib.Pose(np.asarray(sp_pose.p, dtype=np.float64), np.asarray(sp_pose.q, dtype=np.float64))
+
+    def exec_path(result: dict[str, Any], grip: float):
+        """Execute a planned joint-space trajectory with fixed gripper command.
+
+        Args:
+            result: Planner output dictionary containing joint trajectory.
+            grip: Gripper command value applied at every executed point.
+        """
+        if result.get("status") != "Success":
+            return
+        traj = np.asarray(result.get("position"), dtype=np.float32)
+        if traj.ndim != 2 or traj.shape[0] == 0:
+            return
+        for q7 in traj:
+            if step_counter["n"] >= int(max_steps):
+                break
+            action = np.zeros((env.action_space.shape[0],), dtype=np.float32)
+            action[:7] = q7[:7]
+            action[-1] = grip
+            env.step(np.clip(action, lo, hi))
+
+    def move_pose(sp_pose: sapien.Pose, grip: float) -> bool:
+        """Plan and execute a motion to target pose; retry screw->pose planner.
+
+        Args:
+            sp_pose: Target end-effector pose.
+            grip: Gripper command to apply while executing plan.
+
+        Returns:
+            True if planning and execution succeeded, else False.
+        """
+        q_now = to_numpy(uw.agent.robot.get_qpos())[0].astype(np.float64)
+        goal = to_pose(sp_pose)
+        res = planner.plan_screw(goal, q_now, time_step=1 / 20)
+        if res.get("status") != "Success":
+            res = planner.plan_pose(goal, q_now, time_step=1 / 20, planning_time=0.25)
+        if res.get("status") != "Success":
+            return False
+        exec_path(res, grip)
+        return True
+
+    def hold_gripper(grip: float, n: int):
+        """Hold current arm joints while applying repeated gripper command.
+
+        Args:
+            grip: Gripper command to hold.
+            n: Number of control steps to repeat.
+        """
+        for _ in range(n):
+            if step_counter["n"] >= int(max_steps):
+                break
+            q_now = to_numpy(uw.agent.robot.get_qpos())[0].astype(np.float32)
+            action = np.zeros((env.action_space.shape[0],), dtype=np.float32)
+            action[:7] = q_now[:7]
+            action[-1] = grip
+            env.step(np.clip(action, lo, hi))
+
+    start_wall = time.time()
+    try:
+        while step_counter["n"] < int(max_steps):
+            if (time.time() - start_wall) > 45.0:
+                break
+            info = uw.evaluate()
+            if float(info["success_fraction"][0].item()) >= 1.0 - 1e-6:
+                break
+
+            placed = to_numpy(info["placed_mask"])[0]
+            active = to_numpy(uw._active_object_mask)[0]
+            candidates = [i for i in range(min(len(active), len(placed))) if active[i] > 0 and placed[i] < 0.5]
+            if not candidates:
+                break
+            target_idx = int(candidates[0])
+            actor = uw.objects[target_idx]
+
+            approaching = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+            target_closing = uw.agent.tcp.pose.to_transformation_matrix()[0, :3, 1].detach().cpu().numpy()
+            obb = get_actor_obb(actor)
+            grasp_info = compute_grasp_info_by_obb(obb, approaching=approaching, target_closing=target_closing, depth=0.025)
+            base_grasp = uw.agent.build_grasp_pose(approaching, grasp_info["closing"], grasp_info["center"])
+
+            grasp_pose = None
+            pre_grasp = None
+            for yaw in [0.0, np.pi / 4, -np.pi / 4, np.pi / 2, -np.pi / 2]:
+                dq = np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)], dtype=np.float64)
+                cand = base_grasp * sapien.Pose(q=dq)
+                cand_pre = cand * sapien.Pose([0.0, 0.0, -0.07])
+                q_now = to_numpy(uw.agent.robot.get_qpos())[0].astype(np.float64)
+                res = planner.plan_screw(to_pose(cand_pre), q_now, time_step=1 / 20)
+                if res.get("status") != "Success":
+                    res = planner.plan_pose(to_pose(cand_pre), q_now, time_step=1 / 20, planning_time=0.2)
+                if res.get("status") == "Success":
+                    grasp_pose = cand
+                    pre_grasp = cand_pre
+                    break
+            if grasp_pose is None or pre_grasp is None:
+                continue
+
+            actor_p = to_numpy(actor.pose.p)[0]
+            lift_pose = sapien.Pose([actor_p[0], actor_p[1], max(actor_p[2] + 0.14, 0.18)], grasp_pose.q)
+            tray_above = sapien.Pose([tray_center[0], tray_center[1], 0.20], grasp_pose.q)
+            tray_place = sapien.Pose([tray_center[0], tray_center[1], 0.095], grasp_pose.q)
+            retreat = sapien.Pose([tray_center[0], tray_center[1], 0.22], grasp_pose.q)
+
+            if not move_pose(pre_grasp, gripper_open):
+                continue
+            if not move_pose(grasp_pose, gripper_open):
+                continue
+            hold_gripper(gripper_closed, n=10)
+            if not move_pose(lift_pose, gripper_closed):
+                continue
+            if not move_pose(tray_above, gripper_closed):
+                continue
+            if not move_pose(tray_place, gripper_closed):
+                continue
+            hold_gripper(gripper_open, n=10)
+            move_pose(retreat, gripper_open)
+            hold_gripper(gripper_open, n=6)
+    finally:
+        env.step = orig_step
+        fin = normalize_info(dict(uw.evaluate()))
+        final_info = {
+            "success": bool(float(fin.get("success_fraction", 0.0)) >= 1.0 - 1e-6),
+            "success_fraction": float(fin.get("success_fraction", 0.0)),
+            "placed_count": int(float(fin.get("placed_count", 0.0))),
+            "total_objects": int(float(fin.get("total_objects", 0.0))),
+        }
+        env.close()
+
+    return buf, final_info
