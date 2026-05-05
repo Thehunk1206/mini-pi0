@@ -116,6 +116,27 @@ class ObsProcessor:
 
         return img.to(self.device), prop.to(self.device)
 
+    def obs_batch_to_tensors(self, obs_batch: list[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert a batch of canonical observations to model input tensors.
+
+        Args:
+            obs_batch: List of canonical observation dictionaries, one per
+                simulator sub-environment.
+
+        Returns:
+            Tuple ``(img, prop)`` where the leading dimension is batch size.
+        """
+
+        if not obs_batch:
+            raise ValueError("obs_batch_to_tensors requires at least one observation.")
+        imgs: list[torch.Tensor] = []
+        props: list[torch.Tensor] = []
+        for obs in obs_batch:
+            img, prop = self.obs_to_tensors(obs)
+            imgs.append(img)
+            props.append(prop)
+        return torch.cat(imgs, dim=0), torch.cat(props, dim=0)
+
     def denormalize(self, actions: torch.Tensor) -> torch.Tensor:
         """Map normalized model actions back to environment action scale.
 

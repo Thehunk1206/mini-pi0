@@ -418,6 +418,8 @@ class EvalConfig:
         disable_domain_randomization: Disable simulator domain randomization during
             policy eval. This gives a stable held-out task metric; robustness eval
             can explicitly set it to ``False``.
+        vectorized: Enable ManiSkill vectorized rollout evaluation when supported.
+        num_envs: Number of parallel ManiSkill environments for vectorized eval.
         failure_reward_threshold: Threshold for classifying failures as ``no_progress``.
         stability_warmup_steps: Number of initial env steps using warmup rollout controls.
         stability_warmup_execute_steps: Warmup override for execute steps (null keeps base value).
@@ -450,6 +452,8 @@ class EvalConfig:
     action_smoothing_alpha: float = 0.0
     action_scale: list[float] | None = None
     disable_domain_randomization: bool = True
+    vectorized: bool = False
+    num_envs: int = 1
     failure_reward_threshold: float = 0.2
     stability_warmup_steps: int = 0
     stability_warmup_execute_steps: int | None = None

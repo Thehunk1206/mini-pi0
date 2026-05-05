@@ -210,8 +210,10 @@ eval:
   strict_parity: true
   action_smoothing_alpha: 0.10
   disable_domain_randomization: true
+  vectorized: true
+  num_envs: 8
   record: false
-  record_grid: true
+  record_grid: false
   grid_size: 3
   grid_fps: 20
   grid_width: 768

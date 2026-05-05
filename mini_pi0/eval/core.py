@@ -364,6 +364,230 @@ def evaluate(
     return out
 
 
+def _make_vectorized_maniskill_env(cfg: RootConfig, num_envs: int):
+    """Create a ManiSkill vectorized env matching the configured eval backend."""
+
+    import gymnasium as gym
+
+    import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
+
+    env_kwargs = dict(cfg.simulator.env_kwargs or {})
+    env_kwargs.pop("scripted_control_mode", None)
+    task_id = str(cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
+    if task_id.strip().lower() in {"pickcube-v1", "pickcube", "custom", "mini_pi0_multiobject", "lift"}:
+        task_id = "MiniPi0MultiObjectTray-v1"
+    try:
+        gym.spec(task_id)
+    except Exception:
+        task_id = "MiniPi0MultiObjectTray-v1"
+
+    return gym.make(
+        task_id,
+        num_envs=int(num_envs),
+        obs_mode=env_kwargs.pop("obs_mode", "rgbd"),
+        reward_mode=env_kwargs.pop("reward_mode", "dense"),
+        control_mode=env_kwargs.pop("control_mode", str(cfg.simulator.controller)),
+        render_mode="none",
+        render_backend=env_kwargs.pop("render_backend", "gpu"),
+        sim_backend=env_kwargs.pop("sim_backend", "auto"),
+        robot_uids=env_kwargs.pop("robot_uids", str(cfg.simulator.robot).lower()),
+        **env_kwargs,
+    )
+
+
+def _action_bounds_from_space(space: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return single-env action bounds from possibly batched Gym space bounds."""
+
+    low = np.asarray(space.low, dtype=np.float32)
+    high = np.asarray(space.high, dtype=np.float32)
+    if low.ndim == 2:
+        low = low[0]
+    if high.ndim == 2:
+        high = high[0]
+    return low.reshape(-1), high.reshape(-1)
+
+
+def evaluate_vectorized_maniskill(
+    model: torch.nn.Module,
+    processor: ObsProcessor,
+    cfg: RootConfig,
+) -> dict[str, np.ndarray]:
+    """Run ManiSkill vectorized rollout eval with batched policy inference.
+
+    This evaluator intentionally creates independent vectorized batches instead
+    of resetting individual sub-envs in place. That keeps the implementation
+    compatible with ManiSkill reset semantics and is fast enough for training
+    checkpoints.
+    """
+
+    from mini_pi0.config.schema import effective_image_keys, effective_state_keys
+    from mini_pi0.dataset.maniskill_collectors.common import (
+        canonical_obs_batch_from_raw_env,
+        normalize_info_batched,
+        to_numpy,
+    )
+
+    model.eval()
+    metrics: dict[str, list[float | str]] = defaultdict(list)
+    n_episodes = int(max(1, cfg.eval.n_episodes))
+    num_envs = int(max(1, min(getattr(cfg.eval, "num_envs", 1), n_episodes)))
+    max_steps = int(cfg.eval.max_steps) if cfg.eval.max_steps is not None else int(cfg.simulator.horizon)
+    image_keys = effective_image_keys(cfg.robot)
+    state_keys = effective_state_keys(cfg.robot)
+    action_scale = None
+    verbose = bool(cfg.eval.verbose)
+    log_every = max(1, int(cfg.eval.log_every_episodes))
+    completed = 0
+    success_count = 0
+    start_time = time.perf_counter()
+
+    if verbose:
+        print(
+            "[eval] Starting vectorized ManiSkill evaluation: "
+            f"episodes={n_episodes}, num_envs={num_envs}, execute_steps={cfg.eval.execute_steps}, "
+            f"n_flow_steps={cfg.eval.n_flow_steps}, max_steps={max_steps}",
+            flush=True,
+        )
+
+    while completed < n_episodes:
+        batch_n = min(num_envs, n_episodes - completed)
+        env = _make_vectorized_maniskill_env(cfg, batch_n)
+        raw_obs, _ = env.reset(seed=int(cfg.experiment.seed) + completed)
+        obs_batch = canonical_obs_batch_from_raw_env(
+            env,
+            image_keys=image_keys,
+            state_keys=state_keys,
+            raw_obs=raw_obs,
+        )
+
+        low, high = _action_bounds_from_space(env.action_space)
+        action_dim = int(low.shape[0])
+        action_scale = _resolve_action_scale(cfg.eval.action_scale, action_dim)
+
+        active = np.ones((batch_n,), dtype=bool)
+        success = np.zeros((batch_n,), dtype=bool)
+        steps = np.zeros((batch_n,), dtype=np.int32)
+        reward_sum = np.zeros((batch_n,), dtype=np.float32)
+        max_step_reward = np.full((batch_n,), -np.inf, dtype=np.float32)
+        clip_count = np.zeros((batch_n,), dtype=np.int32)
+        action_count = np.zeros((batch_n,), dtype=np.int32)
+        action_abs_sum = np.zeros((batch_n,), dtype=np.float32)
+        action_abs_max = np.zeros((batch_n,), dtype=np.float32)
+        prev_actions: list[np.ndarray | None] = [None for _ in range(batch_n)]
+        action_buffers: list[list[np.ndarray]] = [[] for _ in range(batch_n)]
+        infer_time_s = 0.0
+        infer_chunks = 0
+
+        while bool(np.any(active)):
+            empty_active = [i for i in range(batch_n) if active[i] and not action_buffers[i]]
+            if empty_active:
+                img, prop = processor.obs_batch_to_tensors([obs_batch[i] for i in empty_active])
+                n_flow_steps = int(max(1, cfg.eval.n_flow_steps))
+                t0 = time.perf_counter()
+                with torch.no_grad(), _model_forward_context(model, img.device):
+                    chunk_t = model.sample(img, prop, n_steps=n_flow_steps)
+                infer_time_s += time.perf_counter() - t0
+                infer_chunks += 1
+                chunk_np = processor.denormalize(chunk_t).detach().cpu().numpy()
+
+                for row_idx, env_idx in enumerate(empty_active):
+                    execute_steps, _, smooth_alpha = _resolve_eval_rollout_controls(cfg, int(steps[env_idx]))
+                    proposed: list[np.ndarray] = []
+                    for action in chunk_np[row_idx, :execute_steps]:
+                        raw = _reshape_action(action, target_dim=action_dim)
+                        if action_scale is not None:
+                            raw = raw * action_scale
+                        if prev_actions[env_idx] is not None and smooth_alpha > 0.0:
+                            raw = (1.0 - smooth_alpha) * raw + smooth_alpha * prev_actions[env_idx]
+                        clipped = np.clip(raw, low, high).astype(np.float32)
+                        if np.any(np.abs(raw - clipped) > 1e-6):
+                            clip_count[env_idx] += 1
+                        proposed.append(clipped)
+                    action_buffers[env_idx] = proposed
+
+            actions_np = np.zeros((batch_n, action_dim), dtype=np.float32)
+            for env_idx in range(batch_n):
+                if not active[env_idx]:
+                    continue
+                action = action_buffers[env_idx].pop(0)
+                actions_np[env_idx] = action
+                prev_actions[env_idx] = action.copy()
+                action_count[env_idx] += 1
+                action_abs = np.abs(action)
+                action_abs_sum[env_idx] += float(action_abs.mean())
+                action_abs_max[env_idx] = max(float(action_abs_max[env_idx]), float(action_abs.max()))
+
+            raw_obs, reward, terminated, truncated, info = env.step(actions_np)
+            next_obs_batch = canonical_obs_batch_from_raw_env(
+                env,
+                image_keys=image_keys,
+                state_keys=state_keys,
+                raw_obs=raw_obs,
+            )
+            rewards = to_numpy(reward).astype(np.float32).reshape(batch_n)
+            terminated_np = to_numpy(terminated).astype(bool).reshape(batch_n)
+            truncated_np = to_numpy(truncated).astype(bool).reshape(batch_n)
+            info_rows = normalize_info_batched(dict(info), num_envs=batch_n)
+
+            for env_idx in range(batch_n):
+                if not active[env_idx]:
+                    continue
+                reward_sum[env_idx] += float(rewards[env_idx])
+                max_step_reward[env_idx] = max(float(max_step_reward[env_idx]), float(rewards[env_idx]))
+                steps[env_idx] += 1
+                frac = float(
+                    info_rows[env_idx].get(
+                        "success_fraction",
+                        next_obs_batch[env_idx].get("observation.state.task_progress", np.array([0.0]))[0],
+                    )
+                )
+                success[env_idx] = bool(success[env_idx] or frac >= 1.0 - 1e-6)
+                done = bool(terminated_np[env_idx] or truncated_np[env_idx] or success[env_idx] or steps[env_idx] >= max_steps)
+                if done:
+                    active[env_idx] = False
+                    reason = _classify_failure_reason(
+                        success=bool(success[env_idx]),
+                        max_step_reward=float(max_step_reward[env_idx]),
+                        steps=int(steps[env_idx]),
+                        max_steps=max_steps,
+                        reward_threshold=float(getattr(cfg.eval, "failure_reward_threshold", 0.2)),
+                    )
+                    metrics["success"].append(float(success[env_idx]))
+                    metrics["episode_length"].append(float(steps[env_idx]))
+                    metrics["total_reward"].append(float(reward_sum[env_idx]))
+                    metrics["infer_ms"].append(float(1000.0 * infer_time_s / max(1, infer_chunks)))
+                    metrics["max_step_reward"].append(float(max_step_reward[env_idx]))
+                    metrics["action_clip_fraction"].append(float(clip_count[env_idx] / max(1, action_count[env_idx])))
+                    metrics["action_abs_mean"].append(float(action_abs_sum[env_idx] / max(1, action_count[env_idx])))
+                    metrics["action_abs_max"].append(float(action_abs_max[env_idx]))
+                    metrics["failure_reason"].append(reason)
+                    completed += 1
+                    if success[env_idx]:
+                        success_count += 1
+                    if verbose and (completed % log_every == 0 or completed == n_episodes):
+                        elapsed = time.perf_counter() - start_time
+                        running_sr = 100.0 * success_count / float(max(1, completed))
+                        print(
+                            f"[eval] episode {completed}/{n_episodes} | "
+                            f"{'SUCCESS' if success[env_idx] else 'FAILURE'} "
+                            f"| steps={int(steps[env_idx])} | reward={float(reward_sum[env_idx]):.2f} "
+                            f"| reason={reason} | running_success={running_sr:.1f}% "
+                            f"| elapsed={_format_duration(elapsed)}",
+                            flush=True,
+                        )
+            obs_batch = next_obs_batch
+
+        env.close()
+
+    out: dict[str, np.ndarray] = {}
+    for key, values in metrics.items():
+        if key == "failure_reason":
+            out[key] = np.asarray(values, dtype=object)
+        else:
+            out[key] = np.asarray(values, dtype=np.float32)
+    return out
+
+
 def save_rollout_grid(rollouts: list[list[np.ndarray]], path: str, grid_size: int = 3, fps: int = 20) -> None:
     """Save multiple rollout clips into an ``N x N`` tiled video.
 

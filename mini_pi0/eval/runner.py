@@ -8,7 +8,7 @@ from typing import Any
 from mini_pi0.config.io import dump_config
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.dataset.obs_processor import ObsProcessor
-from mini_pi0.eval.core import evaluate, record_episode, report, save_rollout_grid
+from mini_pi0.eval.core import evaluate, evaluate_vectorized_maniskill, record_episode, report, save_rollout_grid
 from mini_pi0.models.registry import load_checkpoint, make_model
 from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.utils.device import resolve_device
@@ -220,15 +220,36 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
     )
 
     adapter_maker = _adapter_factory(cfg)
-    eval_out = evaluate(
-        model=model,
-        processor=processor,
-        cfg=cfg,
-        make_adapter=adapter_maker,
-        collect_grid=bool(cfg.eval.record_grid),
+    use_vectorized = (
+        bool(getattr(cfg.eval, "vectorized", False))
+        and str(cfg.simulator.backend).strip().lower() == "maniskill3"
+        and not bool(cfg.eval.record)
+        and not bool(cfg.eval.record_grid)
     )
+    if bool(getattr(cfg.eval, "vectorized", False)) and not use_vectorized:
+        print(
+            "[eval] Vectorized eval requested but unavailable for this run; "
+            "falling back to sequential eval. Vectorized eval requires "
+            "backend=maniskill3 and record=false/record_grid=false.",
+            flush=True,
+        )
 
-    if cfg.eval.record_grid:
+    if use_vectorized:
+        eval_out = evaluate_vectorized_maniskill(
+            model=model,
+            processor=processor,
+            cfg=cfg,
+        )
+    else:
+        eval_out = evaluate(
+            model=model,
+            processor=processor,
+            cfg=cfg,
+            make_adapter=adapter_maker,
+            collect_grid=bool(cfg.eval.record_grid),
+        )
+
+    if cfg.eval.record_grid and not use_vectorized:
         results, grid_data = eval_out
     else:
         results = eval_out
@@ -241,7 +262,7 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
     with (run_dir / "metrics" / "eval_arrays.json").open("w", encoding="utf-8") as f:
         json.dump({k: v.tolist() for k, v in results.items()}, f, indent=2)
 
-    if cfg.eval.record_grid:
+    if cfg.eval.record_grid and not use_vectorized:
         save_rollout_grid(
             grid_data["success"],
             path=str(run_dir / "artifacts" / f"success_grid_{cfg.eval.grid_size}x{cfg.eval.grid_size}.mp4"),

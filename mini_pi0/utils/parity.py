@@ -99,6 +99,8 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             "pretrained_model_name_or_path",
             "pretrained_variant",
             "pretrained_local_files_only",
+            "expert_intermediate_size",
+            "dtype",
         ):
             if key not in model_cfg:
                 continue

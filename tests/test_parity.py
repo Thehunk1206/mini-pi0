@@ -39,6 +39,29 @@ class ParityTests(unittest.TestCase):
         self.assertIn("eval.n_episodes", diff)
         self.assertIn("train.ema_decay", diff)
 
+    def test_parity_report_detects_minipi05_expert_size_mismatch(self):
+        cfg = load_config(
+            overrides=[
+                "model.name=mini_pi05",
+                "model.expert_intermediate_size=768",
+            ]
+        )
+        ckpt = {
+            "model_config": {
+                "action_dim": 7,
+                "prop_dim": 9,
+                "obs_mode": "image",
+                "chunk_size": 16,
+                "expert_intermediate_size": 1536,
+            },
+        }
+
+        report = build_checkpoint_parity_report(cfg, ckpt)
+
+        self.assertFalse(report["ok"])
+        keys = {item["key"] for item in report["issues"]}
+        self.assertIn("model.expert_intermediate_size", keys)
+
 
 if __name__ == "__main__":
     unittest.main()
