@@ -52,6 +52,8 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
         for k, v in model_cfg.items():
             if hasattr(cfg.model, k):
                 setattr(cfg.model, k, v)
+        if str(cfg.model.name).strip().lower() == "mini_pi05" and "expert_intermediate_size" not in model_cfg:
+            cfg.model.expert_intermediate_size = None
 
     # Keep runtime vision config under user control (config / CLI overrides).
     # Checkpoint vision metadata can be stale relative to the model's expected
@@ -64,6 +66,17 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
             cur = getattr(cfg.vision, k)
             if cur is None or (isinstance(cur, str) and not cur.strip()):
                 setattr(cfg.vision, k, v)
+
+
+def _apply_eval_runtime_overrides(cfg: RootConfig) -> None:
+    """Apply eval-only simulator overrides that should not affect collection/training."""
+
+    if not bool(getattr(cfg.eval, "disable_domain_randomization", True)):
+        return
+    env_kwargs = cfg.simulator.env_kwargs
+    dr_cfg = env_kwargs.get("domain_randomization")
+    if isinstance(dr_cfg, dict):
+        dr_cfg["enabled"] = False
 
 
 def _resolve_eval_run_dir(cfg: RootConfig) -> Path:
@@ -130,6 +143,7 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         print(f"[eval] WARNING: {w}", flush=True)
 
     _inject_model_cfg_from_checkpoint(cfg, ckpt)
+    _apply_eval_runtime_overrides(cfg)
     runtime_cfg = copy.deepcopy(cfg)
     print(
         "[eval] Preflight | "

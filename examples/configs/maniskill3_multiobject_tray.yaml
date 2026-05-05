@@ -160,6 +160,8 @@ model:
   pretrained_model_name_or_path: HuggingFaceTB/SmolVLM-256M-Instruct
   pretrained_variant: 256M
   pretrained_local_files_only: false
+  # Keep SmolVLM attention-compatible, but narrow the action expert MLP.
+  expert_intermediate_size: 384
   dtype: bfloat16
 
 train:
@@ -177,10 +179,10 @@ train:
   image_aug_brightness: 0.15
   image_aug_contrast: 0.15
   image_aug_saturation: 0.12
-  action_noise_std: 0.0
+  action_noise_std: 0.01
   action_noise_clip: 0.0
   weight_decay: 0.0001
-  num_workers: 32
+  num_workers: 64
   persistent_workers: true
   save_best: true
   save_best_min_delta: 0.0001
@@ -188,6 +190,12 @@ train:
   val_ratio: 0.1
   ema_decay: 0.999
   checkpoint_use_ema: true
+  sim_eval_every_epochs: 20
+  sim_eval_n_episodes: 100
+  sim_eval_max_steps: 700
+  sim_eval_record_grid: false
+  save_best_success: true
+  save_best_success_min_rate: 0.0
   model_print_depth: 2
   ckpt_dir: checkpoints
   device: auto
@@ -196,11 +204,12 @@ eval:
   checkpoint: checkpoints/best.pt
   action_stats_path: data/robomimic/custom/maniskill3_multiobject/ph/dataset_600_action_stats.json
   n_episodes: 50
-  execute_steps: 8
-  n_flow_steps: 10
+  execute_steps: 4
+  n_flow_steps: 6
   max_steps: 1000
   strict_parity: true
   action_smoothing_alpha: 0.10
+  disable_domain_randomization: true
   record: false
   record_grid: true
   grid_size: 3

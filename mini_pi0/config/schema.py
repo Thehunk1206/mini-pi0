@@ -233,6 +233,9 @@ class ModelConfig:
         pretrained_variant: Backbone shape hint used for ``mini_pi05`` pretrained
             loading (``256M`` or ``500M``).
         pretrained_local_files_only: Restrict Hugging Face loading to local cache only.
+        expert_intermediate_size: Optional MiniPI05 action-expert MLP width.
+            Attention structure remains locked to the SmolVLM text backbone, but
+            the expert MLP can be narrowed to reduce parameters and inference cost.
         dtype: Runtime dtype for models that support it, especially ``mini_pi05``
             (``float32`` or ``bfloat16``).
     """
@@ -260,6 +263,7 @@ class ModelConfig:
     pretrained_model_name_or_path: str | None = None
     pretrained_variant: str = "256M"
     pretrained_local_files_only: bool = False
+    expert_intermediate_size: int | None = None
     dtype: str | None = None
 
 
@@ -332,6 +336,14 @@ class TrainConfig:
             into training targets (normalized action space).
         action_noise_clip: Optional absolute clipping after action noise.
             0 disables clipping.
+        sim_eval_every_epochs: Run simulation rollout eval every N epochs.
+            ``0`` disables training-time sim eval.
+        sim_eval_n_episodes: Number of rollout episodes for training-time sim eval.
+        sim_eval_max_steps: Rollout step budget for training-time sim eval.
+        sim_eval_record_grid: Save success/failure grid videos during sim eval.
+        save_best_success: Save ``best_success.pt`` when sim success improves.
+        save_best_success_min_rate: Minimum success rate required before writing
+            ``best_success.pt``. Keeps a 0% rollout from being labeled "best".
         device: Requested torch device (``auto``, ``cpu``, ``cuda``, ``mps``).
     """
 
@@ -365,6 +377,12 @@ class TrainConfig:
     image_aug_saturation: float = 0.0
     action_noise_std: float = 0.0
     action_noise_clip: float = 0.0
+    sim_eval_every_epochs: int = 0
+    sim_eval_n_episodes: int = 10
+    sim_eval_max_steps: int | None = None
+    sim_eval_record_grid: bool = False
+    save_best_success: bool = True
+    save_best_success_min_rate: float = 0.0
     device: str = "auto"
 
 
@@ -397,6 +415,9 @@ class EvalConfig:
         strict_parity: Enforce checkpoint/runtime parity checks before rollout.
         action_smoothing_alpha: Action exponential smoothing factor in ``[0, 1]`` (0 disables).
         action_scale: Optional per-dimension multiplicative scale applied before clipping.
+        disable_domain_randomization: Disable simulator domain randomization during
+            policy eval. This gives a stable held-out task metric; robustness eval
+            can explicitly set it to ``False``.
         failure_reward_threshold: Threshold for classifying failures as ``no_progress``.
         stability_warmup_steps: Number of initial env steps using warmup rollout controls.
         stability_warmup_execute_steps: Warmup override for execute steps (null keeps base value).
@@ -428,6 +449,7 @@ class EvalConfig:
     strict_parity: bool = True
     action_smoothing_alpha: float = 0.0
     action_scale: list[float] | None = None
+    disable_domain_randomization: bool = True
     failure_reward_threshold: float = 0.2
     stability_warmup_steps: int = 0
     stability_warmup_execute_steps: int | None = None

@@ -510,16 +510,6 @@ class SmolVLMWithExpertModel(nn.Module):
         feats, pad_masks = [], []
         for img, mask in zip(images, image_masks):
             # img: [B, C, H, W] -> pixel_values: [B, 1, C, H, W].
-            # Keep the dataset resolution independent from the VLM native
-            # resolution by resizing each camera before SmolVLM preprocessing.
-            target_size = int(self.cfg.vlm_vision_image_size)
-            if img.shape[-2:] != (target_size, target_size):
-                img = F.interpolate(
-                    img.to(torch.float32),
-                    size=(target_size, target_size),
-                    mode="bilinear",
-                    align_corners=False,
-                )
             # SmolVLM's image processor rescales uint8 to [0, 1] and then
             # normalizes with mean/std 0.5, so the vision tower expects [-1, 1].
             pv = ((img.to(torch.float32) - 0.5) / 0.5).unsqueeze(1)

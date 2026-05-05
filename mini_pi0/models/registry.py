@@ -59,6 +59,13 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
         dtype = str(requested_dtype).strip().lower() if requested_dtype else ("bfloat16" if torch.cuda.is_available() else "float32")
         if dtype not in {"float32", "bfloat16"}:
             raise ValueError(f"Unsupported mini_pi05 dtype {dtype!r}; expected float32 or bfloat16")
+        expert_overrides: dict[str, int] | None = None
+        expert_intermediate_size = getattr(cfg, "expert_intermediate_size", None)
+        if expert_intermediate_size is not None:
+            expert_intermediate_size_int = int(expert_intermediate_size)
+            if expert_intermediate_size_int <= 0:
+                raise ValueError("model.expert_intermediate_size must be positive when set.")
+            expert_overrides = {"intermediate_size": expert_intermediate_size_int}
         pi05_cfg = MiniPI05Config(
             action_dim=int(cfg.action_dim),
             action_horizon=int(cfg.chunk_size),
@@ -66,6 +73,8 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
             state_dim=int(cfg.prop_dim),
             dtype=dtype,
         )
+        if expert_overrides is not None:
+            pi05_cfg.expert.intermediate_size = int(expert_overrides["intermediate_size"])
         pretrained_path = getattr(cfg, "pretrained_model_name_or_path", None)
         if pretrained_path:
             variant = str(getattr(cfg, "pretrained_variant", "256M"))
@@ -78,6 +87,7 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
                 num_cameras=int(num_cameras),
                 state_dim=int(cfg.prop_dim),
                 dtype=dtype,
+                expert_overrides=expert_overrides,
                 device="cpu",
                 local_files_only=local_only,
             )
@@ -196,6 +206,8 @@ def build_checkpoint_payload(
             "pretrained_model_name_or_path": getattr(cfg.model, "pretrained_model_name_or_path", None),
             "pretrained_variant": getattr(cfg.model, "pretrained_variant", "256M"),
             "pretrained_local_files_only": getattr(cfg.model, "pretrained_local_files_only", False),
+            "expert_intermediate_size": getattr(cfg.model, "expert_intermediate_size", None),
+            "dtype": getattr(cfg.model, "dtype", None),
         },
         "sim_backend": cfg.simulator.backend,
         "sim_config": {
