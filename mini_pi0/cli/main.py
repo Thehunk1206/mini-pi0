@@ -5,6 +5,10 @@ import json
 from typing import Any
 
 from mini_pi0.config.io import load_config
+from mini_pi0.dataset.maniskill_convert import (
+    ManiSkillConversionConfig,
+    convert_maniskill_trajectory_to_robomimic,
+)
 from mini_pi0.dataset.maniskill_collect import collect_maniskill_demos
 from mini_pi0.dataset.maniskill_oracle_mixture import collect_maniskill_oracle_mixture
 from mini_pi0.dataset.episodes import list_supported_dataset_formats
@@ -60,6 +64,27 @@ def _parse_csv_values(text: str | None, cast_type):
         if not item:
             continue
         out.append(cast_type(item))
+    return out
+
+
+def _parse_key_value_map(text: str | None) -> dict[str, str]:
+    """Parse comma-separated ``key=value`` pairs into a dictionary."""
+
+    if text is None or not str(text).strip():
+        return {}
+    out: dict[str, str] = {}
+    for raw in str(text).split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"Expected key=value item in mapping, got: {item}")
+        key, value = item.split("=", maxsplit=1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            raise ValueError(f"Expected non-empty key and value in mapping item: {item}")
+        out[key] = value
     return out
 
 
@@ -130,6 +155,7 @@ def _apply_train_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "train.val_ratio", args.val_ratio)
     _append_override(overrides, "train.ema_decay", args.ema_decay)
     _append_override(overrides, "train.checkpoint_use_ema", args.checkpoint_use_ema)
+    _append_override(overrides, "train.val_use_ema", args.val_use_ema)
     _append_override(overrides, "train.device", args.device)
     _append_override(overrides, "train.model_print_depth", args.model_print_depth)
     _append_override(overrides, "train.num_workers", args.num_workers)
@@ -214,6 +240,7 @@ def _apply_eval_overrides(args: argparse.Namespace) -> list[str]:
             _append_override(overrides, "robot.image_key", keys[0])
 
     _append_override(overrides, "eval.checkpoint", args.checkpoint)
+    _append_override(overrides, "eval.weight_source", args.weight_source)
     _append_override(overrides, "eval.run_dir", args.eval_run_dir)
     _append_override(overrides, "eval.action_stats_path", args.action_stats)
     _append_override(overrides, "eval.n_episodes", args.n_episodes)
@@ -337,6 +364,31 @@ def _build_parser() -> argparse.ArgumentParser:
     p_map.add_argument("--version", default="v1.5", help="robomimic dataset version segment")
     p_map.add_argument("--include_lerobot", action=argparse.BooleanOptionalAction, default=True)
 
+    p_convert_ms = sub.add_parser(
+        "convert-maniskill-trajectory",
+        help="Convert a replayed ManiSkill trajectory HDF5 into robomimic-style HDF5",
+    )
+    p_convert_ms.add_argument("--input_hdf5", required=True, help="Source ManiSkill trajectory .h5 file.")
+    p_convert_ms.add_argument("--output_hdf5", required=True, help="Destination robomimic-style .hdf5 file.")
+    p_convert_ms.add_argument("--input_json", default=None, help="Optional source ManiSkill .json metadata path.")
+    p_convert_ms.add_argument("--data_group", default="data", help="Top-level output HDF5 group.")
+    p_convert_ms.add_argument(
+        "--image_camera_map",
+        default=None,
+        help=(
+            "Comma-separated output_key=camera_uid pairs. Defaults include "
+            "agentview_image=base_camera and robot0_eye_in_hand_image=hand_camera."
+        ),
+    )
+    p_convert_ms.add_argument(
+        "--state_keys",
+        default="robot0_eef_pos,robot0_eef_quat,robot0_gripper_qpos",
+        help="Comma-separated state keys to write under each output obs group.",
+    )
+    p_convert_ms.add_argument("--limit", type=int, default=None, help="Maximum number of trajectories to convert.")
+    p_convert_ms.add_argument("--only_success", action=argparse.BooleanOptionalAction, default=True)
+    p_convert_ms.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
+
     p_vmodels = sub.add_parser("vision-models", help="List selectable vision backbone model names")
     p_vmodels.add_argument("--backend", choices=["torchvision", "timm", "all"], default="all")
     p_vmodels.add_argument(
@@ -427,6 +479,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--val_ratio", type=float, default=None)
     p_train.add_argument("--ema_decay", type=float, default=None)
     p_train.add_argument("--checkpoint_use_ema", action=argparse.BooleanOptionalAction, default=None)
+    p_train.add_argument("--val_use_ema", action=argparse.BooleanOptionalAction, default=None)
     p_train.add_argument("--action_stats", default=None)
     p_train.add_argument("--device", default=None)
     p_train.add_argument("--model_print_depth", type=int, default=None)
@@ -455,6 +508,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--image_key", default=None)
     p_eval.add_argument("--image_keys", default=None, help="Comma-separated image observation keys.")
     p_eval.add_argument("--checkpoint", default=None)
+    p_eval.add_argument("--weight_source", choices=["model", "raw", "ema"], default=None)
     p_eval.add_argument("--eval_run_dir", default=None)
     p_eval.add_argument("--action_stats", default=None)
     p_eval.add_argument("--n_episodes", type=int, default=None)
@@ -607,6 +661,35 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "robot-dataset-map":
         out = build_robot_dataset_mapping(version=args.version, include_lerobot=bool(args.include_lerobot))
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "convert-maniskill-trajectory":
+        image_camera_map = _parse_key_value_map(args.image_camera_map)
+        if image_camera_map:
+            cfg = ManiSkillConversionConfig(
+                input_hdf5=str(args.input_hdf5),
+                output_hdf5=str(args.output_hdf5),
+                input_json=args.input_json,
+                data_group=str(args.data_group),
+                image_camera_map=image_camera_map,
+                state_keys=tuple(_parse_csv_values(args.state_keys, str)),
+                limit=args.limit,
+                only_success=bool(args.only_success),
+                overwrite=bool(args.overwrite),
+            )
+        else:
+            cfg = ManiSkillConversionConfig(
+                input_hdf5=str(args.input_hdf5),
+                output_hdf5=str(args.output_hdf5),
+                input_json=args.input_json,
+                data_group=str(args.data_group),
+                state_keys=tuple(_parse_csv_values(args.state_keys, str)),
+                limit=args.limit,
+                only_success=bool(args.only_success),
+                overwrite=bool(args.overwrite),
+            )
+        out = convert_maniskill_trajectory_to_robomimic(cfg)
         print(json.dumps(out, indent=2, sort_keys=True))
         return 0
 

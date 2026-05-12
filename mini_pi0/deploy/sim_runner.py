@@ -12,6 +12,7 @@ import torch
 from mini_pi0.config.io import dump_config
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.dataset.obs_processor import ObsProcessor
+from mini_pi0.eval.core import _maybe_binarize_gripper_action
 from mini_pi0.models.registry import load_checkpoint, make_model
 from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.utils.device import resolve_device
@@ -38,6 +39,24 @@ def _reshape_action(action: np.ndarray, target_dim: int) -> np.ndarray:
         return a[:target_dim]
     out = np.zeros((target_dim,), dtype=np.float32)
     out[: a.shape[0]] = a
+    return out
+
+
+def _blend_with_previous_tail(
+    chunk: np.ndarray,
+    previous_tail: np.ndarray | None,
+    blend: float,
+) -> np.ndarray:
+    """Blend a new chunk prefix with the unused previous chunk tail."""
+
+    alpha = float(max(0.0, min(1.0, blend)))
+    if previous_tail is None or alpha <= 0.0:
+        return chunk
+    out = np.asarray(chunk, dtype=np.float32).copy()
+    tail = np.asarray(previous_tail, dtype=np.float32)
+    n = min(out.shape[0], tail.shape[0])
+    if n > 0:
+        out[:n] = (1.0 - alpha) * out[:n] + alpha * tail[:n]
     return out
 
 
@@ -80,6 +99,13 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
         for k, v in model_cfg.items():
             if hasattr(cfg.model, k):
                 setattr(cfg.model, k, v)
+        if str(cfg.model.name).strip().lower() == "mini_pi0_fm":
+            if "conditioning_mode" not in model_cfg:
+                cfg.model.conditioning_mode = "global"
+            if "obs_horizon" not in model_cfg:
+                cfg.model.obs_horizon = 1
+            if "action_attention_causal" not in model_cfg:
+                cfg.model.action_attention_causal = False
     vision_cfg = ckpt.get("vision_config")
     if isinstance(vision_cfg, dict):
         for k, v in vision_cfg.items():
@@ -200,6 +226,8 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
         observation_mode=cfg.model.obs_mode,
         feature_key=cfg.data.precomputed_feature_key,
         feature_extractor=feature_extractor,
+        obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
+        preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
 
     sim_cfg = copy.deepcopy(cfg)
@@ -207,6 +235,7 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
     adapter = make_sim_adapter(sim_cfg)
 
     obs = adapter.reset(seed=int(cfg.experiment.seed))
+    processor.reset_history(obs)
     action_buffer: list[np.ndarray] = []
     frames: list[np.ndarray] = []
     reward_sum = 0.0
@@ -216,14 +245,26 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
     action_dim = int(np.asarray(lo).reshape(-1).shape[0])
     action_scale = np.asarray(cfg.deploy.action_scale, dtype=np.float32).reshape(-1) if cfg.deploy.action_scale else None
     prev_action: np.ndarray | None = None
+    previous_chunk_tail: np.ndarray | None = None
 
     for step_idx in range(int(cfg.deploy.max_steps)):
         if not action_buffer:
             execute_steps, n_flow_steps, smooth_alpha = _resolve_deploy_rollout_controls(cfg, step_idx)
             img, prop = processor.obs_to_tensors(obs)
             with torch.no_grad():
-                chunk = model.sample(img, prop, n_steps=n_flow_steps).squeeze(0)
+                chunk = model.sample(
+                    img,
+                    prop,
+                    n_steps=n_flow_steps,
+                    solver=str(getattr(cfg.deploy, "flow_solver", "euler")),
+                ).squeeze(0)
             chunk = processor.denormalize(chunk).detach().cpu().numpy()
+            chunk = _blend_with_previous_tail(
+                chunk,
+                previous_chunk_tail,
+                float(getattr(cfg.deploy, "chunk_overlap_blend", 0.0)),
+            )
+            previous_chunk_tail = chunk[execute_steps:].copy()
             proposed = []
             for a in chunk[:execute_steps]:
                 x = _reshape_action(a, target_dim=action_dim)
@@ -231,6 +272,7 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
                     x = x * action_scale
                 if prev_action is not None and smooth_alpha > 0.0:
                     x = (1.0 - smooth_alpha) * x + smooth_alpha * prev_action
+                x = _maybe_binarize_gripper_action(x, cfg.deploy)
                 x = np.clip(x, lo, hi).astype(np.float32)
                 proposed.append(x)
             action_buffer = proposed

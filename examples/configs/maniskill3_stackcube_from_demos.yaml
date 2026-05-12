@@ -1,0 +1,109 @@
+experiment:
+  name: maniskill3-stackcube-demos
+  seed: 0
+  runs_root: runs
+
+simulator:
+  backend: maniskill3
+  task: StackCube-v1
+  robot: panda_wristcam
+  controller: pd_ee_delta_pose
+  control_freq: 20
+  horizon: 300
+  reward_shaping: true
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [base_camera, hand_camera]
+  camera_width: 128
+  camera_height: 128
+  env_kwargs:
+    obs_mode: rgbd
+    render_mode: rgb_array
+    control_mode: pd_ee_delta_pose
+
+task:
+  object_name: cube
+
+robot:
+  name: panda_wristcam
+  action_dim: 7
+  image_key: agentview_image
+  image_keys: [agentview_image, robot0_eye_in_hand_image]
+  proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, observation.state.object]
+  state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, observation.state.object]
+
+data:
+  format: robomimic_hdf5
+  robomimic_hdf5: data/robomimic/maniskill/stackcube/ph/rgbd_pd_ee_delta_pose.hdf5
+  robomimic_data_group: data
+  fallback_image_hw: [128, 128]
+  n_demos: 900
+  chunk_size: 32
+  action_stats_path: data/robomimic/maniskill/stackcube/ph/rgbd_pd_ee_delta_pose_action_stats.json
+  filter_min_episode_length: 16
+  filter_drop_nan: true
+
+model:
+  name: mini_pi0_fm
+  action_dim: 7
+  prop_dim: 23
+  obs_mode: image
+  vision_dim: 0
+  chunk_size: 32
+  cond_dim: 256
+  d_model: 512
+  nhead: 8
+  nlayers: 8
+
+train:
+  epochs: 150
+  batch_size: 128
+  lr: 0.0001
+  weight_decay: 0.0001
+  num_workers: 0
+  persistent_workers: false
+  save_best: true
+  save_best_min_delta: 0.0001
+  grad_clip_norm: 1.0
+  model_print_depth: 2
+  sim_eval_every_epochs: 20
+  sim_eval_n_episodes: 50
+  sim_eval_max_steps: 300
+  sim_eval_record_grid: false
+  save_best_success: true
+  save_best_success_min_rate: 0.0
+  ckpt_dir: checkpoints
+  device: auto
+
+eval:
+  checkpoint: checkpoints/best.pt
+  action_stats_path: artifacts/action_stats.json
+  n_episodes: 50
+  execute_steps: 2
+  n_flow_steps: 10
+  max_steps: 300
+  strict_parity: true
+  action_clip: false
+  action_smoothing_alpha: 0.0
+  record: false
+  record_grid: false
+  grid_size: 5
+  grid_fps: 20
+  grid_width: 256
+  grid_height: 256
+  verbose: true
+  log_every_episodes: 1
+  device: auto
+  num_envs: 16
+  vectorized: true
+
+deploy:
+  mode: sim
+  checkpoint: checkpoints/best.pt
+  action_stats_path: data/robomimic/maniskill/stackcube/ph/rgbd_pd_ee_delta_pose_action_stats.json
+  execute_steps: 4
+  n_flow_steps: 10
+  max_steps: 50
+  record_path: null
+  device: cpu

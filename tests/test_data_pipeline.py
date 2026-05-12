@@ -84,6 +84,22 @@ class DataPipelineTests(unittest.TestCase):
             img_multi, _, _ = ds_multi[0]
             self.assertEqual(tuple(img_multi.shape), (3, 84, 168))
 
+            ds_hist = ActionChunkDataset(
+                episodes=episodes_multi,
+                chunk_size=4,
+                image_key="agentview_image",
+                image_keys=["agentview_image", "robot0_eye_in_hand_image"],
+                proprio_keys=["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
+                action_stats=stats,
+                obs_horizon=2,
+                preserve_camera_dim=True,
+            )
+            img_hist, prop_hist, chunk_hist = ds_hist[0]
+            self.assertEqual(tuple(img_hist.shape), (2, 2, 3, 84, 84))
+            self.assertEqual(tuple(prop_hist.shape), (2, 9))
+            self.assertEqual(tuple(chunk_hist.shape), (4, 7))
+            self.assertTrue(np.allclose(prop_hist[0].numpy(), prop_hist[1].numpy()))
+
     def test_precomputed_feature_attach(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

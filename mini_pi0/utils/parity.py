@@ -86,6 +86,16 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             "d_model",
             "nhead",
             "nlayers",
+            "action_backbone",
+            "conditioning_mode",
+            "action_attention_causal",
+            "obs_horizon",
+            "vision_backbone",
+            "vision_model_name",
+            "vision_pretrained",
+            "action_cnn_kernel_size",
+            "freeze_vision_backbone",
+            "dropout",
             "num_timestep_buckets",
             "noise_beta_alpha",
             "noise_beta_beta",
@@ -99,8 +109,8 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             "pretrained_model_name_or_path",
             "pretrained_variant",
             "pretrained_local_files_only",
+            "action_model",
             "expert_intermediate_size",
-            "dtype",
         ):
             if key not in model_cfg:
                 continue

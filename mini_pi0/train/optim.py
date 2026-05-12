@@ -26,7 +26,11 @@ class ExponentialMovingAverage:
                     self.shadow[k] = v.detach().clone()
                     continue
                 if torch.is_floating_point(v):
-                    self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
+                    shadow = self.shadow[k]
+                    if shadow.device != v.device or shadow.dtype != v.dtype:
+                        shadow = shadow.to(device=v.device, dtype=v.dtype)
+                        self.shadow[k] = shadow
+                    shadow.mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
                 else:
                     self.shadow[k] = v.detach().clone()
 
@@ -102,15 +106,20 @@ def build_optimizer(
     model: torch.nn.Module,
     cfg: RootConfig,
 ) -> tuple[torch.optim.Optimizer, dict[str, float]]:
-    """Build optimizer, using differential LR groups for mini_pi05 when requested."""
+    """Build optimizer with optional backbone/expert LR groups.
+
+    ``lr_backbone`` targets the observation/VLM backbone. ``lr_expert`` targets
+    the action denoiser/expert. For non-VLM policies, unset values fall back to
+    the base LR to preserve the old single-LR behavior.
+    """
     base_lr = float(cfg.train.lr)
     weight_decay = float(cfg.train.weight_decay)
     lr_backbone_cfg = getattr(cfg.train, "lr_backbone", None)
     lr_expert_cfg = getattr(cfg.train, "lr_expert", None)
-    lr_backbone = float(lr_backbone_cfg) if lr_backbone_cfg is not None else base_lr * 0.1
-    lr_expert = float(lr_expert_cfg) if lr_expert_cfg is not None else base_lr
 
     if isinstance(model, PI05SmolVLM):
+        lr_backbone = float(lr_backbone_cfg) if lr_backbone_cfg is not None else base_lr * 0.1
+        lr_expert = float(lr_expert_cfg) if lr_expert_cfg is not None else base_lr
         backbone_params: list[torch.nn.Parameter] = []
         expert_params: list[torch.nn.Parameter] = []
         for name, param in model.named_parameters():
@@ -130,6 +139,29 @@ def build_optimizer(
         optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
         return optimizer, {"backbone_lr": lr_backbone, "expert_lr": lr_expert}
 
+    obs_encoder = getattr(model, "obs_encoder", None)
+    action_expert = getattr(model, "action_transformer", None)
+    if isinstance(obs_encoder, torch.nn.Module) and isinstance(action_expert, torch.nn.Module):
+        lr_backbone = float(lr_backbone_cfg) if lr_backbone_cfg is not None else base_lr
+        lr_expert = float(lr_expert_cfg) if lr_expert_cfg is not None else base_lr
+
+        backbone_params = [p for p in obs_encoder.parameters() if p.requires_grad]
+        expert_params = [p for p in action_expert.parameters() if p.requires_grad]
+        grouped_ids = {id(p) for p in backbone_params + expert_params}
+        other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in grouped_ids]
+
+        param_groups = []
+        if backbone_params:
+            param_groups.append({"params": backbone_params, "lr": lr_backbone, "name": "backbone"})
+        if expert_params:
+            param_groups.append({"params": expert_params, "lr": lr_expert, "name": "expert"})
+        if other_params:
+            param_groups.append({"params": other_params, "lr": base_lr, "name": "other"})
+        if not param_groups:
+            raise ValueError("No trainable parameter groups found for optimizer.")
+
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
+        return optimizer, {"backbone_lr": lr_backbone, "expert_lr": lr_expert}
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
     return optimizer, {"backbone_lr": base_lr, "expert_lr": base_lr}
-

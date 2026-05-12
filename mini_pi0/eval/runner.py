@@ -13,6 +13,7 @@ from mini_pi0.models.registry import load_checkpoint, make_model
 from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.utils.device import resolve_device
 from mini_pi0.utils.parity import build_checkpoint_parity_report, config_diff, format_parity_issues
+from mini_pi0.utils.precision import describe_runtime_dtype
 from mini_pi0.utils.runs import create_run_dir
 from mini_pi0.vision.encoders import build_vision_extractor
 
@@ -50,10 +51,27 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
     model_cfg = ckpt.get("model_config")
     if isinstance(model_cfg, dict):
         for k, v in model_cfg.items():
+            if k == "dtype" and cfg.model.dtype is not None:
+                continue
             if hasattr(cfg.model, k):
                 setattr(cfg.model, k, v)
-        if str(cfg.model.name).strip().lower() == "mini_pi05" and "expert_intermediate_size" not in model_cfg:
-            cfg.model.expert_intermediate_size = None
+        if str(cfg.model.name).strip().lower() == "mini_pi0_fm":
+            if "conditioning_mode" not in model_cfg:
+                cfg.model.conditioning_mode = "global"
+            if "obs_horizon" not in model_cfg:
+                cfg.model.obs_horizon = 1
+            if "action_attention_causal" not in model_cfg:
+                cfg.model.action_attention_causal = False
+            is_timm_backbone = str(getattr(cfg.model, "vision_backbone", "")).strip().lower() == "timm"
+            if "vision_pretrained" not in model_cfg and is_timm_backbone:
+                # Legacy timm FM checkpoints were created with pretrained=False.
+                # Avoid downloading unrelated weights before loading their state dict.
+                cfg.model.vision_pretrained = False
+        if str(cfg.model.name).strip().lower() == "mini_pi05":
+            if "action_model" not in model_cfg:
+                cfg.model.action_model = None
+            if "expert_intermediate_size" not in model_cfg:
+                cfg.model.expert_intermediate_size = None
 
     # Keep runtime vision config under user control (config / CLI overrides).
     # Checkpoint vision metadata can be stale relative to the model's expected
@@ -77,6 +95,51 @@ def _apply_eval_runtime_overrides(cfg: RootConfig) -> None:
     dr_cfg = env_kwargs.get("domain_randomization")
     if isinstance(dr_cfg, dict):
         dr_cfg["enabled"] = False
+
+
+def _select_checkpoint_model_state(ckpt: dict[str, Any], weight_source: str) -> dict[str, Any]:
+    """Select model weights from a checkpoint payload.
+
+    Args:
+        ckpt: Loaded checkpoint dictionary.
+        weight_source: One of ``model``, ``raw``, or ``ema``.
+
+    Returns:
+        State dict to load into the model.
+
+    Raises:
+        ValueError: If the requested weight source is unsupported or unavailable.
+    """
+
+    source = str(weight_source or "model").strip().lower()
+    if source == "model":
+        if "model" in ckpt:
+            return ckpt["model"]
+        return ckpt
+
+    if source == "raw":
+        if "model_raw" in ckpt:
+            return ckpt["model_raw"]
+        if ckpt.get("model_weight_source") == "raw" and "model" in ckpt:
+            return ckpt["model"]
+        raise ValueError(
+            "Requested eval.weight_source=raw, but checkpoint does not contain raw weights. "
+            "Use a checkpoint saved after raw/EMA dual-weight support was added, or evaluate "
+            "with eval.weight_source=model."
+        )
+
+    if source == "ema":
+        ema_state = ckpt.get("ema")
+        if isinstance(ema_state, dict) and isinstance(ema_state.get("shadow"), dict):
+            return ema_state["shadow"]
+        if ckpt.get("model_weight_source") == "ema" and "model" in ckpt:
+            return ckpt["model"]
+        raise ValueError(
+            "Requested eval.weight_source=ema, but checkpoint does not contain EMA weights. "
+            "Train with train.ema_decay > 0 or evaluate with eval.weight_source=model."
+        )
+
+    raise ValueError("eval.weight_source must be one of: model, raw, ema")
 
 
 def _resolve_eval_run_dir(cfg: RootConfig) -> Path:
@@ -149,7 +212,9 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         "[eval] Preflight | "
         f"backend={cfg.simulator.backend} task={cfg.simulator.task} robot={cfg.simulator.robot} "
         f"controller={cfg.simulator.controller} obs_mode={cfg.model.obs_mode} "
-        f"image_keys={effective_image_keys(cfg.robot)} strict_parity={strict}",
+        f"image_keys={effective_image_keys(cfg.robot)} "
+        f"dtype={describe_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=cfg.model.dtype)} "
+        f"strict_parity={strict}",
         flush=True,
     )
 
@@ -168,10 +233,9 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         )
 
     model = make_model(cfg).to(device)
-    if "model" in ckpt:
-        model.load_state_dict(ckpt["model"])
-    else:
-        model.load_state_dict(ckpt)
+    weight_source = str(getattr(cfg.eval, "weight_source", "model"))
+    model.load_state_dict(_select_checkpoint_model_state(ckpt, weight_source))
+    print(f"[eval] Loaded checkpoint weights | source={weight_source}", flush=True)
 
     model.eval()
 
@@ -217,6 +281,8 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         observation_mode=cfg.model.obs_mode,
         feature_key=cfg.data.precomputed_feature_key,
         feature_extractor=feature_extractor,
+        obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
+        preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
 
     adapter_maker = _adapter_factory(cfg)

@@ -41,6 +41,7 @@ from mini_pi0.train.optim import (
     snapshot_model_state,
 )
 from mini_pi0.utils.device import resolve_device
+from mini_pi0.utils.precision import autocast_context, resolve_runtime_dtype
 from mini_pi0.utils.runs import append_jsonl, create_run_dir
 
 try:
@@ -49,10 +50,28 @@ except Exception:
     tqdm = None
 
 
-def _model_forward_context(model: torch.nn.Module, device: torch.device):
-    """Use bf16 autocast for MiniPI05's mixed fp32/bf16 backbone."""
-    enabled = isinstance(model, PI05SmolVLM) and device.type == "cuda"
-    return torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=enabled)
+def _model_forward_context(cfg: RootConfig, device: torch.device):
+    """Create the configured training autocast context."""
+
+    dtype = resolve_runtime_dtype(runtime_dtype=cfg.train.dtype, model_dtype=cfg.model.dtype)
+    return autocast_context(device=device, dtype=dtype)
+
+
+def _compute_policy_loss(model: torch.nn.Module, cfg: RootConfig, img: torch.Tensor, prop: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    """Compute model loss with optional FM trajectory regularizers."""
+
+    smooth = float(max(0.0, getattr(cfg.train, "action_smoothness_weight", 0.0)))
+    jerk = float(max(0.0, getattr(cfg.train, "action_jerk_weight", 0.0)))
+    compute_loss = getattr(model, "compute_loss", None)
+    if callable(compute_loss) and (smooth > 0.0 or jerk > 0.0):
+        return compute_loss(
+            img,
+            prop,
+            actions,
+            smoothness_weight=smooth,
+            jerk_weight=jerk,
+        )
+    return model(img, prop, actions)
 
 
 def _build_train_checkpoint_payload(
@@ -69,7 +88,7 @@ def _build_train_checkpoint_payload(
     ema: ExponentialMovingAverage | None,
 ) -> dict[str, Any]:
     """Build a full training checkpoint with optimizer, scheduler, and EMA."""
-    return build_checkpoint_payload(
+    payload = build_checkpoint_payload(
         model=model,
         cfg=cfg,
         epoch=epoch,
@@ -85,6 +104,12 @@ def _build_train_checkpoint_payload(
             "ema": (ema.state_dict() if ema is not None else None),
         },
     )
+    payload["model_weight_source"] = "raw"
+    if ema is not None and bool(getattr(cfg.train, "checkpoint_use_ema", True)):
+        payload["model_raw"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+        payload["model"] = {k: v.detach().cpu() for k, v in ema.shadow.items()}
+        payload["model_weight_source"] = "ema"
+    return payload
 
 
 def _run_training_sim_eval(
@@ -190,6 +215,8 @@ def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[
         proprio_keys=state_keys,
         action_stats=stats,
         observation_key=observation_key,
+        obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
+        preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
     train_dataset, val_dataset = split_train_val(
         dataset,
@@ -353,7 +380,8 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     print(
         "EMA                : "
         f"enabled={ema is not None}, decay={float(getattr(cfg.train, 'ema_decay', 0.0)):.6f}, "
-        f"checkpoint_use_ema={bool(getattr(cfg.train, 'checkpoint_use_ema', True))}"
+        f"checkpoint_use_ema={bool(getattr(cfg.train, 'checkpoint_use_ema', True))}, "
+        f"val_use_ema={bool(getattr(cfg.train, 'val_use_ema', False))}"
     )
     sim_eval_every = int(max(0, getattr(cfg.train, "sim_eval_every_epochs", 0)))
     print(
@@ -384,7 +412,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         )
 
     global_step = 0
-    use_ema_for_eval = bool(getattr(cfg.train, "checkpoint_use_ema", True))
+    use_ema_for_val = bool(getattr(cfg.train, "val_use_ema", False))
     best_success_rate = float("-inf")
     best_success_epoch: int | None = None
 
@@ -423,8 +451,8 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             img = _augment_image_batch(img, cfg)
             actions = _augment_actions(actions, cfg)
 
-            with _model_forward_context(model, device):
-                loss = model(img, prop, actions)
+            with _model_forward_context(cfg, device):
+                loss = _compute_policy_loss(model, cfg, img, prop, actions)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if float(cfg.train.grad_clip_norm) > 0:
@@ -451,7 +479,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         if val_loader is not None:
             model.eval()
             backup_state = None
-            if ema is not None and use_ema_for_eval:
+            if ema is not None and use_ema_for_val:
                 backup_state = snapshot_model_state(model)
                 ema.copy_to(model)
             val_total = 0.0
@@ -461,8 +489,8 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
                     img = img.to(device)
                     prop = prop.to(device)
                     actions = actions.to(device)
-                    with _model_forward_context(model, device):
-                        val_total += float(model(img, prop, actions).item())
+                    with _model_forward_context(cfg, device):
+                        val_total += float(_compute_policy_loss(model, cfg, img, prop, actions).item())
                     val_steps += 1
             val_avg = val_total / max(1, val_steps)
             if backup_state is not None:
@@ -473,10 +501,6 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         status = "no_improve"
         if bool(cfg.train.save_best) and improved:
             t_save0 = time.perf_counter()
-            backup_state = None
-            if ema is not None and bool(getattr(cfg.train, "checkpoint_use_ema", True)):
-                backup_state = snapshot_model_state(model)
-                ema.copy_to(model)
             payload = _build_train_checkpoint_payload(
                 model=model,
                 cfg=cfg,
@@ -490,8 +514,6 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
                 ema=ema,
             )
             save_checkpoint(run_ckpt_dir / "best.pt", payload)
-            if backup_state is not None:
-                restore_model_state(model, backup_state)
             save_s = time.perf_counter() - t_save0
             best_metric = selected_metric
             status = "saved best.pt"
@@ -502,10 +524,6 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         sim_eval_summary: dict[str, Any] | None = None
         if sim_eval_every > 0 and (epoch + 1) % sim_eval_every == 0:
             t_eval0 = time.perf_counter()
-            backup_state = None
-            if ema is not None and bool(getattr(cfg.train, "checkpoint_use_ema", True)):
-                backup_state = snapshot_model_state(model)
-                ema.copy_to(model)
             latest_payload = _build_train_checkpoint_payload(
                 model=model,
                 cfg=cfg,
@@ -520,8 +538,6 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             )
             latest_path = run_ckpt_dir / "latest.pt"
             save_checkpoint(latest_path, latest_payload)
-            if backup_state is not None:
-                restore_model_state(model, backup_state)
 
             eval_result = _run_training_sim_eval(
                 cfg=cfg,

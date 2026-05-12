@@ -12,14 +12,15 @@ import torch
 
 from mini_pi0.config.schema import RootConfig
 from mini_pi0.dataset.obs_processor import ObsProcessor
-from mini_pi0.models.mini_pi05 import PI05SmolVLM
 from mini_pi0.sim.base import SimulatorAdapter
+from mini_pi0.utils.precision import autocast_context, resolve_runtime_dtype
 
 
-def _model_forward_context(model: torch.nn.Module, device: torch.device):
-    """Use bf16 autocast for MiniPI05's mixed fp32/bf16 backbone."""
-    enabled = isinstance(model, PI05SmolVLM) and device.type == "cuda"
-    return torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=enabled)
+def _model_forward_context(cfg: RootConfig, device: torch.device):
+    """Create the configured eval autocast context."""
+
+    dtype = resolve_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=cfg.model.dtype)
+    return autocast_context(device=device, dtype=dtype)
 
 
 def _ensure_uint8(frame: np.ndarray) -> np.ndarray:
@@ -76,6 +77,54 @@ def _resolve_action_scale(scale: list[float] | None, target_dim: int) -> np.ndar
     if arr.shape[0] != target_dim:
         return None
     return arr
+
+
+def _maybe_clip_action(action: np.ndarray, low: np.ndarray, high: np.ndarray, enabled: bool) -> tuple[np.ndarray, bool]:
+    """Optionally clip an action and report whether clipping changed it."""
+
+    raw = np.asarray(action, dtype=np.float32)
+    if not bool(enabled):
+        return raw.astype(np.float32), False
+    clipped = np.clip(raw, low, high).astype(np.float32)
+    was_clipped = bool(np.any(np.abs(raw - clipped) > 1e-6))
+    return clipped, was_clipped
+
+
+def _maybe_binarize_gripper_action(action: np.ndarray, settings: Any) -> np.ndarray:
+    """Optionally convert one gripper action dimension into a binary command."""
+
+    raw = np.asarray(action, dtype=np.float32)
+    if not bool(getattr(settings, "binary_gripper", False)):
+        return raw
+    out = raw.copy()
+    idx = int(getattr(settings, "binary_gripper_index", -1))
+    if idx < 0:
+        idx += out.shape[0]
+    if idx < 0 or idx >= out.shape[0]:
+        raise ValueError(f"binary_gripper_index {idx} is out of range for action dim {out.shape[0]}.")
+    threshold = float(getattr(settings, "binary_gripper_threshold", 0.0))
+    low_value = float(getattr(settings, "binary_gripper_low_value", -1.0))
+    high_value = float(getattr(settings, "binary_gripper_high_value", 1.0))
+    out[idx] = high_value if float(out[idx]) >= threshold else low_value
+    return out
+
+
+def _blend_with_previous_tail(
+    chunk: np.ndarray,
+    previous_tail: np.ndarray | None,
+    blend: float,
+) -> np.ndarray:
+    """Blend a new chunk prefix with the unused tail from the previous chunk."""
+
+    alpha = float(max(0.0, min(1.0, blend)))
+    if previous_tail is None or alpha <= 0.0:
+        return chunk
+    out = np.asarray(chunk, dtype=np.float32).copy()
+    tail = np.asarray(previous_tail, dtype=np.float32)
+    n = min(out.shape[0], tail.shape[0])
+    if n > 0:
+        out[:n] = (1.0 - alpha) * out[:n] + alpha * tail[:n]
+    return out
 
 
 def _resolve_eval_rollout_controls(cfg: RootConfig, env_steps_done: int) -> tuple[int, int, float]:
@@ -206,6 +255,7 @@ def evaluate(
     for ep in range(n_episodes):
         adapter = make_adapter(ep)
         obs = adapter.reset(seed=ep)
+        processor.reset_history(obs)
 
         episode_rng = np.random.default_rng(ep)
         cube_xy = tuple(cfg.eval.cube_xy) if cfg.eval.cube_xy is not None else None
@@ -236,11 +286,14 @@ def evaluate(
         lo, hi = adapter.action_spec()
         action_dim = int(np.asarray(lo).reshape(-1).shape[0])
         action_scale = _resolve_action_scale(cfg.eval.action_scale, action_dim)
+        action_clip_enabled = bool(getattr(cfg.eval, "action_clip", True))
         prev_action: np.ndarray | None = None
+        previous_chunk_tail: np.ndarray | None = None
         clip_count = 0
         action_count = 0
         action_abs_sum = 0.0
         action_abs_max = 0.0
+        clip_dim_count = np.zeros((action_dim,), dtype=np.int32)
         max_step_reward = float("-inf")
 
         while True:
@@ -248,12 +301,23 @@ def evaluate(
                 execute_steps, n_flow_steps, smooth_alpha_chunk = _resolve_eval_rollout_controls(cfg, steps)
                 img, prop = processor.obs_to_tensors(obs)
                 t0 = time.perf_counter()
-                with torch.no_grad(), _model_forward_context(model, img.device):
-                    chunk = model.sample(img, prop, n_steps=n_flow_steps).squeeze(0)
+                with torch.no_grad(), _model_forward_context(cfg, img.device):
+                    chunk = model.sample(
+                        img,
+                        prop,
+                        n_steps=n_flow_steps,
+                        solver=str(getattr(cfg.eval, "flow_solver", "euler")),
+                    ).squeeze(0)
                 t_infer += time.perf_counter() - t0
                 chunks += 1
 
                 chunk = processor.denormalize(chunk).detach().cpu().numpy()
+                chunk = _blend_with_previous_tail(
+                    chunk,
+                    previous_chunk_tail,
+                    float(getattr(cfg.eval, "chunk_overlap_blend", 0.0)),
+                )
+                previous_chunk_tail = chunk[execute_steps:].copy()
                 proposed = []
                 for a in chunk[:execute_steps]:
                     raw = _reshape_action(a, target_dim=action_dim)
@@ -261,9 +325,11 @@ def evaluate(
                         raw = raw * action_scale
                     if prev_action is not None and smooth_alpha_chunk > 0.0:
                         raw = (1.0 - smooth_alpha_chunk) * raw + smooth_alpha_chunk * prev_action
-                    clipped = np.clip(raw, lo, hi).astype(np.float32)
-                    if np.any(np.abs(raw - clipped) > 1e-6):
+                    raw = _maybe_binarize_gripper_action(raw, cfg.eval)
+                    clipped, was_clipped = _maybe_clip_action(raw, lo, hi, action_clip_enabled)
+                    if was_clipped:
                         clip_count += 1
+                        clip_dim_count += (np.abs(raw - clipped) > 1e-6).astype(np.int32)
                     proposed.append(clipped)
                 action_buffer = proposed
 
@@ -321,6 +387,7 @@ def evaluate(
         metrics["infer_ms"].append(float(1000.0 * t_infer / max(1, chunks)))
         metrics["max_step_reward"].append(float(max_step_reward))
         metrics["action_clip_fraction"].append(float(clip_count / max(1, action_count)))
+        metrics["action_clip_fraction_by_dim"].append((clip_dim_count / max(1, action_count)).astype(np.float32))
         metrics["action_abs_mean"].append(float(action_abs_sum / max(1, action_count)))
         metrics["action_abs_max"].append(float(action_abs_max))
         metrics["failure_reason"].append(reason)
@@ -373,6 +440,7 @@ def _make_vectorized_maniskill_env(cfg: RootConfig, num_envs: int):
 
     env_kwargs = dict(cfg.simulator.env_kwargs or {})
     env_kwargs.pop("scripted_control_mode", None)
+    env_kwargs.pop("render_mode", None)
     task_id = str(cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
     if task_id.strip().lower() in {"pickcube-v1", "pickcube", "custom", "mini_pi0_multiobject", "lift"}:
         task_id = "MiniPi0MultiObjectTray-v1"
@@ -381,16 +449,21 @@ def _make_vectorized_maniskill_env(cfg: RootConfig, num_envs: int):
     except Exception:
         task_id = "MiniPi0MultiObjectTray-v1"
 
+    control_mode = str(cfg.simulator.controller)
+    if control_mode.strip().upper() == "BASIC":
+        control_mode = "pd_ee_delta_pose"
+
     return gym.make(
         task_id,
         num_envs=int(num_envs),
         obs_mode=env_kwargs.pop("obs_mode", "rgbd"),
         reward_mode=env_kwargs.pop("reward_mode", "dense"),
-        control_mode=env_kwargs.pop("control_mode", str(cfg.simulator.controller)),
+        control_mode=env_kwargs.pop("control_mode", control_mode),
         render_mode="none",
         render_backend=env_kwargs.pop("render_backend", "gpu"),
         sim_backend=env_kwargs.pop("sim_backend", "auto"),
         robot_uids=env_kwargs.pop("robot_uids", str(cfg.simulator.robot).lower()),
+        max_episode_steps=env_kwargs.pop("max_episode_steps", int(cfg.simulator.horizon)),
         **env_kwargs,
     )
 
@@ -459,10 +532,12 @@ def evaluate_vectorized_maniskill(
             state_keys=state_keys,
             raw_obs=raw_obs,
         )
+        processor.reset_batch_history(obs_batch)
 
         low, high = _action_bounds_from_space(env.action_space)
         action_dim = int(low.shape[0])
         action_scale = _resolve_action_scale(cfg.eval.action_scale, action_dim)
+        action_clip_enabled = bool(getattr(cfg.eval, "action_clip", True))
 
         active = np.ones((batch_n,), dtype=bool)
         success = np.zeros((batch_n,), dtype=bool)
@@ -470,10 +545,12 @@ def evaluate_vectorized_maniskill(
         reward_sum = np.zeros((batch_n,), dtype=np.float32)
         max_step_reward = np.full((batch_n,), -np.inf, dtype=np.float32)
         clip_count = np.zeros((batch_n,), dtype=np.int32)
+        clip_dim_count = np.zeros((batch_n, action_dim), dtype=np.int32)
         action_count = np.zeros((batch_n,), dtype=np.int32)
         action_abs_sum = np.zeros((batch_n,), dtype=np.float32)
         action_abs_max = np.zeros((batch_n,), dtype=np.float32)
         prev_actions: list[np.ndarray | None] = [None for _ in range(batch_n)]
+        previous_chunk_tails: list[np.ndarray | None] = [None for _ in range(batch_n)]
         action_buffers: list[list[np.ndarray]] = [[] for _ in range(batch_n)]
         infer_time_s = 0.0
         infer_chunks = 0
@@ -481,27 +558,43 @@ def evaluate_vectorized_maniskill(
         while bool(np.any(active)):
             empty_active = [i for i in range(batch_n) if active[i] and not action_buffers[i]]
             if empty_active:
-                img, prop = processor.obs_batch_to_tensors([obs_batch[i] for i in empty_active])
+                img, prop = processor.obs_batch_to_tensors(
+                    [obs_batch[i] for i in empty_active],
+                    env_indices=empty_active,
+                )
                 n_flow_steps = int(max(1, cfg.eval.n_flow_steps))
                 t0 = time.perf_counter()
-                with torch.no_grad(), _model_forward_context(model, img.device):
-                    chunk_t = model.sample(img, prop, n_steps=n_flow_steps)
+                with torch.no_grad(), _model_forward_context(cfg, img.device):
+                    chunk_t = model.sample(
+                        img,
+                        prop,
+                        n_steps=n_flow_steps,
+                        solver=str(getattr(cfg.eval, "flow_solver", "euler")),
+                    )
                 infer_time_s += time.perf_counter() - t0
                 infer_chunks += 1
                 chunk_np = processor.denormalize(chunk_t).detach().cpu().numpy()
 
                 for row_idx, env_idx in enumerate(empty_active):
                     execute_steps, _, smooth_alpha = _resolve_eval_rollout_controls(cfg, int(steps[env_idx]))
+                    chunk_for_env = _blend_with_previous_tail(
+                        chunk_np[row_idx],
+                        previous_chunk_tails[env_idx],
+                        float(getattr(cfg.eval, "chunk_overlap_blend", 0.0)),
+                    )
+                    previous_chunk_tails[env_idx] = chunk_for_env[execute_steps:].copy()
                     proposed: list[np.ndarray] = []
-                    for action in chunk_np[row_idx, :execute_steps]:
+                    for action in chunk_for_env[:execute_steps]:
                         raw = _reshape_action(action, target_dim=action_dim)
                         if action_scale is not None:
                             raw = raw * action_scale
                         if prev_actions[env_idx] is not None and smooth_alpha > 0.0:
                             raw = (1.0 - smooth_alpha) * raw + smooth_alpha * prev_actions[env_idx]
-                        clipped = np.clip(raw, low, high).astype(np.float32)
-                        if np.any(np.abs(raw - clipped) > 1e-6):
+                        raw = _maybe_binarize_gripper_action(raw, cfg.eval)
+                        clipped, was_clipped = _maybe_clip_action(raw, low, high, action_clip_enabled)
+                        if was_clipped:
                             clip_count[env_idx] += 1
+                            clip_dim_count[env_idx] += (np.abs(raw - clipped) > 1e-6).astype(np.int32)
                         proposed.append(clipped)
                     action_buffers[env_idx] = proposed
 
@@ -558,6 +651,9 @@ def evaluate_vectorized_maniskill(
                     metrics["infer_ms"].append(float(1000.0 * infer_time_s / max(1, infer_chunks)))
                     metrics["max_step_reward"].append(float(max_step_reward[env_idx]))
                     metrics["action_clip_fraction"].append(float(clip_count[env_idx] / max(1, action_count[env_idx])))
+                    metrics["action_clip_fraction_by_dim"].append(
+                        (clip_dim_count[env_idx] / max(1, action_count[env_idx])).astype(np.float32)
+                    )
                     metrics["action_abs_mean"].append(float(action_abs_sum[env_idx] / max(1, action_count[env_idx])))
                     metrics["action_abs_max"].append(float(action_abs_max[env_idx]))
                     metrics["failure_reason"].append(reason)
@@ -660,12 +756,14 @@ def record_episode(
 
     adapter = make_adapter(seed)
     obs = adapter.reset(seed=seed)
+    processor.reset_history(obs)
     frames: list[np.ndarray] = []
     action_buffer: list[np.ndarray] = []
 
     lo, hi = adapter.action_spec()
     action_dim = int(np.asarray(lo).reshape(-1).shape[0])
     action_scale = _resolve_action_scale(cfg.eval.action_scale, action_dim)
+    action_clip_enabled = bool(getattr(cfg.eval, "action_clip", True))
     smooth_alpha = float(max(0.0, min(1.0, getattr(cfg.eval, "action_smoothing_alpha", 0.0))))
     prev_action: np.ndarray | None = None
 
@@ -674,8 +772,13 @@ def record_episode(
     for _ in range(step_budget):
         if not action_buffer:
             img, prop = processor.obs_to_tensors(obs)
-            with torch.no_grad(), _model_forward_context(model, img.device):
-                chunk = model.sample(img, prop, n_steps=int(cfg.eval.n_flow_steps)).squeeze(0)
+            with torch.no_grad(), _model_forward_context(cfg, img.device):
+                chunk = model.sample(
+                    img,
+                    prop,
+                    n_steps=int(cfg.eval.n_flow_steps),
+                    solver=str(getattr(cfg.eval, "flow_solver", "euler")),
+                ).squeeze(0)
             chunk = processor.denormalize(chunk).detach().cpu().numpy()
             proposed = []
             for a in chunk[: int(cfg.eval.execute_steps)]:
@@ -684,7 +787,8 @@ def record_episode(
                     x = x * action_scale
                 if prev_action is not None and smooth_alpha > 0.0:
                     x = (1.0 - smooth_alpha) * x + smooth_alpha * prev_action
-                x = np.clip(x, lo, hi).astype(np.float32)
+                x = _maybe_binarize_gripper_action(x, cfg.eval)
+                x, _ = _maybe_clip_action(x, lo, hi, action_clip_enabled)
                 proposed.append(x)
             action_buffer = proposed
 
@@ -729,6 +833,7 @@ def report(results: dict[str, np.ndarray], plot_path: str = "eval_metrics.png") 
     inf = np.asarray(results["infer_ms"], dtype=np.float32)
     mxr = np.asarray(results.get("max_step_reward", np.array([])), dtype=np.float32)
     clipf = np.asarray(results.get("action_clip_fraction", np.array([])), dtype=np.float32)
+    clip_dim = np.asarray(results.get("action_clip_fraction_by_dim", np.array([])), dtype=np.float32)
     aabs = np.asarray(results.get("action_abs_mean", np.array([])), dtype=np.float32)
     reasons = np.asarray(results.get("failure_reason", np.array([])), dtype=object)
 
@@ -749,6 +854,7 @@ def report(results: dict[str, np.ndarray], plot_path: str = "eval_metrics.png") 
         "infer_ms_mean": float(inf.mean()),
         "max_step_reward_mean": float(mxr.mean()) if mxr.size > 0 else 0.0,
         "action_clip_fraction_mean": float(clipf.mean()) if clipf.size > 0 else 0.0,
+        "action_clip_fraction_by_dim_mean": clip_dim.mean(axis=0).tolist() if clip_dim.ndim == 2 and clip_dim.size > 0 else [],
         "action_abs_mean": float(aabs.mean()) if aabs.size > 0 else 0.0,
         "failure_reason_counts": reason_counts,
     }
@@ -759,6 +865,12 @@ def report(results: dict[str, np.ndarray], plot_path: str = "eval_metrics.png") 
     print(f"Infer speed  : {summary['infer_ms_mean']:.1f} ms/chunk")
     print(f"Max step rwd : {summary['max_step_reward_mean']:.3f}")
     print(f"Action clip  : {summary['action_clip_fraction_mean'] * 100:.1f}%")
+    if summary["action_clip_fraction_by_dim_mean"]:
+        dim_text = ", ".join(
+            f"d{i}={100.0 * float(v):.1f}%"
+            for i, v in enumerate(summary["action_clip_fraction_by_dim_mean"])
+        )
+        print(f"Clip by dim  : {dim_text}")
     if reason_counts:
         print(f"Failure mode : {reason_counts}")
 
