@@ -7,7 +7,6 @@ from mini_pi0.config.io import load_config
 from mini_pi0.dataset.episodes import EpisodeData
 from mini_pi0.deploy.sim_runner import _resolve_deploy_rollout_controls
 from mini_pi0.eval.core import _resolve_eval_rollout_controls
-from mini_pi0.models.mini_pi05 import ExpertConfig, MiniPI05Config, PI05SmolVLM
 from mini_pi0.models.registry import make_model
 from mini_pi0.train.optim import ExponentialMovingAverage
 from mini_pi0.train.runner import _augment_actions, _augment_image_batch, _build_optimizer, _curate_episodes
@@ -85,63 +84,16 @@ class TrainingStabilityControlTests(unittest.TestCase):
         self.assertEqual(warm, (1, 20, 0.3))
         self.assertEqual(steady, (4, 10, 0.0))
 
-    def test_mini_pi05_optimizer_uses_split_lrs(self):
-        cfg = load_config(
-            overrides=[
-                "model.name='mini_pi05'",
-                "train.lr=1e-4",
-                "train.lr_backbone=1e-5",
-                "train.lr_expert=1e-4",
-            ]
-        )
-        tiny_cfg = MiniPI05Config(
-            vlm_text_hidden_size=128,
-            vlm_text_layers=2,
-            vlm_text_heads=4,
-            vlm_text_kv_heads=2,
-            vlm_text_intermediate=256,
-            vlm_text_head_dim=32,
-            vlm_text_vocab_size=32000,
-            vlm_vision_hidden=128,
-            vlm_vision_layers=2,
-            vlm_vision_heads=4,
-            vlm_vision_image_size=64,
-            vlm_vision_patch_size=8,
-            expert=ExpertConfig(
-                hidden_size=128,
-                intermediate_size=256,
-                num_hidden_layers=2,
-                num_attention_heads=4,
-                num_key_value_heads=2,
-                head_dim=32,
-            ),
-            action_dim=7,
-            action_horizon=4,
-            num_cameras=1,
-            state_dim=9,
-            dtype="float32",
-        )
-        model = PI05SmolVLM(tiny_cfg)
-
-        optimizer, lr_summary = _build_optimizer(model, cfg)
-
-        self.assertIsInstance(optimizer, torch.optim.AdamW)
-        self.assertAlmostEqual(lr_summary["backbone_lr"], 1e-5, places=10)
-        self.assertAlmostEqual(lr_summary["expert_lr"], 1e-4, places=10)
-        group_lrs = sorted(float(g["lr"]) for g in optimizer.param_groups)
-        self.assertEqual(group_lrs, [1e-5, 1e-4])
-
     def test_minipi0_fm_optimizer_uses_backbone_and_expert_lrs(self):
         cfg = load_config(
             overrides=[
                 "model.name='mini_pi0_fm'",
-                "model.obs_mode='feature'",
-                "model.vision_dim=16",
                 "model.action_dim=7",
                 "model.prop_dim=9",
                 "model.chunk_size=4",
                 "model.cond_dim=32",
                 "model.d_model=32",
+                "model.nhead=4",
                 "model.nlayers=2",
                 "model.action_backbone='cnn1d'",
                 "train.lr=1e-4",

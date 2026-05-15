@@ -17,7 +17,6 @@ from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_s
 from mini_pi0.dataset.episodes import EpisodeData, load_episodes_from_config
 from mini_pi0.dataset.stats import ActionStats
 from mini_pi0.dataset.torch_dataset import ActionChunkDataset
-from mini_pi0.models.mini_pi05 import PI05SmolVLM, freeze_vlm_backbone, unfreeze_vlm_backbone
 from mini_pi0.models.registry import build_checkpoint_payload, load_checkpoint, make_model, save_checkpoint
 from mini_pi0.train.augmentation import augment_actions as _augment_actions
 from mini_pi0.train.augmentation import augment_image_batch as _augment_image_batch
@@ -27,11 +26,11 @@ from mini_pi0.train.data import (
 from mini_pi0.train.data import (
     infer_action_dim,
     infer_prop_dim,
-    infer_visual_mode_and_dim,
     print_train_header,
     resolve_num_workers,
     seed_everything,
     split_train_val,
+    validate_image_observations,
 )
 from mini_pi0.train.optim import (
     ExponentialMovingAverage,
@@ -53,7 +52,7 @@ except Exception:
 def _model_forward_context(cfg: RootConfig, device: torch.device):
     """Create the configured training autocast context."""
 
-    dtype = resolve_runtime_dtype(runtime_dtype=cfg.train.dtype, model_dtype=cfg.model.dtype)
+    dtype = resolve_runtime_dtype(runtime_dtype=cfg.train.dtype, model_dtype=None)
     return autocast_context(device=device, dtype=dtype)
 
 
@@ -139,7 +138,7 @@ def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[
     """Load data, align config dims, build action-chunk dataset, and split train/val."""
     print(
         "[train] Loading dataset | "
-        f"format={cfg.data.format} observation_mode={cfg.data.observation_mode} n_demos={cfg.data.n_demos}",
+        f"format={cfg.data.format} n_demos={cfg.data.n_demos}",
         flush=True,
     )
     episodes = load_episodes_from_config(cfg)
@@ -159,16 +158,10 @@ def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[
 
     state_keys = effective_state_keys(cfg.robot)
     image_keys = effective_image_keys(cfg.robot)
-    obs_mode_cfg = str(getattr(cfg.data, "observation_mode", "image")).strip().lower()
-    observation_key = cfg.data.precomputed_feature_key if obs_mode_cfg in {"precomputed", "feature", "features"} else None
 
     inferred_action_dim = infer_action_dim(episodes)
     inferred_prop_dim = infer_prop_dim(episodes[0].obs[0], state_keys)
-    inferred_obs_mode, inferred_vision_dim = infer_visual_mode_and_dim(
-        episodes[0].obs[0],
-        observation_key=observation_key,
-        image_keys=image_keys,
-    )
+    validate_image_observations(episodes[0].obs[0], image_keys)
     if cfg.robot.action_dim != inferred_action_dim:
         print(
             f"[train] Overriding robot.action_dim from {cfg.robot.action_dim} to inferred {inferred_action_dim} "
@@ -184,22 +177,9 @@ def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[
             f"[train] Overriding model.prop_dim from {cfg.model.prop_dim} to inferred {inferred_prop_dim} "
             "based on dataset state keys."
         )
-    if cfg.model.obs_mode != inferred_obs_mode:
-        print(
-            f"[train] Overriding model.obs_mode from {cfg.model.obs_mode} to inferred {inferred_obs_mode} "
-            f"based on observation keys {([observation_key] if observation_key else image_keys)}."
-        )
-    if inferred_obs_mode == "feature" and cfg.model.vision_dim != inferred_vision_dim:
-        print(
-            f"[train] Overriding model.vision_dim from {cfg.model.vision_dim} to inferred {inferred_vision_dim} "
-            "based on cached vision features."
-        )
-
     cfg.robot.action_dim = inferred_action_dim
     cfg.model.action_dim = inferred_action_dim
     cfg.model.prop_dim = inferred_prop_dim
-    cfg.model.obs_mode = inferred_obs_mode
-    cfg.model.vision_dim = inferred_vision_dim if inferred_obs_mode == "feature" else 0
     dump_config(run_dir / "config_resolved.yaml", cfg)
 
     all_actions = np.concatenate([ep.actions.astype(np.float32) for ep in episodes], axis=0)
@@ -214,7 +194,6 @@ def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[
         image_keys=image_keys,
         proprio_keys=state_keys,
         action_stats=stats,
-        observation_key=observation_key,
         obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
         preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
@@ -329,12 +308,6 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
 
     loader, val_loader, num_workers, use_persistent = _build_dataloaders(train_dataset, val_dataset, cfg, device)
 
-    freeze_backbone_steps = int(max(0, getattr(cfg.train, "freeze_backbone_steps", 0)))
-    backbone_frozen = False
-    if isinstance(model, PI05SmolVLM) and freeze_backbone_steps > 0:
-        freeze_vlm_backbone(model)
-        backbone_frozen = True
-
     optimizer, lr_summary = _build_optimizer(model, cfg)
     scheduler, scheduler_desc = build_scheduler(optimizer, cfg)
     ema_decay = float(getattr(cfg.train, "ema_decay", 0.0))
@@ -366,7 +339,6 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         f"weight_decay={cfg.train.weight_decay})"
     )
     print(f"Scheduler          : {scheduler_desc}")
-    print(f"Backbone warmup    : freeze_backbone_steps={freeze_backbone_steps}, active={backbone_frozen}")
     print(
         "Augmentation       : "
         f"image_enable={bool(getattr(cfg.train, 'image_aug_enable', False))}, "
@@ -437,10 +409,6 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
 
         iter_end = time.perf_counter()
         for step, (img, prop, actions) in enumerate(iterator, start=1):
-            if isinstance(model, PI05SmolVLM) and backbone_frozen and global_step >= freeze_backbone_steps:
-                unfreeze_vlm_backbone(model)
-                backbone_frozen = False
-
             batch_ready = time.perf_counter()
             data_wait_s += batch_ready - iter_end
 

@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from mini_pi0.config.schema import RootConfig
+from mini_pi0.config.schema import RootConfig, effective_image_keys
 from mini_pi0.dataset.obs_processor import ObsProcessor
 from mini_pi0.sim.base import SimulatorAdapter
 from mini_pi0.utils.precision import autocast_context, resolve_runtime_dtype
@@ -19,7 +19,7 @@ from mini_pi0.utils.precision import autocast_context, resolve_runtime_dtype
 def _model_forward_context(cfg: RootConfig, device: torch.device):
     """Create the configured eval autocast context."""
 
-    dtype = resolve_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=cfg.model.dtype)
+    dtype = resolve_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=None)
     return autocast_context(device=device, dtype=dtype)
 
 
@@ -208,13 +208,67 @@ def _format_duration(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def _normalize_grid_camera_list(value: Any) -> list[str]:
+    """Normalize configured camera text/list into non-empty names."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    else:
+        raw_items = list(value)
+    cameras: list[str] = []
+    for raw in raw_items:
+        camera = str(raw).strip()
+        if camera and camera not in cameras:
+            cameras.append(camera)
+    return cameras
+
+
+def _resolve_grid_cameras(cfg: RootConfig) -> list[str]:
+    """Resolve cameras used for eval success/failure grid videos.
+
+    Args:
+        cfg: Runtime configuration.
+
+    Returns:
+        Camera names or image keys accepted by the simulator adapter.
+
+    Raises:
+        ValueError: If no camera can be resolved or the configured camera is not
+            present in simulator camera names or robot image keys.
+    """
+
+    cameras = _normalize_grid_camera_list(getattr(cfg.eval, "grid_cameras", None))
+    sim_cameras = [str(name).strip() for name in (cfg.simulator.camera_names or []) if str(name).strip()]
+    image_keys = [str(key).strip() for key in effective_image_keys(cfg.robot) if str(key).strip()]
+    if not cameras:
+        if not sim_cameras:
+            raise ValueError("eval.record_grid requires simulator.camera_names or eval.grid_cameras.")
+        return [sim_cameras[0]]
+
+    allowed = set(sim_cameras) | set(image_keys)
+    missing = [camera for camera in cameras if camera not in allowed]
+    if missing:
+        allowed_text = ", ".join(sorted(allowed)) if allowed else "<none>"
+        missing_text = ", ".join(repr(camera) for camera in missing)
+        raise ValueError(f"eval grid camera(s) {missing_text} are not configured. Available cameras/image keys: {allowed_text}.")
+    return cameras
+
+
+def _new_grid_rollout_store(cameras: list[str]) -> dict[str, list[list[np.ndarray]]]:
+    """Create an empty camera-indexed rollout frame store."""
+
+    return {camera: [] for camera in cameras}
+
+
 def evaluate(
     model: torch.nn.Module,
     processor: ObsProcessor,
     cfg: RootConfig,
     make_adapter: Callable[[int], SimulatorAdapter],
     collect_grid: bool = False,
-) -> dict[str, Any] | tuple[dict[str, np.ndarray], dict[str, list[list[np.ndarray]]]]:
+) -> dict[str, Any] | tuple[dict[str, np.ndarray], dict[str, Any]]:
     """Run batched episodic evaluation and collect metrics.
 
     Args:
@@ -248,9 +302,10 @@ def evaluate(
             flush=True,
         )
 
-    success_rollouts: list[list[np.ndarray]] = []
-    failure_rollouts: list[list[np.ndarray]] = []
     grid_slots = int(max(1, cfg.eval.grid_size * cfg.eval.grid_size))
+    grid_cameras = _resolve_grid_cameras(cfg) if collect_grid else []
+    success_rollouts = _new_grid_rollout_store(grid_cameras)
+    failure_rollouts = _new_grid_rollout_store(grid_cameras)
 
     for ep in range(n_episodes):
         adapter = make_adapter(ep)
@@ -276,12 +331,12 @@ def evaluate(
         t_infer = 0.0
         chunks = 0
 
-        frames: list[np.ndarray] | None = None
+        frames: dict[str, list[np.ndarray]] | None = None
         if collect_grid:
-            need_success = len(success_rollouts) < grid_slots
-            need_failure = len(failure_rollouts) < grid_slots
+            need_success = any(len(success_rollouts[camera]) < grid_slots for camera in grid_cameras)
+            need_failure = any(len(failure_rollouts[camera]) < grid_slots for camera in grid_cameras)
             if need_success or need_failure:
-                frames = []
+                frames = _new_grid_rollout_store(grid_cameras)
 
         lo, hi = adapter.action_spec()
         action_dim = int(np.asarray(lo).reshape(-1).shape[0])
@@ -347,15 +402,13 @@ def evaluate(
             steps += 1
 
             if frames is not None:
-                frame = adapter.render(
-                    camera=cfg.simulator.camera_names[0],
-                    width=int(cfg.eval.grid_width),
-                    height=int(cfg.eval.grid_height),
-                )
-                frame = _ensure_uint8(frame)
-                if adapter.backend_name == "robosuite":
-                    frame = frame[::-1]
-                frames.append(frame)
+                for camera in grid_cameras:
+                    frame = adapter.render(
+                        camera=str(camera),
+                        width=int(cfg.eval.grid_width),
+                        height=int(cfg.eval.grid_height),
+                    )
+                    frames[camera].append(_ensure_uint8(frame))
 
             step_success = adapter.check_success(info=step.info, obs=step.obs)
             if step_success:
@@ -368,10 +421,10 @@ def evaluate(
                 break
 
         if frames is not None:
-            if success and len(success_rollouts) < grid_slots:
-                success_rollouts.append(frames)
-            elif (not success) and len(failure_rollouts) < grid_slots:
-                failure_rollouts.append(frames)
+            target_rollouts = success_rollouts if success else failure_rollouts
+            for camera in grid_cameras:
+                if len(target_rollouts[camera]) < grid_slots:
+                    target_rollouts[camera].append(frames[camera])
 
         reason = _classify_failure_reason(
             success=success,
@@ -427,7 +480,7 @@ def evaluate(
         else:
             out[k] = np.asarray(v, dtype=np.float32)
     if collect_grid:
-        return out, {"success": success_rollouts, "failure": failure_rollouts}
+        return out, {"success": success_rollouts, "failure": failure_rollouts, "cameras": grid_cameras}
     return out
 
 
@@ -437,6 +490,7 @@ def _make_vectorized_maniskill_env(cfg: RootConfig, num_envs: int):
     import gymnasium as gym
 
     import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
+    import mini_pi0.sim.maniskill3_peginsertion_env  # noqa: F401
 
     env_kwargs = dict(cfg.simulator.env_kwargs or {})
     env_kwargs.pop("scripted_control_mode", None)
@@ -799,8 +853,6 @@ def record_episode(
 
         frame = adapter.render(camera=cfg.simulator.camera_names[0], width=512, height=512)
         frame = _ensure_uint8(frame)
-        if adapter.backend_name == "robosuite":
-            frame = frame[::-1]
         frames.append(frame)
 
         success = adapter.check_success(info=step.info, obs=step.obs)

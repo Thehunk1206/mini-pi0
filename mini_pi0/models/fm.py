@@ -188,14 +188,12 @@ class _TimmTokenBackbone(nn.Module):
 
 
 class ObservationEncoder(nn.Module):
-    """Encode image/feature observations and proprioception into vectors/tokens."""
+    """Encode image observations and proprioception into vectors/tokens."""
 
     def __init__(
         self,
         prop_dim: int = 9,
         cond_dim: int = 256,
-        obs_mode: str = "image",
-        vision_dim: int = 0,
         freeze_vision_backbone: bool = True,
         obs_horizon: int = 1,
         vision_backbone: str = "resnet18",
@@ -209,8 +207,6 @@ class ObservationEncoder(nn.Module):
         Args:
             prop_dim: Dimension of one proprioception timestep.
             cond_dim: Output conditioning dimension.
-            obs_mode: ``image`` or ``feature``/``precomputed``.
-            vision_dim: Feature dimension for precomputed feature mode.
             freeze_vision_backbone: Freeze image/token backbone parameters.
             obs_horizon: Number of observation history timesteps.
             vision_backbone: ``resnet18`` or ``timm``.
@@ -223,7 +219,6 @@ class ObservationEncoder(nn.Module):
         """
 
         super().__init__()
-        self.obs_mode = str(obs_mode).strip().lower()
         self.obs_horizon = int(max(1, obs_horizon))
         self.cond_dim = int(cond_dim)
         self.prop_dim = int(prop_dim)
@@ -236,14 +231,7 @@ class ObservationEncoder(nn.Module):
         self.img_token_proj: nn.Module
         self.spatial_tokens = self.vision_token_grid_size * self.vision_token_grid_size
 
-        if self.obs_mode in {"feature", "precomputed", "features"}:
-            if int(vision_dim) <= 0:
-                raise ValueError("vision_dim must be > 0 when obs_mode=feature.")
-            self.img_backbone = None
-            self.img_proj = nn.Linear(int(vision_dim), cond_dim)
-            self.img_token_proj = nn.Linear(int(vision_dim), cond_dim)
-            self._timm_token_backbone = None
-        elif self.vision_backbone_name == "timm":
+        if self.vision_backbone_name == "timm":
             timm_backbone = _TimmTokenBackbone(
                 vision_model_name,
                 freeze=bool(freeze_vision_backbone),
@@ -297,24 +285,6 @@ class ObservationEncoder(nn.Module):
             return img.reshape(b * t * n, *img.shape[3:]), int(t), int(n)
         raise ValueError(f"Unsupported image tensor shape: {tuple(img.shape)}")
 
-    def _feature_tokens(self, img: torch.Tensor) -> torch.Tensor:
-        """Project feature-mode tensors into visual tokens."""
-
-        if img.ndim == 2:
-            return self.img_token_proj(img).unsqueeze(1)
-        if img.ndim == 3:
-            b, t, d = img.shape
-            tok = self.img_token_proj(img.reshape(b * t, d)).reshape(b, t, self.cond_dim)
-            hist = self.history_embed(torch.arange(t, device=img.device)).unsqueeze(0)
-            return tok + hist
-        if img.ndim == 4:
-            b, t, n, d = img.shape
-            tok = self.img_token_proj(img.reshape(b * t * n, d)).reshape(b, t, n, self.cond_dim)
-            hist = self.history_embed(torch.arange(t, device=img.device)).view(1, t, 1, -1)
-            cam = self.camera_embed(torch.arange(n, device=img.device)).view(1, 1, n, -1)
-            return (tok + hist + cam).reshape(b, t * n, self.cond_dim)
-        raise ValueError(f"Unsupported feature tensor shape: {tuple(img.shape)}")
-
     def _image_tokens(self, img: torch.Tensor) -> torch.Tensor:
         """Encode image tensors into spatial visual tokens."""
 
@@ -364,10 +334,7 @@ class ObservationEncoder(nn.Module):
     def forward_tokens(self, img: torch.Tensor, prop: torch.Tensor) -> torch.Tensor:
         """Encode observations into memory tokens shaped ``[B, N, cond_dim]``."""
 
-        if self.obs_mode in {"feature", "precomputed", "features"}:
-            visual = self._feature_tokens(img)
-        else:
-            visual = self._image_tokens(img)
+        visual = self._image_tokens(img)
         proprio = self._prop_tokens(prop)
         return torch.cat([visual, proprio], dim=1)
 
@@ -778,8 +745,6 @@ class MiniPi0FlowMatching(nn.Module):
         self,
         action_dim: int = 7,
         prop_dim: int = 9,
-        obs_mode: str = "image",
-        vision_dim: int = 0,
         chunk_size: int = 16,
         cond_dim: int = 256,
         d_model: int = 256,
@@ -812,8 +777,6 @@ class MiniPi0FlowMatching(nn.Module):
         self.obs_encoder = ObservationEncoder(
             prop_dim=prop_dim,
             cond_dim=cond_dim,
-            obs_mode=obs_mode,
-            vision_dim=vision_dim,
             freeze_vision_backbone=freeze_vision_backbone,
             obs_horizon=obs_horizon,
             vision_backbone=vision_backbone,

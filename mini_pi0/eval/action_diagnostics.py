@@ -38,8 +38,6 @@ def _build_dataset(cfg: RootConfig, stats: ActionStats) -> ActionChunkDataset:
 
     episodes = load_episodes_from_config(cfg)
     episodes, _ = curate_episodes(episodes, cfg)
-    obs_mode_cfg = str(getattr(cfg.data, "observation_mode", "image")).strip().lower()
-    observation_key = cfg.data.precomputed_feature_key if obs_mode_cfg in {"precomputed", "feature", "features"} else None
     return ActionChunkDataset(
         episodes=episodes,
         chunk_size=int(cfg.data.chunk_size),
@@ -47,7 +45,6 @@ def _build_dataset(cfg: RootConfig, stats: ActionStats) -> ActionChunkDataset:
         image_keys=effective_image_keys(cfg.robot),
         proprio_keys=effective_state_keys(cfg.robot),
         action_stats=stats,
-        observation_key=observation_key,
         obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
         preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
@@ -217,7 +214,7 @@ def run_action_diagnostics(
         "action_high": high.tolist() if high is not None else None,
         "flow_steps": {},
     }
-    dtype = resolve_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=cfg.model.dtype)
+    dtype = resolve_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=None)
     for steps in flow_steps:
         metrics = _empty_metric_sums(action_dim)
         with torch.no_grad(), autocast_context(device=device, dtype=dtype):

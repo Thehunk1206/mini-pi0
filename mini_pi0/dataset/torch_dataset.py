@@ -23,7 +23,6 @@ class ActionChunkDataset(Dataset):
         image_keys: list[str] | None,
         proprio_keys: list[str],
         action_stats: ActionStats,
-        observation_key: str | None = None,
         obs_horizon: int = 1,
         preserve_camera_dim: bool = False,
     ):
@@ -36,8 +35,6 @@ class ActionChunkDataset(Dataset):
             image_keys: Optional list of image keys for multi-camera conditioning.
             proprio_keys: Ordered proprioception keys for vector concatenation.
             action_stats: Statistics used to normalize action targets.
-            observation_key: Override observation key used as model visual input.
-                Use this for precomputed feature mode.
             obs_horizon: Number of current/past observations to include.
                 ``1`` preserves legacy single-observation samples.
             preserve_camera_dim: Keep image cameras as a separate axis instead
@@ -48,15 +45,12 @@ class ActionChunkDataset(Dataset):
         self.chunk_size = int(chunk_size)
         self.obs_horizon = int(max(1, obs_horizon))
         self.preserve_camera_dim = bool(preserve_camera_dim)
-        obs_key = str(observation_key or image_key)
         cam_keys = [str(k).strip() for k in (image_keys or []) if str(k).strip()]
         if not cam_keys:
             cam_keys = [str(image_key)]
 
         def _visual_at(obs_t: dict[str, np.ndarray]) -> np.ndarray:
-            if observation_key is not None:
-                visual_arr = np.asarray(obs_t[obs_key])
-            elif len(cam_keys) == 1:
+            if len(cam_keys) == 1:
                 visual_arr = np.asarray(obs_t[cam_keys[0]])
                 if self.preserve_camera_dim and visual_arr.ndim >= 2:
                     visual_arr = visual_arr[None, ...]
@@ -76,16 +70,14 @@ class ActionChunkDataset(Dataset):
                                 f"Got {visual_parts[0].shape} and {part.shape} at index {idx}."
                             )
                     visual_arr = np.concatenate([v.astype(np.uint8) for v in visual_parts], axis=1)
-                elif all(v.ndim == 1 for v in visual_parts):
-                    visual_arr = np.concatenate([v.astype(np.float32).reshape(-1) for v in visual_parts], axis=0)
                 else:
                     raise ValueError(
-                        "Mixed visual tensor ranks across image_keys are not supported. "
+                        "Only raw image observations are supported. "
                         f"Shapes: {[tuple(v.shape) for v in visual_parts]}"
                     )
             if visual_arr.ndim >= 2:
                 return visual_arr.astype(np.uint8)
-            return visual_arr.astype(np.float32).reshape(-1)
+            raise ValueError(f"Only raw image observations are supported, got shape {visual_arr.shape}.")
 
         def _prop_at(obs_t: dict[str, np.ndarray]) -> np.ndarray:
             parts = [np.asarray(obs_t[k], dtype=np.float32).reshape(-1) for k in proprio_keys]
