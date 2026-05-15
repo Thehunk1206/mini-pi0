@@ -261,6 +261,7 @@ def collect_vectorized_scripted_episodes(
         List of finalized `(EpisodeBuffer, final_info)` episodes.
     """
     import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
+    import mini_pi0.sim.maniskill3_peginsertion_env  # noqa: F401
 
     env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
     env_kwargs.pop("scripted_control_mode", None)

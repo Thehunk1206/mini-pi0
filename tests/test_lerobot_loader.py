@@ -76,7 +76,7 @@ class LeRobotLoaderTests(unittest.TestCase):
             clear=False,
         ):
             episodes = load_episodes_lerobot(
-                repo_id="robotgeneralist/robosuite_lift_ph",
+                repo_id="local/stub_dataset",
                 image_keys=["observation.images.base_0_rgb"],
                 proprio_keys=[
                     "observation.state.eef_pos",

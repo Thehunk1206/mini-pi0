@@ -100,38 +100,5 @@ class DataPipelineTests(unittest.TestCase):
             self.assertEqual(tuple(chunk_hist.shape), (4, 7))
             self.assertTrue(np.allclose(prop_hist[0].numpy(), prop_hist[1].numpy()))
 
-    def test_precomputed_feature_attach(self):
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            h5_path = root / "demo.hdf5"
-            feat_path = root / "vision_feats.npz"
-            t = 6
-            with h5py.File(h5_path, "w") as f:
-                data = f.create_group("data")
-                demo = data.create_group("demo_0")
-                demo.create_dataset("actions", data=np.random.randn(t, 7).astype(np.float32))
-                obs = demo.create_group("obs")
-                obs.create_dataset("robot0_eef_pos", data=np.random.randn(t, 3).astype(np.float32))
-                obs.create_dataset("robot0_eef_quat", data=np.random.randn(t, 4).astype(np.float32))
-                obs.create_dataset("robot0_gripper_qpos", data=np.random.randn(t, 2).astype(np.float32))
-                obs.create_dataset("agentview_image", data=np.random.randint(0, 255, size=(t, 84, 84, 3), dtype=np.uint8))
-
-            np.savez_compressed(feat_path, ep_000000=np.random.randn(t, 32).astype(np.float32))
-            cfg = load_config(
-                overrides=[
-                    "data.format=robomimic_hdf5",
-                    f"data.robomimic_hdf5='{str(h5_path)}'",
-                    "data.robomimic_data_group='data'",
-                    "data.observation_mode='precomputed'",
-                    f"data.precomputed_features_path='{str(feat_path)}'",
-                    "data.precomputed_feature_key='vision_feat'",
-                    "data.n_demos=1",
-                ]
-            )
-            episodes = load_episodes_from_config(cfg)
-            self.assertEqual(len(episodes), 1)
-            self.assertEqual(episodes[0].obs[0]["vision_feat"].shape, (32,))
-
-
 if __name__ == "__main__":
     unittest.main()

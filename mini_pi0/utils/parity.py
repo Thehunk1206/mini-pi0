@@ -79,8 +79,6 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
         for key in (
             "action_dim",
             "prop_dim",
-            "obs_mode",
-            "vision_dim",
             "chunk_size",
             "cond_dim",
             "d_model",
@@ -106,11 +104,6 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             "use_context_layernorm",
             "vision_token_grid_size",
             "use_dit_adaln",
-            "pretrained_model_name_or_path",
-            "pretrained_variant",
-            "pretrained_local_files_only",
-            "action_model",
-            "expert_intermediate_size",
         ):
             if key not in model_cfg:
                 continue
@@ -140,19 +133,6 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             run_v = cfg.robot.image_key
             if ckpt_v != run_v:
                 issues.append(ParityIssue(key="robot.image_key", checkpoint=ckpt_v, runtime=run_v))
-
-    vision_cfg = ckpt.get("vision_config")
-    if str(cfg.model.obs_mode).strip().lower() in {"feature", "precomputed", "features"}:
-        if isinstance(vision_cfg, dict):
-            for key in ("backend", "model_name", "image_size"):
-                if key not in vision_cfg:
-                    continue
-                ckpt_v = vision_cfg[key]
-                run_v = getattr(cfg.vision, key, None)
-                if ckpt_v != run_v:
-                    issues.append(ParityIssue(key=f"vision.{key}", checkpoint=ckpt_v, runtime=run_v))
-        else:
-            warnings.append("checkpoint missing vision_config metadata for feature-mode model")
 
     return {
         "checkpoint_path": None,

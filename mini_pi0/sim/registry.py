@@ -6,10 +6,8 @@ from mini_pi0.config.schema import RootConfig
 from mini_pi0.sim.base import SimulatorAdapter
 from mini_pi0.sim.isaaclab_adapter import IsaacLabAdapter
 from mini_pi0.sim.maniskill3_adapter import ManiSkill3Adapter
-from mini_pi0.sim.robosuite_adapter import RobosuiteAdapter
 
 _SIM_REGISTRY = {
-    "robosuite": RobosuiteAdapter,
     "maniskill3": ManiSkill3Adapter,
     "isaaclab": IsaacLabAdapter,
 }
@@ -64,12 +62,6 @@ def backend_status() -> dict[str, dict[str, Any]]:
             except Exception as e:
                 ok = False
                 msg = f"implemented, missing dependency: {type(e).__name__}"
-        elif name == "robosuite":
-            try:
-                import robosuite  # noqa: F401
-            except Exception as e:
-                ok = False
-                msg = f"missing dependency: {type(e).__name__}"
         elif name == "isaaclab":
             ok = False
             msg = "scaffolded only"

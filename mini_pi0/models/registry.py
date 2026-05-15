@@ -8,20 +8,10 @@ import torch
 from torch import nn
 
 from mini_pi0.config.schema import ModelConfig, RootConfig, effective_image_keys
-from mini_pi0.models.crossflow import CrossFlowActionModel
 from mini_pi0.models.fm import MiniPi0FlowMatching
-from mini_pi0.models.mini_pi05 import MiniPI05Config, PI05SmolVLM, load_minipi05_from_smolvlm
-
-ACTION_EXPERT_PRESETS: dict[str, int] = {
-    "ACTION_EXPERT_S": 384,
-    "ACTION_EXPERT_M": 768,
-    "ACTION_EXPERT_L": 1536,
-}
 
 _MODEL_REGISTRY = {
     "mini_pi0_fm": MiniPi0FlowMatching,
-    "mini_pi0_crossflow": CrossFlowActionModel,
-    "mini_pi05": PI05SmolVLM,
 }
 
 
@@ -33,43 +23,6 @@ def list_models() -> list[str]:
     """
 
     return sorted(_MODEL_REGISTRY.keys())
-
-
-def resolve_action_expert_intermediate_size(
-    action_model: str | None,
-    expert_intermediate_size: int | None,
-) -> int | None:
-    """Resolve MiniPI05 expert preset and explicit size into one MLP width.
-
-    Args:
-        action_model: Optional preset name (`ACTION_EXPERT_S/M/L`).
-        expert_intermediate_size: Optional explicit MLP width override.
-
-    Returns:
-        Resolved expert MLP width, or ``None`` to use the model default.
-
-    Raises:
-        ValueError: If the preset is unknown or explicit size conflicts with it.
-    """
-
-    preset_name = str(action_model or "").strip().upper()
-    preset_size = None
-    if preset_name:
-        if preset_name not in ACTION_EXPERT_PRESETS:
-            options = ", ".join(sorted(ACTION_EXPERT_PRESETS))
-            raise ValueError(f"Unknown model.action_model {action_model!r}. Options: {options}")
-        preset_size = ACTION_EXPERT_PRESETS[preset_name]
-
-    explicit_size = int(expert_intermediate_size) if expert_intermediate_size is not None else None
-    if explicit_size is not None and explicit_size <= 0:
-        raise ValueError("model.expert_intermediate_size must be positive when set.")
-    if preset_size is not None and explicit_size is not None and explicit_size != preset_size:
-        raise ValueError(
-            "model.action_model and model.expert_intermediate_size disagree: "
-            f"{preset_name}={preset_size}, explicit={explicit_size}. "
-            "Use one of them, or set matching values."
-        )
-    return explicit_size if explicit_size is not None else preset_size
 
 
 def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
@@ -90,57 +43,9 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
     if key not in _MODEL_REGISTRY:
         raise ValueError(f"Unknown model '{cfg.name}'. Options: {list_models()}")
     cls = _MODEL_REGISTRY[key]
-    if key == "mini_pi05":
-        if str(cfg.obs_mode).strip().lower() not in {"image"}:
-            raise ValueError(
-                "mini_pi05 currently supports obs_mode=image only in this training infra."
-            )
-        num_cameras = 1
-        if isinstance(model_cfg, RootConfig):
-            num_cameras = max(1, len(effective_image_keys(model_cfg.robot)))
-        requested_dtype = getattr(cfg, "dtype", None)
-        dtype = str(requested_dtype).strip().lower() if requested_dtype else ("bfloat16" if torch.cuda.is_available() else "float32")
-        if dtype not in {"float32", "bfloat16"}:
-            raise ValueError(f"Unsupported mini_pi05 dtype {dtype!r}; expected float32 or bfloat16")
-        expert_overrides: dict[str, int] | None = None
-        expert_intermediate_size = resolve_action_expert_intermediate_size(
-            action_model=getattr(cfg, "action_model", None),
-            expert_intermediate_size=getattr(cfg, "expert_intermediate_size", None),
-        )
-        if expert_intermediate_size is not None:
-            expert_overrides = {"intermediate_size": int(expert_intermediate_size)}
-        pi05_cfg = MiniPI05Config(
-            action_dim=int(cfg.action_dim),
-            action_horizon=int(cfg.chunk_size),
-            num_cameras=int(num_cameras),
-            state_dim=int(cfg.prop_dim),
-            dtype=dtype,
-        )
-        if expert_overrides is not None:
-            pi05_cfg.expert.intermediate_size = int(expert_overrides["intermediate_size"])
-        pretrained_path = getattr(cfg, "pretrained_model_name_or_path", None)
-        if pretrained_path:
-            variant = str(getattr(cfg, "pretrained_variant", "256M"))
-            local_only = bool(getattr(cfg, "pretrained_local_files_only", False))
-            return load_minipi05_from_smolvlm(
-                pretrained_model_name_or_path=str(pretrained_path),
-                variant=("500M" if variant.upper() == "500M" else "256M"),
-                action_dim=int(cfg.action_dim),
-                action_horizon=int(cfg.chunk_size),
-                num_cameras=int(num_cameras),
-                state_dim=int(cfg.prop_dim),
-                dtype=dtype,
-                expert_overrides=expert_overrides,
-                device="cpu",
-                local_files_only=local_only,
-            )
-        return cls(pi05_cfg)
-
     kwargs = dict(
         action_dim=cfg.action_dim,
         prop_dim=cfg.prop_dim,
-        obs_mode=cfg.obs_mode,
-        vision_dim=cfg.vision_dim,
         chunk_size=cfg.chunk_size,
         cond_dim=cfg.cond_dim,
         d_model=cfg.d_model,
@@ -239,8 +144,6 @@ def build_checkpoint_payload(
         "model_config": {
             "action_dim": cfg.model.action_dim,
             "prop_dim": cfg.model.prop_dim,
-            "obs_mode": cfg.model.obs_mode,
-            "vision_dim": cfg.model.vision_dim,
             "chunk_size": cfg.model.chunk_size,
             "cond_dim": cfg.model.cond_dim,
             "d_model": cfg.model.d_model,
@@ -266,12 +169,6 @@ def build_checkpoint_payload(
             "use_context_layernorm": getattr(cfg.model, "use_context_layernorm", True),
             "vision_token_grid_size": getattr(cfg.model, "vision_token_grid_size", 4),
             "use_dit_adaln": getattr(cfg.model, "use_dit_adaln", True),
-            "pretrained_model_name_or_path": getattr(cfg.model, "pretrained_model_name_or_path", None),
-            "pretrained_variant": getattr(cfg.model, "pretrained_variant", "256M"),
-            "pretrained_local_files_only": getattr(cfg.model, "pretrained_local_files_only", False),
-            "action_model": getattr(cfg.model, "action_model", None),
-            "expert_intermediate_size": getattr(cfg.model, "expert_intermediate_size", None),
-            "dtype": getattr(cfg.model, "dtype", None),
         },
         "sim_backend": cfg.simulator.backend,
         "sim_config": {
@@ -293,22 +190,8 @@ def build_checkpoint_payload(
         },
         "data_config": {
             "format": cfg.data.format,
-            "observation_mode": cfg.data.observation_mode,
             "robomimic_hdf5": cfg.data.robomimic_hdf5,
             "lerobot_repo_id": cfg.data.lerobot_repo_id,
-            "precomputed_features_path": cfg.data.precomputed_features_path,
-            "precomputed_feature_key": cfg.data.precomputed_feature_key,
-        },
-        "vision_config": {
-            "backend": cfg.vision.backend,
-            "model_name": cfg.vision.model_name,
-            "pretrained": cfg.vision.pretrained,
-            "batch_size": cfg.vision.batch_size,
-            "image_size": cfg.vision.image_size,
-            "output_path": cfg.vision.output_path,
-            "use_runtime_extractor": cfg.vision.use_runtime_extractor,
-            "hf_model_id": cfg.vision.hf_model_id,
-            "local_files_only": cfg.vision.local_files_only,
         },
     }
     if extra:

@@ -13,7 +13,9 @@ from mini_pi0.dataset.episodes import load_episodes_robomimic
 from mini_pi0.dataset.maniskill_convert import (
     ManiSkillConversionConfig,
     ManiSkillConversionError,
+    ManiSkillMultiConversionConfig,
     convert_maniskill_trajectory_to_robomimic,
+    convert_maniskill_trajectories_to_robomimic,
 )
 
 
@@ -109,6 +111,36 @@ def test_convert_maniskill_trajectory_to_robomimic_writes_trainable_dataset(tmp_
     assert episodes[0].obs[0]["robot0_eef_pos"].shape == (3,)
     assert episodes[0].obs[0]["robot0_eef_quat"].shape == (4,)
     assert episodes[0].obs[0]["robot0_gripper_qpos"].shape == (2,)
+
+
+def test_convert_maniskill_trajectories_merges_replay_shards(tmp_path: Path) -> None:
+    # Arrange
+    input_hdf5_a = tmp_path / "trajectory.rgbd.pd_joint_pos.physx_cpu.h5"
+    input_hdf5_b = tmp_path / "trajectory.rgbd.pd_joint_pos.physx_cpu.1.h5"
+    output_hdf5 = tmp_path / "merged.hdf5"
+    _write_replayed_maniskill_hdf5(input_hdf5_a)
+    _write_replayed_maniskill_hdf5(input_hdf5_b)
+    _write_metadata(input_hdf5_a.with_suffix(".json"))
+    _write_metadata(input_hdf5_b.with_suffix(".json"))
+
+    # Act
+    summary = convert_maniskill_trajectories_to_robomimic(
+        ManiSkillMultiConversionConfig(
+            input_hdf5s=(str(input_hdf5_a), str(input_hdf5_b)),
+            output_hdf5=str(output_hdf5),
+            overwrite=True,
+        )
+    )
+
+    # Assert
+    assert summary["episodes"] == 2
+    assert summary["total_samples"] == 8
+    with h5py.File(output_hdf5, "r") as h5:
+        assert sorted(h5["data"].keys()) == ["demo_0", "demo_1"]
+        assert h5["data/demo_0"].attrs["source_traj_key"] == "traj_0"
+        assert h5["data/demo_1"].attrs["source_traj_key"] == "traj_0"
+        assert h5["data/demo_0/actions"].shape == (4, 7)
+        assert h5["data/demo_1/actions"].shape == (4, 7)
 
 
 def test_convert_maniskill_trajectory_writes_joint_velocity_state(tmp_path: Path) -> None:

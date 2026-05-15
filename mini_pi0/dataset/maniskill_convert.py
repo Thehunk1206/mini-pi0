@@ -3,6 +3,8 @@
 Key exports:
 - :class:`ManiSkillConversionConfig` describes one conversion job.
 - :func:`convert_maniskill_trajectory_to_robomimic` writes robomimic-style HDF5.
+- :func:`convert_maniskill_trajectories_to_robomimic` merges replay shards into
+  one robomimic-style HDF5.
 
 Example:
     >>> cfg = ManiSkillConversionConfig(
@@ -69,6 +71,36 @@ class ManiSkillConversionConfig:
 
 
 @dataclass(frozen=True)
+class ManiSkillMultiConversionConfig:
+    """Configuration for converting one or more ManiSkill replay files.
+
+    Attributes:
+        input_hdf5s: Source ManiSkill trajectory files. Vectorized replay may
+            write multiple shard files for a single replay command.
+        output_hdf5: Destination robomimic-style HDF5 file.
+        input_jsons: Optional JSON metadata paths matching ``input_hdf5s``.
+            Missing entries default to the HDF5 path with ``.json`` suffix.
+        data_group: Top-level output group containing ``demo_N`` episodes.
+        image_camera_map: Output image-key to ManiSkill camera UID mapping.
+        state_keys: State keys to write under each output ``obs`` group.
+        limit: Optional maximum number of converted trajectories across all
+            input files.
+        only_success: Skip episodes that are not marked successful.
+        overwrite: Replace an existing output file.
+    """
+
+    input_hdf5s: tuple[str, ...]
+    output_hdf5: str
+    input_jsons: tuple[str | None, ...] | None = None
+    data_group: str = "data"
+    image_camera_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_IMAGE_CAMERA_MAP))
+    state_keys: tuple[str, ...] = DEFAULT_STATE_KEYS
+    limit: int | None = None
+    only_success: bool = True
+    overwrite: bool = False
+
+
+@dataclass(frozen=True)
 class _EpisodeMeta:
     """JSON metadata for one ManiSkill trajectory episode."""
 
@@ -76,6 +108,16 @@ class _EpisodeMeta:
     success: bool | None
     elapsed_steps: int | None
     raw: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _TrajectorySource:
+    """Resolved ManiSkill replay source and metadata."""
+
+    input_hdf5: Path
+    input_json: Path
+    metadata: dict[str, object]
+    episode_meta: dict[int, _EpisodeMeta]
 
 
 def convert_maniskill_trajectory_to_robomimic(cfg: ManiSkillConversionConfig) -> dict[str, object]:
@@ -95,51 +137,95 @@ def convert_maniskill_trajectory_to_robomimic(cfg: ManiSkillConversionConfig) ->
             data or no episodes are converted.
     """
 
-    input_hdf5 = Path(cfg.input_hdf5)
-    output_hdf5 = Path(cfg.output_hdf5)
-    input_json = Path(cfg.input_json) if cfg.input_json else input_hdf5.with_suffix(".json")
-    _validate_paths(input_hdf5=input_hdf5, input_json=input_json, output_hdf5=output_hdf5, overwrite=cfg.overwrite)
+    summary = convert_maniskill_trajectories_to_robomimic(
+        ManiSkillMultiConversionConfig(
+            input_hdf5s=(cfg.input_hdf5,),
+            output_hdf5=cfg.output_hdf5,
+            input_jsons=(cfg.input_json,),
+            data_group=cfg.data_group,
+            image_camera_map=cfg.image_camera_map,
+            state_keys=cfg.state_keys,
+            limit=cfg.limit,
+            only_success=cfg.only_success,
+            overwrite=cfg.overwrite,
+        )
+    )
+    summary["input_hdf5"] = summary["input_hdf5s"][0]
+    summary["input_json"] = summary["input_jsons"][0]
+    return summary
 
-    metadata = _load_metadata(input_json)
-    episode_meta = _episode_meta_by_id(metadata)
+
+def convert_maniskill_trajectories_to_robomimic(cfg: ManiSkillMultiConversionConfig) -> dict[str, object]:
+    """Convert one or more ManiSkill replay files into one robomimic HDF5.
+
+    Args:
+        cfg: Conversion configuration. Multiple input files are appended into a
+            single output group with contiguous ``demo_N`` numbering.
+
+    Returns:
+        Summary dictionary containing source files, destination, episode count,
+        and sample count.
+
+    Raises:
+        FileNotFoundError: If any required source file is missing.
+        FileExistsError: If the output exists and ``overwrite`` is false.
+        ManiSkillConversionError: If source metadata is invalid, observations
+            are missing, or no episodes are converted.
+    """
+
+    output_hdf5 = Path(cfg.output_hdf5)
     output_hdf5.parent.mkdir(parents=True, exist_ok=True)
+    sources = _resolve_sources(input_hdf5s=cfg.input_hdf5s, input_jsons=cfg.input_jsons)
+    _validate_output_path(output_hdf5=output_hdf5, overwrite=cfg.overwrite)
 
     rows: list[dict[str, object]] = []
     mode = "w" if cfg.overwrite else "x"
-    with h5py.File(input_hdf5, "r") as src, h5py.File(output_hdf5, mode) as dst:
+    remaining = cfg.limit
+    with h5py.File(output_hdf5, mode) as dst:
         data = dst.create_group(cfg.data_group)
         data.attrs["source_format"] = "maniskill_trajectory"
-        data.attrs["source_hdf5"] = str(input_hdf5)
-        data.attrs["source_json"] = str(input_json)
-        data.attrs["env_args"] = json.dumps(metadata.get("env_info", {}), sort_keys=True)
+        data.attrs["source_hdf5"] = str(sources[0].input_hdf5)
+        data.attrs["source_json"] = str(sources[0].input_json)
+        data.attrs["source_hdf5s"] = json.dumps([str(source.input_hdf5) for source in sources])
+        data.attrs["source_jsons"] = json.dumps([str(source.input_json) for source in sources])
+        data.attrs["env_args"] = json.dumps(sources[0].metadata.get("env_info", {}), sort_keys=True)
 
-        for demo_idx, traj_key in enumerate(_selected_trajectory_keys(src, cfg.limit)):
-            traj = src[traj_key]
-            meta = episode_meta.get(_trajectory_episode_id(traj_key))
-            if cfg.only_success and meta is not None and meta.success is False:
-                continue
-            row = _write_demo(
-                data_group=data,
-                demo_idx=len(rows),
-                traj_key=traj_key,
-                traj=traj,
-                meta=meta,
-                image_camera_map=cfg.image_camera_map,
-                state_keys=cfg.state_keys,
-            )
-            rows.append(row)
+        for source in sources:
+            if remaining is not None and remaining <= 0:
+                break
+            with h5py.File(source.input_hdf5, "r") as src:
+                for traj_key in _selected_trajectory_keys(src, remaining):
+                    traj = src[traj_key]
+                    meta = source.episode_meta.get(_trajectory_episode_id(traj_key))
+                    if cfg.only_success and meta is not None and meta.success is False:
+                        continue
+                    row = _write_demo(
+                        data_group=data,
+                        demo_idx=len(rows),
+                        traj_key=traj_key,
+                        traj=traj,
+                        meta=meta,
+                        image_camera_map=cfg.image_camera_map,
+                        state_keys=cfg.state_keys,
+                    )
+                    row["source_hdf5"] = str(source.input_hdf5)
+                    rows.append(row)
+                    if remaining is not None:
+                        remaining -= 1
+                        if remaining <= 0:
+                            break
 
     if not rows:
         output_hdf5.unlink(missing_ok=True)
         raise ManiSkillConversionError(
-            f"No episodes converted from {input_hdf5}. "
+            f"No episodes converted from {', '.join(str(source.input_hdf5) for source in sources)}. "
             "Check --only_success, --limit, and whether trajectory groups exist."
         )
 
     total_samples = int(sum(int(row["num_samples"]) for row in rows))
     return {
-        "input_hdf5": str(input_hdf5),
-        "input_json": str(input_json),
+        "input_hdf5s": [str(source.input_hdf5) for source in sources],
+        "input_jsons": [str(source.input_json) for source in sources],
         "output_hdf5": str(output_hdf5),
         "data_group": cfg.data_group,
         "episodes": len(rows),
@@ -149,13 +235,41 @@ def convert_maniskill_trajectory_to_robomimic(cfg: ManiSkillConversionConfig) ->
     }
 
 
-def _validate_paths(input_hdf5: Path, input_json: Path, output_hdf5: Path, overwrite: bool) -> None:
-    """Validate source and destination paths before opening HDF5 files."""
+def _resolve_sources(
+    input_hdf5s: tuple[str, ...],
+    input_jsons: tuple[str | None, ...] | None,
+) -> tuple[_TrajectorySource, ...]:
+    """Resolve and validate replay source files."""
 
-    if not input_hdf5.exists():
-        raise FileNotFoundError(f"ManiSkill HDF5 not found: {input_hdf5}")
-    if not input_json.exists():
-        raise FileNotFoundError(f"ManiSkill JSON metadata not found: {input_json}")
+    if not input_hdf5s:
+        raise ManiSkillConversionError("At least one ManiSkill HDF5 input is required.")
+    json_paths = input_jsons or tuple(None for _ in input_hdf5s)
+    if len(json_paths) != len(input_hdf5s):
+        raise ManiSkillConversionError(f"Expected {len(input_hdf5s)} JSON metadata paths, got {len(json_paths)}.")
+
+    sources: list[_TrajectorySource] = []
+    for input_hdf5_raw, input_json_raw in zip(input_hdf5s, json_paths, strict=True):
+        input_hdf5 = Path(input_hdf5_raw)
+        input_json = Path(input_json_raw) if input_json_raw else input_hdf5.with_suffix(".json")
+        if not input_hdf5.exists():
+            raise FileNotFoundError(f"ManiSkill HDF5 not found: {input_hdf5}")
+        if not input_json.exists():
+            raise FileNotFoundError(f"ManiSkill JSON metadata not found: {input_json}")
+        metadata = _load_metadata(input_json)
+        sources.append(
+            _TrajectorySource(
+                input_hdf5=input_hdf5,
+                input_json=input_json,
+                metadata=metadata,
+                episode_meta=_episode_meta_by_id(metadata),
+            )
+        )
+    return tuple(sources)
+
+
+def _validate_output_path(output_hdf5: Path, overwrite: bool) -> None:
+    """Validate the destination path before opening HDF5 files."""
+
     if output_hdf5.exists() and not overwrite:
         raise FileExistsError(f"Output already exists: {output_hdf5}. Pass overwrite=True to replace it.")
 
@@ -252,6 +366,7 @@ def _write_demo(
     _write_images(obs=obs, traj=traj, image_camera_map=image_camera_map, length=length)
     _write_states(obs=obs, traj=traj, state_keys=state_keys, length=length)
     _write_object_state(obs=obs, traj=traj, length=length)
+    _write_extra_contact(obs=obs, traj=traj, length=length)
 
     return {
         "demo_key": demo.name,
@@ -340,6 +455,19 @@ def _write_object_state(obs: h5py.Group, traj: h5py.Group, length: int) -> None:
     parts = [np.asarray(actors[key][:length, :7], dtype=np.float32) for key in actor_keys]
     obs.create_dataset("object-state", data=np.concatenate(parts, axis=1))
     obs.create_dataset("observation.state.object", data=np.concatenate(parts, axis=1))
+
+
+def _write_extra_contact(obs: h5py.Group, traj: h5py.Group, length: int) -> None:
+    """Copy compact contact observations into the robomimic obs group."""
+
+    source = traj.get("obs", {}).get("extra_contact") if isinstance(traj.get("obs"), h5py.Group) else None
+    if not isinstance(source, h5py.Group):
+        return
+    for key, dataset in source.items():
+        if not isinstance(dataset, h5py.Dataset):
+            continue
+        values = np.asarray(dataset[:length], dtype=np.float32)
+        obs.create_dataset(str(key), data=values)
 
 
 def _dones_for(traj: h5py.Group, length: int) -> np.ndarray:

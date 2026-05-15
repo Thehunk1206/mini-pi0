@@ -46,43 +46,25 @@ def infer_prop_dim(obs: dict[str, np.ndarray], proprio_keys: list[str]) -> int:
     return int(sum(np.asarray(obs[k], dtype=np.float32).reshape(-1).shape[0] for k in proprio_keys))
 
 
-def infer_visual_mode_and_dim(
-    obs: dict[str, np.ndarray],
-    observation_key: str | None,
-    image_keys: list[str],
-) -> tuple[str, int]:
-    """Infer visual input mode and feature dim from one observation sample."""
-    if observation_key is not None:
-        visual = np.asarray(obs[observation_key])
-    elif len(image_keys) == 1:
-        visual = np.asarray(obs[image_keys[0]])
-    else:
-        visual_parts = [np.asarray(obs[k]) for k in image_keys]
-        if all(v.ndim == 1 for v in visual_parts):
-            return "feature", int(sum(int(v.reshape(-1).shape[0]) for v in visual_parts))
-        if all(v.ndim >= 2 for v in visual_parts):
-            h, w = visual_parts[0].shape[:2]
-            c = visual_parts[0].shape[2] if visual_parts[0].ndim >= 3 else 1
-            for idx, part in enumerate(visual_parts[1:], start=1):
-                part_c = part.shape[2] if part.ndim >= 3 else 1
-                if part.shape[:2] != (h, w) or part_c != c:
-                    raise ValueError(
-                        "All image_keys must share shape/channels for image fusion. "
-                        f"Got {visual_parts[0].shape} and {part.shape} at index {idx}."
-                    )
-            return "image", 0
+def validate_image_observations(obs: dict[str, np.ndarray], image_keys: list[str]) -> None:
+    """Validate that configured visual observations are image tensors."""
+    visual_parts = [np.asarray(obs[k]) for k in image_keys]
+    if not visual_parts:
+        raise ValueError("At least one image observation key is required.")
+    if not all(v.ndim >= 2 for v in visual_parts):
         raise ValueError(
-            "Mixed visual tensor ranks across image_keys are not supported. "
+            "Only raw image observations are supported. "
             f"Shapes: {[tuple(v.shape) for v in visual_parts]}"
         )
-    if visual.ndim == 1:
-        return "feature", int(visual.shape[0])
-    if visual.ndim == 3:
-        return "image", 0
-    raise ValueError(
-        f"Unsupported visual observation shape {visual.shape} for key '{observation_key}'. "
-        "Expected feature [D] or image [H,W,C]."
-    )
+    h, w = visual_parts[0].shape[:2]
+    c = visual_parts[0].shape[2] if visual_parts[0].ndim >= 3 else 1
+    for idx, part in enumerate(visual_parts[1:], start=1):
+        part_c = part.shape[2] if part.ndim >= 3 else 1
+        if part.shape[:2] != (h, w) or part_c != c:
+            raise ValueError(
+                "All image_keys must share shape/channels for image fusion. "
+                f"Got {visual_parts[0].shape} and {part.shape} at index {idx}."
+            )
 
 
 def split_train_val(dataset: Any, val_ratio: float, seed: int) -> tuple[Any, Any | None]:
@@ -232,4 +214,3 @@ def print_train_header(
     print("-" * 80)
     pretty_print_model_tree(model, max_depth=max(0, int(cfg.train.model_print_depth)))
     print("=" * 80)
-

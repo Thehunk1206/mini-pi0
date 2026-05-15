@@ -18,7 +18,6 @@ from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.utils.device import resolve_device
 from mini_pi0.utils.parity import build_checkpoint_parity_report, config_diff, format_parity_issues
 from mini_pi0.utils.runs import create_run_dir
-from mini_pi0.vision.encoders import build_vision_extractor
 
 
 def _reshape_action(action: np.ndarray, target_dim: int) -> np.ndarray:
@@ -106,14 +105,6 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
                 cfg.model.obs_horizon = 1
             if "action_attention_causal" not in model_cfg:
                 cfg.model.action_attention_causal = False
-    vision_cfg = ckpt.get("vision_config")
-    if isinstance(vision_cfg, dict):
-        for k, v in vision_cfg.items():
-            if not hasattr(cfg.vision, k):
-                continue
-            cur = getattr(cfg.vision, k)
-            if cur is None or (isinstance(cur, str) and not cur.strip()):
-                setattr(cfg.vision, k, v)
 
 
 def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
@@ -159,7 +150,7 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
     print(
         "[deploy] Preflight | "
         f"backend={cfg.simulator.backend} task={cfg.simulator.task} robot={cfg.simulator.robot} "
-        f"controller={cfg.simulator.controller} obs_mode={cfg.model.obs_mode} "
+        f"controller={cfg.simulator.controller} obs_mode=image "
         f"image_keys={effective_image_keys(cfg.robot)} strict_parity={strict}",
         flush=True,
     )
@@ -185,36 +176,6 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
     model.eval()
 
     image_keys = effective_image_keys(cfg.robot)
-    feature_extractor = None
-    if str(cfg.model.obs_mode).strip().lower() in {"feature", "precomputed", "features"}:
-        if bool(cfg.vision.use_runtime_extractor):
-            feature_extractor = build_vision_extractor(
-                backend=cfg.vision.backend,
-                model_name=cfg.vision.model_name,
-                pretrained=bool(cfg.vision.pretrained),
-                image_size=int(cfg.vision.image_size),
-                hf_model_id=cfg.vision.hf_model_id,
-                local_files_only=bool(cfg.vision.local_files_only),
-                device=device,
-            )
-            expected_dim = int(cfg.model.vision_dim)
-            per_view_dim = int(feature_extractor.feature_dim)
-            got_dim = int(per_view_dim * max(1, len(image_keys)))
-            if expected_dim > 0 and got_dim != expected_dim:
-                raise ValueError(
-                    "Vision feature dim mismatch: model expects "
-                    f"{expected_dim}, runtime extractor '{cfg.vision.model_name}' outputs "
-                    f"{per_view_dim} per view -> total {got_dim} for {len(image_keys)} views. "
-                    "Set matching image keys and encoder via "
-                    "`--set robot.image_keys='[...]' --set vision.model_name=...` "
-                    "or use a checkpoint/config trained with the same feature backend."
-                )
-        else:
-            raise ValueError(
-                "Model expects feature observations but vision.use_runtime_extractor=false. "
-                "Enable runtime extractor for simulation deploy."
-            )
-
     stats_path = cfg.deploy.action_stats_path or cfg.data.action_stats_path
     state_keys = effective_state_keys(cfg.robot)
     processor = ObsProcessor(
@@ -223,9 +184,6 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
         image_keys=image_keys,
         proprio_keys=state_keys,
         device=str(device),
-        observation_mode=cfg.model.obs_mode,
-        feature_key=cfg.data.precomputed_feature_key,
-        feature_extractor=feature_extractor,
         obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
         preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
@@ -292,8 +250,6 @@ def run_deploy_sim(cfg: RootConfig) -> dict[str, Any]:
                     if np.issubdtype(frame.dtype, np.floating) and frame.max() <= 1.0:
                         frame = frame * 255.0
                     frame = np.clip(frame, 0, 255).astype(np.uint8)
-                if adapter.backend_name == "robosuite":
-                    frame = frame[::-1]
                 frames.append(frame)
 
         if step.done or success:

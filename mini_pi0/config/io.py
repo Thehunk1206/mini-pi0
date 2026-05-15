@@ -99,12 +99,13 @@ def _normalize_dataclass_type(field_type: Any) -> Any:
     return field_type
 
 
-def _dataclass_from_dict(cls: type[T], data: dict[str, Any]) -> T:
+def _dataclass_from_dict(cls: type[T], data: dict[str, Any], path: str = "") -> T:
     """Recursively instantiate a dataclass from nested dictionaries.
 
     Args:
         cls: Dataclass type to instantiate.
         data: Mapping of field names to values.
+        path: Dotted config path used in validation errors.
 
     Returns:
         Instance of ``cls`` with nested dataclasses created recursively.
@@ -112,6 +113,13 @@ def _dataclass_from_dict(cls: type[T], data: dict[str, Any]) -> T:
 
     if not is_dataclass(cls):
         return data  # type: ignore[return-value]
+
+    field_names = {f.name for f in fields(cls)}
+    extra = sorted(set(data.keys()) - field_names)
+    if extra:
+        loc = path or cls.__name__
+        keys = ", ".join(extra)
+        raise ValueError(f"Unknown config key(s) under {loc}: {keys}")
 
     hints = get_type_hints(cls)
     kwargs = {}
@@ -121,7 +129,8 @@ def _dataclass_from_dict(cls: type[T], data: dict[str, Any]) -> T:
         val = data[f.name]
         t = _normalize_dataclass_type(hints.get(f.name, f.type))
         if is_dataclass(t) and isinstance(val, dict):
-            kwargs[f.name] = _dataclass_from_dict(t, val)
+            child_path = f"{path}.{f.name}" if path else f.name
+            kwargs[f.name] = _dataclass_from_dict(t, val, child_path)
         else:
             kwargs[f.name] = val
     return cls(**kwargs)  # type: ignore[arg-type]

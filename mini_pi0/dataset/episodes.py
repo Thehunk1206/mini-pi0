@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass
 from importlib import import_module
 import inspect
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -387,7 +386,6 @@ def load_episodes_lerobot(
     fallback_image_hw: tuple[int, int] = (84, 84),
     local_files_only: bool = False,
     video_backend: str | None = "pyav",
-    load_images: bool = True,
 ) -> list[EpisodeData]:
     """Load demonstrations from a native Hugging Face LeRobot dataset.
 
@@ -402,8 +400,6 @@ def load_episodes_lerobot(
         local_files_only: If ``True``, do not hit network and use local HF cache only.
         video_backend: Video decoding backend override. ``pyav`` is the recommended
             default on macOS to avoid torchcodec / FFmpeg runtime incompatibilities.
-        load_images: Whether to decode and include image observations. Set ``False``
-            for precomputed-feature training to avoid expensive video decoding.
 
     Returns:
         Parsed episodes in canonical schema.
@@ -429,20 +425,13 @@ def load_episodes_lerobot(
     n = len(ds)
     if n <= 0:
         raise FileNotFoundError(f"No samples found in LeRobot dataset: {repo_id}")
-    source = ds
-    if not load_images and hasattr(ds, "hf_dataset"):
-        # Fast path for feature-only training: iterate the raw tabular dataset
-        # (no video columns), which avoids expensive per-sample video decode.
-        source = ds.hf_dataset
-        n = len(source)
-
     h, w = fallback_image_hw
     order: list[int] = []
     obs_by_ep: dict[int, list[dict[str, np.ndarray]]] = {}
     act_by_ep: dict[int, list[np.ndarray]] = {}
 
     for i in range(n):
-        sample = source[i]
+        sample = ds[i]
         if not isinstance(sample, dict):
             raise ValueError(f"LeRobot sample at index {i} is not a dict (got {type(sample).__name__}).")
 
@@ -464,10 +453,9 @@ def load_episodes_lerobot(
 
         action = np.asarray(_to_numpy(_extract_key(sample, action_key)), dtype=np.float32).reshape(-1)
         obs_t: dict[str, np.ndarray] = {}
-        if load_images:
-            for key in image_keys:
-                image = _to_uint8_image(_to_numpy(_extract_key(sample, key)), fallback_hw=(h, w))
-                obs_t[key] = image
+        for key in image_keys:
+            image = _to_uint8_image(_to_numpy(_extract_key(sample, key)), fallback_hw=(h, w))
+            obs_t[key] = image
         for key in proprio_keys:
             obs_t[key] = np.asarray(_to_numpy(_extract_key(sample, key)), dtype=np.float32).reshape(-1)
 
@@ -486,106 +474,6 @@ def load_episodes_lerobot(
     if not episodes:
         raise FileNotFoundError(f"No valid episodes loaded from LeRobot dataset: {repo_id}")
     return episodes
-
-
-def iter_lerobot_episode_images(
-    repo_id: str,
-    image_keys: list[str],
-    episode_index_key: str = "episode_index",
-    limit: int | None = None,
-    fallback_image_hw: tuple[int, int] = (84, 84),
-    local_files_only: bool = False,
-    video_backend: str | None = "pyav",
-) -> tuple[object, dict[str, int | None]]:
-    """Stream LeRobot images grouped by episode without loading full dataset in RAM.
-
-    Args:
-        repo_id: Hugging Face LeRobot dataset repo id.
-        image_keys: Ordered feature keys used as image observations.
-        episode_index_key: Feature key identifying episode id per sample.
-        limit: Optional max number of episodes to stream.
-        fallback_image_hw: Fallback image shape for invalid/missing frames.
-        local_files_only: If ``True``, load from local cache only when supported.
-        video_backend: Decoder backend override (`pyav` recommended on macOS).
-
-    Returns:
-        Tuple of:
-        - an iterator yielding ``(episode_seq_idx, frames_by_key)`` where ``frames_by_key`` maps
-          each image key to a list of ``uint8 HxWx3`` frames
-        - metadata dictionary with ``total_frames`` and ``total_episodes`` hints
-
-    Raises:
-        ValueError: If episode ids are non-monotonic in dataset stream order.
-    """
-
-    if not repo_id:
-        raise ValueError("LeRobot repo_id must be a non-empty string.")
-    if not image_keys:
-        raise ValueError("image_keys must contain at least one observation key.")
-
-    ds = _make_lerobot_dataset(
-        repo_id=repo_id,
-        local_files_only=bool(local_files_only),
-        video_backend=(str(video_backend).strip() if video_backend else None),
-    )
-    if video_backend and hasattr(ds, "video_backend"):
-        try:
-            ds.video_backend = str(video_backend)
-        except Exception:
-            pass
-
-    meta_obj = getattr(ds, "meta", None)
-    meta: dict[str, int | None] = {
-        "total_frames": int(getattr(meta_obj, "total_frames", 0) or 0) if meta_obj is not None else None,
-        "total_episodes": int(getattr(meta_obj, "total_episodes", 0) or 0) if meta_obj is not None else None,
-    }
-
-    def _iter():
-        h, w = fallback_image_hw
-        n = len(ds)
-        current_ep_id: int | None = None
-        current_frames: dict[str, list[np.ndarray]] = {k: [] for k in image_keys}
-        emitted = 0
-
-        for i in range(n):
-            sample = ds[i]
-            if not isinstance(sample, dict):
-                raise ValueError(f"LeRobot sample at index {i} is not a dict (got {type(sample).__name__}).")
-
-            ep_raw = _extract_key(sample, episode_index_key)
-            ep_flat = _to_numpy(ep_raw).reshape(-1)
-            if ep_flat.size != 1:
-                raise ValueError(
-                    f"LeRobot episode index key '{episode_index_key}' must be scalar. "
-                    f"Got shape {tuple(ep_flat.shape)} at sample {i}."
-                )
-            ep_idx = int(ep_flat.item())
-
-            if current_ep_id is None:
-                current_ep_id = ep_idx
-            elif ep_idx < current_ep_id:
-                raise ValueError(
-                    "LeRobot samples are not grouped by episode_index in stream order. "
-                    "Streaming precompute requires monotonic episode ordering."
-                )
-
-            if ep_idx != current_ep_id:
-                if any(current_frames[k] for k in image_keys):
-                    yield emitted, current_frames
-                    emitted += 1
-                    if limit is not None and emitted >= int(limit):
-                        return
-                current_ep_id = ep_idx
-                current_frames = {k: [] for k in image_keys}
-
-            for key in image_keys:
-                image = _to_uint8_image(_to_numpy(_extract_key(sample, key)), fallback_hw=(h, w))
-                current_frames[key].append(image)
-
-        if any(current_frames[k] for k in image_keys) and (limit is None or emitted < int(limit)):
-            yield emitted, current_frames
-
-    return _iter(), meta
 
 
 def load_episodes_from_config(cfg) -> list[EpisodeData]:
@@ -613,7 +501,7 @@ def load_episodes_from_config(cfg) -> list[EpisodeData]:
         hdf5_path = cfg.data.robomimic_hdf5
         if not hdf5_path:
             raise ValueError("data.robomimic_hdf5 must be set when data.format=robomimic_hdf5")
-        episodes = load_episodes_robomimic(
+        return load_episodes_robomimic(
             hdf5_path=hdf5_path,
             image_keys=image_keys,
             proprio_keys=state_keys,
@@ -621,15 +509,12 @@ def load_episodes_from_config(cfg) -> list[EpisodeData]:
             data_group=cfg.data.robomimic_data_group,
             fallback_image_hw=fallback_hw,
         )
-        return _maybe_attach_precomputed_features(episodes, cfg)
 
     if fmt in {"lerobot", "lerobot_hf", "hf"}:
         repo_id = cfg.data.lerobot_repo_id
         if not repo_id:
             raise ValueError("data.lerobot_repo_id must be set when data.format=lerobot_hf")
-        obs_mode = str(getattr(cfg.data, "observation_mode", "image")).strip().lower()
-        load_images = obs_mode not in {"precomputed", "feature", "features"}
-        episodes = load_episodes_lerobot(
+        return load_episodes_lerobot(
             repo_id=repo_id,
             image_keys=image_keys,
             proprio_keys=state_keys,
@@ -639,83 +524,9 @@ def load_episodes_from_config(cfg) -> list[EpisodeData]:
             fallback_image_hw=fallback_hw,
             local_files_only=bool(cfg.data.lerobot_local_files_only),
             video_backend=cfg.data.lerobot_video_backend,
-            load_images=load_images,
         )
-        return _maybe_attach_precomputed_features(episodes, cfg)
 
     raise ValueError(
         f"Unsupported data.format '{cfg.data.format}'. "
         f"Supported formats: {', '.join(list_supported_dataset_formats())}"
     )
-
-
-def _maybe_attach_precomputed_features(episodes: list[EpisodeData], cfg) -> list[EpisodeData]:
-    """Attach cached vision features to loaded episodes when requested.
-
-    The expected `.npz` format stores per-episode arrays using keys:
-    ``ep_000000``, ``ep_000001``, ...
-
-    Args:
-        episodes: Episodes loaded from source dataset.
-        cfg: Root config containing data section.
-
-    Returns:
-        Episodes with feature vectors attached to each timestep observation.
-    """
-
-    mode = str(getattr(cfg.data, "observation_mode", "image")).strip().lower()
-    if mode not in {"precomputed", "feature", "features"}:
-        return episodes
-    feat_path = getattr(cfg.data, "precomputed_features_path", None)
-    if not feat_path:
-        raise ValueError("data.precomputed_features_path must be set when using precomputed observation mode.")
-    if not os.path.exists(feat_path):
-        raise FileNotFoundError(f"Precomputed features not found: {feat_path}")
-
-    feature_key = str(getattr(cfg.data, "precomputed_feature_key", "vision_feat"))
-
-    feat_p = Path(feat_path)
-    if feat_p.is_dir():
-        print(f"[data] Attaching precomputed features from directory: {feat_p}", flush=True)
-        for ep_idx, ep in enumerate(episodes):
-            key = f"ep_{ep_idx:06d}"
-            ep_file = feat_p / f"{key}.npy"
-            if not ep_file.exists():
-                raise KeyError(
-                    f"Missing feature file '{ep_file}'. "
-                    "Re-run precompute for the same dataset ordering/limit."
-                )
-            feats = np.asarray(np.load(ep_file), dtype=np.float32)
-            if feats.ndim != 2:
-                raise ValueError(f"Expected 2D feature array for '{ep_file}', got shape {feats.shape}")
-            if len(feats) != len(ep.obs):
-                raise ValueError(
-                    f"Feature length mismatch for '{ep_file.name}': features={len(feats)} vs episode_obs={len(ep.obs)}"
-                )
-            for t, obs_t in enumerate(ep.obs):
-                obs_t[feature_key] = feats[t]
-            if (ep_idx + 1) % 20 == 0 or (ep_idx + 1) == len(episodes):
-                print(f"[data] Attached features for {ep_idx + 1}/{len(episodes)} episodes", flush=True)
-        return episodes
-
-    print(f"[data] Attaching precomputed features from archive: {feat_path}", flush=True)
-    with np.load(feat_path) as store:
-        for ep_idx, ep in enumerate(episodes):
-            key = f"ep_{ep_idx:06d}"
-            if key not in store:
-                raise KeyError(
-                    f"Missing feature array '{key}' in {feat_path}. "
-                    "Re-run precompute for the same dataset ordering/limit."
-                )
-            feats = np.asarray(store[key], dtype=np.float32)
-            if feats.ndim != 2:
-                raise ValueError(f"Expected 2D feature array for '{key}', got shape {feats.shape}")
-            if len(feats) != len(ep.obs):
-                raise ValueError(
-                    f"Feature length mismatch for '{key}': features={len(feats)} vs episode_obs={len(ep.obs)}"
-                )
-            for t, obs_t in enumerate(ep.obs):
-                obs_t[feature_key] = feats[t]
-            if (ep_idx + 1) % 20 == 0 or (ep_idx + 1) == len(episodes):
-                print(f"[data] Attached features for {ep_idx + 1}/{len(episodes)} episodes", flush=True)
-    return episodes

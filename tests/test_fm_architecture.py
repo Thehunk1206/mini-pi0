@@ -77,12 +77,17 @@ class _ConstantVelocityDenoiser(nn.Module):
         return torch.ones_like(noisy_actions)
 
 
+class _ZeroConditionEncoder(nn.Module):
+    """Return a fixed conditioning vector for algebra-focused tests."""
+
+    def forward(self, img: torch.Tensor, prop: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(img.shape[0], 8, device=img.device, dtype=img.dtype)
+
+
 def test_flow_loss_components_reconstructs_clean_estimate_from_noisy_state(monkeypatch) -> None:
     model = MiniPi0FlowMatching(
         action_dim=2,
         prop_dim=3,
-        obs_mode="feature",
-        vision_dim=4,
         chunk_size=2,
         cond_dim=8,
         d_model=8,
@@ -91,6 +96,7 @@ def test_flow_loss_components_reconstructs_clean_estimate_from_noisy_state(monke
         conditioning_mode="global",
     )
     model.action_transformer = _ConstantVelocityDenoiser()
+    model.obs_encoder = _ZeroConditionEncoder()
     monkeypatch.setattr(
         fm_module,
         "sample_tau_beta",
@@ -98,7 +104,7 @@ def test_flow_loss_components_reconstructs_clean_estimate_from_noisy_state(monke
     )
     monkeypatch.setattr(torch, "randn_like", lambda x: torch.zeros_like(x))
     clean_actions = torch.tensor([[[2.0, 4.0], [6.0, 8.0]]])
-    img = torch.zeros(1, 4)
+    img = torch.zeros(1, 3, 16, 16)
     prop = torch.zeros(1, 3)
 
     _loss, clean_pred = model._flow_loss_components(img, prop, clean_actions)
@@ -112,8 +118,6 @@ def test_cross_attention_transformer_uses_configured_dropout() -> None:
     model = MiniPi0FlowMatching(
         action_dim=7,
         prop_dim=9,
-        obs_mode="feature",
-        vision_dim=16,
         chunk_size=6,
         cond_dim=32,
         d_model=32,
@@ -134,8 +138,6 @@ def test_cnn1d_and_unet_token_film_forward_sample() -> None:
         model = MiniPi0FlowMatching(
             action_dim=7,
             prop_dim=9,
-            obs_mode="feature",
-            vision_dim=16,
             chunk_size=6,
             cond_dim=32,
             d_model=32,
@@ -144,12 +146,12 @@ def test_cnn1d_and_unet_token_film_forward_sample() -> None:
             action_backbone=backbone,
             conditioning_mode="cross_attention",
         )
-        feat = torch.randn(2, 2, 16)
+        img = torch.rand(2, 2, 3, 32, 32)
         prop = torch.randn(2, 2, 9)
         actions = torch.randn(2, 6, 7)
 
-        loss = model(feat, prop, actions)
-        sample = model.sample(feat[:1], prop[:1], n_steps=2)
+        loss = model(img, prop, actions)
+        sample = model.sample(img[:1], prop[:1], n_steps=2)
 
         assert torch.isfinite(loss)
         assert tuple(sample.shape) == (1, 6, 7)
@@ -161,7 +163,6 @@ def test_timm_token_backbone_returns_tokens_when_available() -> None:
         model = MiniPi0FlowMatching(
             action_dim=7,
             prop_dim=9,
-            obs_mode="image",
             chunk_size=4,
             cond_dim=16,
             d_model=16,
@@ -188,7 +189,6 @@ def test_resnet18_backbone_registers_imagenet_preprocessing_buffers() -> None:
     model = MiniPi0FlowMatching(
         action_dim=7,
         prop_dim=9,
-        obs_mode="image",
         chunk_size=4,
         cond_dim=16,
         d_model=16,
@@ -211,7 +211,6 @@ def test_timm_backbone_requires_model_name() -> None:
         MiniPi0FlowMatching(
             action_dim=7,
             prop_dim=9,
-            obs_mode="image",
             chunk_size=4,
             cond_dim=16,
             d_model=16,

@@ -15,7 +15,6 @@ from mini_pi0.utils.device import resolve_device
 from mini_pi0.utils.parity import build_checkpoint_parity_report, config_diff, format_parity_issues
 from mini_pi0.utils.precision import describe_runtime_dtype
 from mini_pi0.utils.runs import create_run_dir
-from mini_pi0.vision.encoders import build_vision_extractor
 
 
 def _adapter_factory(cfg: RootConfig):
@@ -51,8 +50,6 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
     model_cfg = ckpt.get("model_config")
     if isinstance(model_cfg, dict):
         for k, v in model_cfg.items():
-            if k == "dtype" and cfg.model.dtype is not None:
-                continue
             if hasattr(cfg.model, k):
                 setattr(cfg.model, k, v)
         if str(cfg.model.name).strip().lower() == "mini_pi0_fm":
@@ -67,23 +64,6 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
                 # Legacy timm FM checkpoints were created with pretrained=False.
                 # Avoid downloading unrelated weights before loading their state dict.
                 cfg.model.vision_pretrained = False
-        if str(cfg.model.name).strip().lower() == "mini_pi05":
-            if "action_model" not in model_cfg:
-                cfg.model.action_model = None
-            if "expert_intermediate_size" not in model_cfg:
-                cfg.model.expert_intermediate_size = None
-
-    # Keep runtime vision config under user control (config / CLI overrides).
-    # Checkpoint vision metadata can be stale relative to the model's expected
-    # feature dimension when users switch encoders intentionally.
-    vision_cfg = ckpt.get("vision_config")
-    if isinstance(vision_cfg, dict):
-        for k, v in vision_cfg.items():
-            if not hasattr(cfg.vision, k):
-                continue
-            cur = getattr(cfg.vision, k)
-            if cur is None or (isinstance(cur, str) and not cur.strip()):
-                setattr(cfg.vision, k, v)
 
 
 def _apply_eval_runtime_overrides(cfg: RootConfig) -> None:
@@ -175,6 +155,51 @@ def _resolve_eval_run_dir(cfg: RootConfig) -> Path:
     return run_dir
 
 
+def _grid_camera_slug(camera: str) -> str:
+    """Return a filesystem-safe camera label for grid video artifacts."""
+
+    slug = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(camera).strip())
+    return slug.strip("_") or "camera"
+
+
+def _save_eval_grids(grid_data: dict[str, Any], run_dir: Path, cfg: RootConfig) -> None:
+    """Save success/failure rollout grids for each collected eval camera."""
+
+    success_data = grid_data.get("success", {})
+    failure_data = grid_data.get("failure", {})
+    cameras = list(grid_data.get("cameras") or [])
+    if not cameras:
+        save_rollout_grid(
+            success_data,
+            path=str(run_dir / "artifacts" / f"success_grid_{cfg.eval.grid_size}x{cfg.eval.grid_size}.mp4"),
+            grid_size=int(cfg.eval.grid_size),
+            fps=int(cfg.eval.grid_fps),
+        )
+        save_rollout_grid(
+            failure_data,
+            path=str(run_dir / "artifacts" / f"failure_grid_{cfg.eval.grid_size}x{cfg.eval.grid_size}.mp4"),
+            grid_size=int(cfg.eval.grid_size),
+            fps=int(cfg.eval.grid_fps),
+        )
+        return
+
+    use_suffix = len(cameras) > 1
+    for camera in cameras:
+        suffix = f"_{_grid_camera_slug(camera)}" if use_suffix else ""
+        save_rollout_grid(
+            success_data.get(camera, []),
+            path=str(run_dir / "artifacts" / f"success_grid{suffix}_{cfg.eval.grid_size}x{cfg.eval.grid_size}.mp4"),
+            grid_size=int(cfg.eval.grid_size),
+            fps=int(cfg.eval.grid_fps),
+        )
+        save_rollout_grid(
+            failure_data.get(camera, []),
+            path=str(run_dir / "artifacts" / f"failure_grid{suffix}_{cfg.eval.grid_size}x{cfg.eval.grid_size}.mp4"),
+            grid_size=int(cfg.eval.grid_size),
+            fps=int(cfg.eval.grid_fps),
+        )
+
+
 def run_eval(cfg: RootConfig) -> dict[str, Any]:
     """Run full evaluation pipeline and persist run artifacts.
 
@@ -211,9 +236,9 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
     print(
         "[eval] Preflight | "
         f"backend={cfg.simulator.backend} task={cfg.simulator.task} robot={cfg.simulator.robot} "
-        f"controller={cfg.simulator.controller} obs_mode={cfg.model.obs_mode} "
+        f"controller={cfg.simulator.controller} obs_mode=image "
         f"image_keys={effective_image_keys(cfg.robot)} "
-        f"dtype={describe_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=cfg.model.dtype)} "
+        f"dtype={describe_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=None)} "
         f"strict_parity={strict}",
         flush=True,
     )
@@ -240,36 +265,6 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
     model.eval()
 
     image_keys = effective_image_keys(cfg.robot)
-    feature_extractor = None
-    if str(cfg.model.obs_mode).strip().lower() in {"feature", "precomputed", "features"}:
-        if bool(cfg.vision.use_runtime_extractor):
-            feature_extractor = build_vision_extractor(
-                backend=cfg.vision.backend,
-                model_name=cfg.vision.model_name,
-                pretrained=bool(cfg.vision.pretrained),
-                image_size=int(cfg.vision.image_size),
-                hf_model_id=cfg.vision.hf_model_id,
-                local_files_only=bool(cfg.vision.local_files_only),
-                device=device,
-            )
-            expected_dim = int(cfg.model.vision_dim)
-            per_view_dim = int(feature_extractor.feature_dim)
-            got_dim = int(per_view_dim * max(1, len(image_keys)))
-            if expected_dim > 0 and got_dim != expected_dim:
-                raise ValueError(
-                    "Vision feature dim mismatch: model expects "
-                    f"{expected_dim}, runtime extractor '{cfg.vision.model_name}' outputs "
-                    f"{per_view_dim} per view -> total {got_dim} for {len(image_keys)} views. "
-                    "Set matching image keys and encoder via "
-                    "`--set robot.image_keys='[...]' --set vision.model_name=...` "
-                    "or use a checkpoint/config trained with the same feature backend."
-                )
-        else:
-            raise ValueError(
-                "Model expects feature observations but vision.use_runtime_extractor=false. "
-                "Enable runtime extractor for eval/deploy."
-            )
-
     stats_path = cfg.eval.action_stats_path or cfg.data.action_stats_path
     state_keys = effective_state_keys(cfg.robot)
     processor = ObsProcessor(
@@ -278,9 +273,6 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         image_keys=image_keys,
         proprio_keys=state_keys,
         device=str(device),
-        observation_mode=cfg.model.obs_mode,
-        feature_key=cfg.data.precomputed_feature_key,
-        feature_extractor=feature_extractor,
         obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
         preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
@@ -329,18 +321,7 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         json.dump({k: v.tolist() for k, v in results.items()}, f, indent=2)
 
     if cfg.eval.record_grid and not use_vectorized:
-        save_rollout_grid(
-            grid_data["success"],
-            path=str(run_dir / "artifacts" / f"success_grid_{cfg.eval.grid_size}x{cfg.eval.grid_size}.mp4"),
-            grid_size=int(cfg.eval.grid_size),
-            fps=int(cfg.eval.grid_fps),
-        )
-        save_rollout_grid(
-            grid_data["failure"],
-            path=str(run_dir / "artifacts" / f"failure_grid_{cfg.eval.grid_size}x{cfg.eval.grid_size}.mp4"),
-            grid_size=int(cfg.eval.grid_size),
-            fps=int(cfg.eval.grid_fps),
-        )
+        _save_eval_grids(grid_data, run_dir, cfg)
 
     if cfg.eval.record:
         rollout_dir = run_dir / "artifacts" / "rollouts"

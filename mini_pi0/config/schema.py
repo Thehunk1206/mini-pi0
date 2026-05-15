@@ -24,7 +24,7 @@ class SimulatorConfig:
     """Simulator backend and environment instantiation settings.
 
     Attributes:
-        backend: Simulator backend key (for example ``robosuite``).
+        backend: Simulator backend key. The simplified repo supports ``maniskill3``.
         task: Task name understood by the selected backend.
         robot: Robot name/model for the configured task.
         controller: Controller profile name for backends that support controller presets.
@@ -40,10 +40,10 @@ class SimulatorConfig:
         env_kwargs: Arbitrary backend-specific kwargs passed at environment creation time.
     """
 
-    backend: str = "robosuite"  # robosuite | maniskill3 | isaaclab
-    task: str = "Lift"
-    robot: str = "Panda"
-    controller: str = "BASIC"
+    backend: str = "maniskill3"
+    task: str = "StackCube-v1"
+    robot: str = "panda_wristcam"
+    controller: str = "pd_joint_pos"
     control_freq: int = 20
     horizon: int = 400
     reward_shaping: bool = True
@@ -133,8 +133,6 @@ class DataConfig:
 
     Attributes:
         format: Dataset format identifier (``robomimic_hdf5`` or ``lerobot_hf``).
-        observation_mode: Observation payload mode consumed by policy model.
-            ``image`` uses raw image tensors; ``precomputed`` uses cached feature vectors.
         robomimic_hdf5: Path to robomimic HDF5 file for ``robomimic_hdf5`` format.
         robomimic_data_group: Top-level HDF5 group containing demonstrations.
         lerobot_repo_id: Hugging Face LeRobot dataset repo id for ``lerobot_hf``.
@@ -142,8 +140,6 @@ class DataConfig:
         lerobot_episode_index_key: Sample key used for episode grouping in LeRobot samples.
         lerobot_local_files_only: Load LeRobot dataset from local cache only.
         lerobot_video_backend: Video decoding backend for LeRobot frames (`pyav`, `torchcodec`, or `video_reader`).
-        precomputed_features_path: Path to `.npz` with precomputed per-episode vision features.
-        precomputed_feature_key: Observation key used to store/read cached features.
         fallback_image_hw: Fallback ``[H, W]`` used when source frames are missing/invalid.
         n_demos: Optional max number of demos to load.
         chunk_size: Action horizon length per supervised training sample.
@@ -156,7 +152,6 @@ class DataConfig:
     """
 
     format: str = "robomimic_hdf5"
-    observation_mode: str = "image"  # image | precomputed
     robomimic_hdf5: str | None = "data/robomimic/lift/ph/low_dim_v15.hdf5"
     robomimic_data_group: str = "data"
     lerobot_repo_id: str | None = None
@@ -164,8 +159,6 @@ class DataConfig:
     lerobot_episode_index_key: str = "episode_index"
     lerobot_local_files_only: bool = False
     lerobot_video_backend: str | None = "pyav"
-    precomputed_features_path: str | None = None
-    precomputed_feature_key: str = "vision_feat"
     fallback_image_hw: list[int] = field(default_factory=lambda: [84, 84])
     n_demos: int | None = 200
     chunk_size: int = 16
@@ -211,8 +204,6 @@ class ModelConfig:
         name: Model registry key.
         action_dim: Output action dimensionality.
         prop_dim: Input proprioceptive vector dimensionality.
-        obs_mode: Observation input mode for model encoder (``image`` or ``feature``).
-        vision_dim: Input feature dimension when ``obs_mode=feature``.
         chunk_size: Number of actions generated per model sample call.
         cond_dim: Conditioning feature size from observation encoder.
         d_model: Transformer hidden dimension.
@@ -252,25 +243,11 @@ class ModelConfig:
         use_context_layernorm: Apply LayerNorm to context tokens before denoiser.
         vision_token_grid_size: Spatial token grid size per side for image-mode context.
         use_dit_adaln: Enable DiT-style timestep-conditioned AdaLN modulation in denoiser blocks.
-        pretrained_model_name_or_path: Optional SmolVLM checkpoint id/path used when
-            ``name=mini_pi05``. If null, ``mini_pi05`` starts from random init.
-        pretrained_variant: Backbone shape hint used for ``mini_pi05`` pretrained
-            loading (``256M`` or ``500M``).
-        pretrained_local_files_only: Restrict Hugging Face loading to local cache only.
-        action_model: Optional named MiniPI05 action expert preset:
-            ``ACTION_EXPERT_S``, ``ACTION_EXPERT_M``, or ``ACTION_EXPERT_L``.
-        expert_intermediate_size: Optional MiniPI05 action-expert MLP width.
-            Attention structure remains locked to the SmolVLM text backbone, but
-            the expert MLP can be narrowed to reduce parameters and inference cost.
-        dtype: Runtime dtype for models that support it, especially ``mini_pi05``
-            (``float32`` or ``bfloat16``).
     """
 
     name: str = "mini_pi0_fm"
     action_dim: int = 7
     prop_dim: int = 9
-    obs_mode: str = "image"  # image | feature
-    vision_dim: int = 0
     chunk_size: int = 16
     cond_dim: int = 256
     d_model: int = 256
@@ -296,39 +273,6 @@ class ModelConfig:
     use_context_layernorm: bool = True
     vision_token_grid_size: int = 4
     use_dit_adaln: bool = True
-    pretrained_model_name_or_path: str | None = None
-    pretrained_variant: str = "256M"
-    pretrained_local_files_only: bool = False
-    action_model: str | None = None
-    expert_intermediate_size: int | None = None
-    dtype: str | None = None
-
-
-@dataclass
-class VisionConfig:
-    """Vision encoder configuration for precompute and runtime feature extraction.
-
-    Attributes:
-        backend: Encoder backend (`torchvision`, `timm`, or `hf`).
-        model_name: Backbone identifier for selected backend.
-        pretrained: Load pretrained weights when backend supports it.
-        batch_size: Batch size used during offline feature extraction.
-        image_size: Input resize/crop size for encoder.
-        output_path: Default output path for precomputed feature `.npz`.
-        use_runtime_extractor: Compute features online during eval/deploy when model expects features.
-        hf_model_id: Optional HF model id (used when backend=`hf`).
-        local_files_only: Restrict HF model loading to local cache.
-    """
-
-    backend: str = "timm"
-    model_name: str = "vit_small_patch14_dinov2.lvd142m"
-    pretrained: bool = True
-    batch_size: int = 64
-    image_size: int = 224
-    output_path: str = "data/features/vision_features.npz"
-    use_runtime_extractor: bool = True
-    hf_model_id: str | None = None
-    local_files_only: bool = False
 
 
 @dataclass
@@ -358,12 +302,8 @@ class TrainConfig:
         checkpoint_use_ema: Save EMA weights into checkpoint model payload when EMA is enabled.
         val_use_ema: Evaluate validation loss with EMA weights when EMA is enabled. Keep
             this disabled when comparing train and validation losses directly.
-        lr_backbone: Optional override LR for pretrained VLM backbone params.
-            When null, falls back to ``lr * 0.1`` for ``mini_pi05``.
-        lr_expert: Optional override LR for action expert/head params.
-            When null, falls back to ``lr`` for ``mini_pi05``.
-        freeze_backbone_steps: Number of initial optimizer steps to keep
-            ``mini_pi05`` VLM backbone frozen before unfreezing for finetuning.
+        lr_backbone: Optional override LR for FM vision backbone params.
+        lr_expert: Optional override LR for FM action backbone/head params.
         image_aug_enable: Enable training-time image augmentation.
         image_aug_crop_scale: Random resized-crop scale lower bound in (0, 1].
             1.0 disables random crop.
@@ -416,7 +356,6 @@ class TrainConfig:
     val_use_ema: bool = False
     lr_backbone: float | None = None
     lr_expert: float | None = None
-    freeze_backbone_steps: int = 0
     image_aug_enable: bool = False
     image_aug_crop_scale: float = 1.0
     image_aug_brightness: float = 0.0
@@ -460,6 +399,9 @@ class EvalConfig:
         log_every_episodes: Episode log interval when ``verbose=True``.
         record: Enables per-episode rollout recording.
         record_grid: Enables success/failure grid video export.
+        grid_cameras: Camera names or image keys used for success/failure grid
+            videos. Accepts either one camera name or a list of names. When
+            unset, eval uses the first configured simulator camera.
         grid_size: Grid dimension (``N`` creates ``N x N`` tiles).
         grid_fps: Frames per second for grid videos.
         grid_width: Per-tile frame width in pixels.
@@ -508,6 +450,7 @@ class EvalConfig:
     log_every_episodes: int = 1
     record: bool = False
     record_grid: bool = False
+    grid_cameras: list[str] | str | None = None
     grid_size: int = 3
     grid_fps: int = 20
     grid_width: int = 256
@@ -606,7 +549,6 @@ class RootConfig:
         robot: Canonical robot schema.
         data: Dataset and preprocessing settings.
         dataset_collection: Oracle mixture collection settings.
-        vision: Vision encoder settings for feature precompute/runtime extraction.
         model: Model architecture settings.
         train: Training loop controls.
         eval: Evaluation loop controls.
@@ -619,7 +561,6 @@ class RootConfig:
     robot: RobotConfig = field(default_factory=RobotConfig)
     data: DataConfig = field(default_factory=DataConfig)
     dataset_collection: DatasetCollectionConfig = field(default_factory=DatasetCollectionConfig)
-    vision: VisionConfig = field(default_factory=VisionConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)

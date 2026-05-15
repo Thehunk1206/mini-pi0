@@ -7,7 +7,6 @@ from typing import Any
 import torch
 
 from mini_pi0.config.schema import RootConfig
-from mini_pi0.models.mini_pi05 import PI05SmolVLM
 
 
 class ExponentialMovingAverage:
@@ -108,36 +107,13 @@ def build_optimizer(
 ) -> tuple[torch.optim.Optimizer, dict[str, float]]:
     """Build optimizer with optional backbone/expert LR groups.
 
-    ``lr_backbone`` targets the observation/VLM backbone. ``lr_expert`` targets
-    the action denoiser/expert. For non-VLM policies, unset values fall back to
-    the base LR to preserve the old single-LR behavior.
+    ``lr_backbone`` targets the image encoder. ``lr_expert`` targets the action
+    denoiser. Unset values fall back to the base LR.
     """
     base_lr = float(cfg.train.lr)
     weight_decay = float(cfg.train.weight_decay)
     lr_backbone_cfg = getattr(cfg.train, "lr_backbone", None)
     lr_expert_cfg = getattr(cfg.train, "lr_expert", None)
-
-    if isinstance(model, PI05SmolVLM):
-        lr_backbone = float(lr_backbone_cfg) if lr_backbone_cfg is not None else base_lr * 0.1
-        lr_expert = float(lr_expert_cfg) if lr_expert_cfg is not None else base_lr
-        backbone_params: list[torch.nn.Parameter] = []
-        expert_params: list[torch.nn.Parameter] = []
-        for name, param in model.named_parameters():
-            if name.startswith("backbone.smolvlm."):
-                backbone_params.append(param)
-            else:
-                expert_params.append(param)
-
-        param_groups: list[dict[str, Any]] = []
-        if backbone_params:
-            param_groups.append({"params": backbone_params, "lr": lr_backbone, "name": "backbone"})
-        if expert_params:
-            param_groups.append({"params": expert_params, "lr": lr_expert, "name": "expert"})
-        if not param_groups:
-            raise ValueError("No trainable parameter groups found for optimizer.")
-
-        optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
-        return optimizer, {"backbone_lr": lr_backbone, "expert_lr": lr_expert}
 
     obs_encoder = getattr(model, "obs_encoder", None)
     action_expert = getattr(model, "action_transformer", None)

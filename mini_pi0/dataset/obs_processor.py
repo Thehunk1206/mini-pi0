@@ -7,7 +7,6 @@ from collections.abc import Iterable
 
 from mini_pi0.dataset.stats import ActionStats
 from mini_pi0.utils.device import resolve_device
-from mini_pi0.vision.encoders import VisionFeatureExtractor, images_to_tensor
 
 
 class ObsProcessor:
@@ -24,9 +23,6 @@ class ObsProcessor:
         image_keys: list[str] | None,
         proprio_keys: list[str],
         device: str = "auto",
-        observation_mode: str = "image",
-        feature_key: str = "vision_feat",
-        feature_extractor: VisionFeatureExtractor | None = None,
         obs_horizon: int = 1,
         preserve_camera_dim: bool = False,
     ):
@@ -38,9 +34,6 @@ class ObsProcessor:
             image_keys: Optional ordered image observation keys for multi-camera input.
             proprio_keys: Ordered proprioception keys concatenated into one vector.
             device: Torch device string (``auto``, ``cpu``, ``cuda``, ``mps``).
-            observation_mode: ``image`` or ``precomputed``.
-            feature_key: Observation key used to read precomputed features from obs dict.
-            feature_extractor: Optional runtime encoder used when model expects features.
             obs_horizon: Number of current/past observations to feed the model.
             preserve_camera_dim: Keep cameras as an explicit tensor axis instead
                 of legacy width stitching.
@@ -55,9 +48,6 @@ class ObsProcessor:
         self.image_keys = keys
         self.image_key = keys[0]
         self.proprio_keys = proprio_keys
-        self.observation_mode = str(observation_mode).strip().lower()
-        self.feature_key = feature_key
-        self.feature_extractor = feature_extractor
         self.obs_horizon = int(max(1, obs_horizon))
         self.preserve_camera_dim = bool(preserve_camera_dim)
         self._history: deque[dict[str, np.ndarray]] = deque(maxlen=self.obs_horizon)
@@ -83,50 +73,25 @@ class ObsProcessor:
                 hist.append(obs)
             self._batch_history[int(idx)] = hist
 
-    def _encode_runtime_features(self, obs: dict[str, np.ndarray]) -> torch.Tensor:
-        """Encode one or multiple camera images with runtime feature extractor."""
-
-        if self.feature_extractor is None:
-            raise KeyError(
-                f"Observation key '{self.feature_key}' missing and no runtime feature extractor configured."
-            )
-        imgs = [np.asarray(obs[key], dtype=np.uint8) for key in self.image_keys]
-        x = images_to_tensor(imgs, device=self.device)
-        with torch.no_grad():
-            feats = self.feature_extractor(x).float()
-        if feats.ndim != 2:
-            raise ValueError(f"Runtime extractor output must be 2D [N,D], got shape {tuple(feats.shape)}")
-        if feats.shape[0] != len(self.image_keys):
-            raise ValueError(
-                f"Runtime extractor batch mismatch: expected {len(self.image_keys)} features, got {feats.shape[0]}"
-            )
-        return feats.reshape(1, -1)
-
     def _single_obs_to_arrays(self, obs: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Convert one observation into unbatched visual/proprio arrays."""
 
-        if self.observation_mode in {"precomputed", "feature", "features"}:
-            if self.feature_key in obs:
-                visual = np.asarray(obs[self.feature_key], dtype=np.float32).reshape(-1)
-            else:
-                visual = self._encode_runtime_features(obs).squeeze(0).detach().cpu().numpy().astype(np.float32)
+        imgs = [np.asarray(obs[key], dtype=np.uint8) for key in self.image_keys]
+        if len(imgs) > 1:
+            h = imgs[0].shape[0]
+            c = imgs[0].shape[2] if imgs[0].ndim >= 3 else 1
+            for idx, part in enumerate(imgs[1:], start=1):
+                part_h = part.shape[0]
+                part_c = part.shape[2] if part.ndim >= 3 else 1
+                if part_h != h or part_c != c:
+                    raise ValueError(
+                        "All image_keys must share height and channels for image fusion. "
+                        f"Got {imgs[0].shape} and {part.shape} at index {idx}."
+                    )
+        if self.preserve_camera_dim:
+            visual = np.stack(imgs, axis=0)
         else:
-            imgs = [np.asarray(obs[key], dtype=np.uint8) for key in self.image_keys]
-            if len(imgs) > 1:
-                h = imgs[0].shape[0]
-                c = imgs[0].shape[2] if imgs[0].ndim >= 3 else 1
-                for idx, part in enumerate(imgs[1:], start=1):
-                    part_h = part.shape[0]
-                    part_c = part.shape[2] if part.ndim >= 3 else 1
-                    if part_h != h or part_c != c:
-                        raise ValueError(
-                            "All image_keys must share height and channels for image fusion. "
-                            f"Got {imgs[0].shape} and {part.shape} at index {idx}."
-                        )
-            if self.preserve_camera_dim:
-                visual = np.stack(imgs, axis=0)
-            else:
-                visual = np.concatenate(imgs, axis=1)
+            visual = np.concatenate(imgs, axis=1)
 
         prop = np.concatenate(
             [np.asarray(obs[k], dtype=np.float32).reshape(-1) for k in self.proprio_keys],
