@@ -146,8 +146,6 @@ model:
   name: mini_pi0_fm
   action_dim: 7
   prop_dim: 9
-  obs_mode: image
-  vision_dim: 0
   chunk_size: 16
   cond_dim: 256
   d_model: 512
@@ -203,7 +201,6 @@ train:
   save_best_success: true
   save_best_success_min_rate: 0.0
   model_print_depth: 2
-  ckpt_dir: checkpoints
   dtype: bf16
   device: auto
   # resume_from:

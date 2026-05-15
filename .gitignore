@@ -40,3 +40,4 @@ data/
 artifacts/
 demos/
 graphify-out/
+tmp/

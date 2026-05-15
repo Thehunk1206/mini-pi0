@@ -151,20 +151,28 @@ dataset_collection:
   difficulty: balanced
 
 model:
-  name: mini_pi05
+  name: mini_pi0_fm
   action_dim: 7
   prop_dim: 9
-  obs_mode: image
-  vision_dim: 0
   chunk_size: 16
-  pretrained_model_name_or_path: HuggingFaceTB/SmolVLM-256M-Instruct
-  pretrained_variant: 256M
-  pretrained_local_files_only: false
-  # Presets map to SmolVLM-compatible action-expert MLP widths:
-  # ACTION_EXPERT_S=384, ACTION_EXPERT_M=768, ACTION_EXPERT_L=1536.
-  action_model: ACTION_EXPERT_M
-  expert_intermediate_size: null
-  dtype: bfloat16
+  cond_dim: 128
+  d_model: 384
+  nhead: 6
+  nlayers: 4
+  action_backbone: transformer
+  conditioning_mode: cross_attention
+  action_attention_causal: false
+  obs_horizon: 2
+  vision_backbone: timm
+  vision_model_name: vit_small_patch16_224
+  vision_pretrained: true
+  vision_token_grid_size: 4
+  action_cnn_kernel_size: 5
+  freeze_vision_backbone: false
+  dropout: 0.1
+  noise_beta_alpha: 1.0
+  noise_beta_beta: 1.0
+  noise_s: 0.999
 
 train:
   epochs: 100
@@ -172,7 +180,6 @@ train:
   lr: 0.0001
   lr_backbone: 0.00001
   lr_expert: 0.0001
-  freeze_backbone_steps: 0
   lr_scheduler: cosine
   scheduler_t_max: null
   scheduler_eta_min: 0.000001
@@ -200,7 +207,6 @@ train:
   save_best_success: true
   save_best_success_min_rate: 0.0
   model_print_depth: 2
-  ckpt_dir: checkpoints
   device: auto
   # resume_from: runs/maniskill3-multiobject-tray-minipi05/run1/checkpoints/best.pt
   # resume_optimizer: true
