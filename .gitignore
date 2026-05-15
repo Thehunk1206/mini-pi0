@@ -22,6 +22,12 @@ rollouts/
 *.mp4
 *.png
 *.npz
+!assets/stackcube_success_grid_3x3.mp4
+!assets/stackcube_eval_metrics.png
+!assets/peginsertion_failure_grid_hole_left_camera_3x3.mp4
+!assets/peginsertion_failure_grid_hole_right_camera_3x3.mp4
+!assets/peginsertion_contact_overlay_demo_886_h264.mp4
+!assets/peginsertion_eval_metrics.png
 
 # Local data (keep directory names, ignore contents)
 data/demos/
