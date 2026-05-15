@@ -16,8 +16,6 @@ dependencies = [
   "tqdm",
   "PyYAML",
   "h5py",
-  "robosuite",
-  "mujoco",
   "imageio",
   "imageio-ffmpeg",
   "matplotlib",
@@ -26,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 lerobot = ["lerobot", "av"]
-vision = ["timm", "transformers"]
+vision = ["timm"]
 hardware = ["opencv-python", "roboticstoolbox-python", "feetech-servo-sdk"]
 maniskill3 = ["gymnasium", "mani_skill"]
 isaaclab = []
