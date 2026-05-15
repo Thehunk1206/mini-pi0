@@ -17,7 +17,9 @@ CNN1D, and UNet1D denoisers.
 
 95.5% success over 200 eval episodes with the medium transformer + ViT policy.
 
-<video src="./assets/stackcube_success_grid_3x3.mp4" controls muted loop width="720"></video>
+[![StackCube success grid](./assets/stackcube_success_grid_3x3.gif)](./assets/stackcube_success_grid_3x3.mp4)
+
+Click the preview to open the MP4.
 
 ### PegInsertionSide Diagnostics
 
@@ -25,10 +27,11 @@ Peg insertion is the current hard task. The model reaches and contacts the
 hole, but insertion is not yet reliable. The videos below are failure grids
 from the added close hole cameras, which make alignment errors visible.
 
-<p>
-  <video src="./assets/peginsertion_failure_grid_hole_left_camera_3x3.mp4" controls muted loop width="360"></video>
-  <video src="./assets/peginsertion_failure_grid_hole_right_camera_3x3.mp4" controls muted loop width="360"></video>
-</p>
+| Left hole camera | Right hole camera |
+| --- | --- |
+| [![PegInsertion left hole camera failure grid](./assets/peginsertion_failure_grid_hole_left_camera_3x3.gif)](./assets/peginsertion_failure_grid_hole_left_camera_3x3.mp4) | [![PegInsertion right hole camera failure grid](./assets/peginsertion_failure_grid_hole_right_camera_3x3.gif)](./assets/peginsertion_failure_grid_hole_right_camera_3x3.mp4) |
+
+Click a preview to open the MP4.
 
 ## What Is In This Repo
 

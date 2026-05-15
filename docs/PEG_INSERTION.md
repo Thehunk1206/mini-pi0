@@ -116,7 +116,9 @@ signal.
 The following video overlays synchronized contact-force traces on the base
 camera for `demo_886`, which was selected because it has strong peg-box contact:
 
-<video src="../assets/peginsertion_contact_overlay_demo_886_h264.mp4" controls muted loop width="720"></video>
+[![PegInsertion contact overlay](../assets/peginsertion_contact_overlay_demo_886.gif)](../assets/peginsertion_contact_overlay_demo_886_h264.mp4)
+
+Click the preview to open the MP4.
 
 The overlay plots:
 
