@@ -1,0 +1,161 @@
+experiment:
+  name: maniskill3-peginsertion-motionplanning-transformer-vit-hist2-medium-holecam
+  seed: 0
+  runs_root: runs
+
+simulator:
+  backend: maniskill3
+  task: MiniPi0PegInsertionSide-v1
+  robot: panda_wristcam
+  controller: pd_ee_delta_pose
+  control_freq: 40
+  horizon: 1000
+  reward_shaping: true
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [base_camera, hand_camera, hole_left_camera, hole_right_camera]
+  camera_width: 224
+  camera_height: 224
+  env_kwargs:
+    obs_mode: rgbd
+    render_mode: rgb_array
+    control_mode: pd_ee_delta_pose
+    sensor_width: 224
+    sensor_height: 224
+
+task:
+  object_name: peg
+
+robot:
+  name: panda_wristcam
+  action_dim: 7
+  image_key: agentview_image
+  image_keys: [agentview_image, robot0_eye_in_hand_image, hole_left_image, hole_right_image]
+  proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+  state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+
+data:
+  format: robomimic_hdf5
+  robomimic_hdf5: data/robomimic/maniskill/peginsertionside/mp/rgbd_pd_ee_delta_pose_holecam.hdf5
+  robomimic_data_group: data
+  fallback_image_hw: [224, 224]
+  n_demos: 1000
+  chunk_size: 8
+  filter_min_episode_length: 32
+  filter_drop_nan: true
+
+model:
+  name: mini_pi0_fm
+  action_dim: 7
+  prop_dim: 9
+  chunk_size: 8
+  cond_dim: 256
+  d_model: 512
+  nhead: 8
+  nlayers: 6
+  action_backbone: transformer
+  conditioning_mode: cross_attention
+  action_attention_causal: false
+  obs_horizon: 3
+  vision_backbone: timm
+  vision_model_name: vit_small_patch16_224
+  vision_pretrained: true
+  vision_token_grid_size: 4
+  action_cnn_kernel_size: 5
+  freeze_vision_backbone: false
+  dropout: 0.1
+  noise_beta_alpha: 1.0
+  noise_beta_beta: 1.0
+  noise_s: 0.999
+
+train:
+  epochs: 250
+  batch_size: 128
+  lr: 0.0001
+  lr_backbone: 0.00001
+  lr_expert: 0.0001
+  lr_scheduler: cosine
+  scheduler_t_max: null
+  scheduler_eta_min: 0.000001
+  weight_decay: 0.0001
+  num_workers: 32
+  persistent_workers: true
+  save_best: true
+  save_best_min_delta: 0.0001
+  grad_clip_norm: 1.0
+  val_ratio: 0.0
+  ema_decay: 0.99
+  checkpoint_use_ema: true
+  val_use_ema: false
+  image_aug_enable: false
+  image_aug_crop_scale: 0.92
+  image_aug_brightness: 0.15
+  image_aug_contrast: 0.15
+  image_aug_saturation: 0.12
+  action_noise_std: 0.0
+  action_noise_clip: 0.0
+  action_smoothness_weight: 0.005
+  action_jerk_weight: 0.001
+  sim_eval_every_epochs: 20
+  sim_eval_n_episodes: 50
+  sim_eval_max_steps: 1000
+  sim_eval_record_grid: false
+  save_best_success: true
+  save_best_success_min_rate: 0.0
+  model_print_depth: 2
+  dtype: bf16
+  device: auto
+
+eval:
+  checkpoint: checkpoints/best.pt
+  weight_source: model
+  action_stats_path: artifacts/action_stats.json
+  dtype: bf16
+  n_episodes: 50
+  execute_steps: 4
+  n_flow_steps: 6
+  flow_solver: euler
+  chunk_overlap_blend: 0.0
+  max_steps: 1000
+  strict_parity: true
+  action_clip: true
+  action_smoothing_alpha: 0.0
+  binary_gripper: true
+  binary_gripper_index: 6
+  binary_gripper_threshold: 0.0
+  binary_gripper_low_value: -1.0
+  binary_gripper_high_value: 1.0
+  disable_domain_randomization: true
+  vectorized: false
+  num_envs: 1
+  record: false
+  record_grid: false
+  grid_cameras: [hole_left_camera, hole_right_camera]
+  grid_size: 5
+  grid_fps: 20
+  grid_width: 256
+  grid_height: 256
+  verbose: true
+  log_every_episodes: 1
+  device: auto
+
+deploy:
+  mode: sim
+  checkpoint: checkpoints/best.pt
+  action_stats_path: artifacts/action_stats.json
+  execute_steps: 2
+  n_flow_steps: 6
+  flow_solver: euler
+  chunk_overlap_blend: 0.0
+  max_steps: 300
+  strict_parity: true
+  action_clip: true
+  action_smoothing_alpha: 0.0
+  binary_gripper: true
+  binary_gripper_index: 6
+  binary_gripper_threshold: 0.0
+  binary_gripper_low_value: -1.0
+  binary_gripper_high_value: 1.0
+  record_path: null
+  device: auto

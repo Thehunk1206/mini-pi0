@@ -9,9 +9,11 @@ import torch.nn.functional as F
 
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.sim.base import SimulatorAdapter, StepOutput
+from mini_pi0.sim.contact_features import collect_contact_features
 
 # Register custom env on import.
 import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
+import mini_pi0.sim.maniskill3_peginsertion_env  # noqa: F401
 
 
 class ManiSkill3Adapter(SimulatorAdapter):
@@ -231,6 +233,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
             "observation.state.place_targets": place_targets_np,
             "observation.state.task_progress": np.array([frac], dtype=np.float32),
         }
+        default_state.update(self._contact_state())
 
         for key in self._state_keys:
             out[key] = np.asarray(default_state.get(key, np.zeros((1,), dtype=np.float32)), dtype=np.float32)
@@ -246,6 +249,34 @@ class ManiSkill3Adapter(SimulatorAdapter):
             out[key] = np.asarray(default_state[key], dtype=np.float32)
 
         return out
+
+    def _contact_state(self) -> dict[str, np.ndarray]:
+        """Return live compact contact features for configured proprio keys."""
+
+        if not any(self._requires_contact_key(key) for key in self._state_keys):
+            return {}
+        try:
+            return collect_contact_features(self.unwrapped)
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _requires_contact_key(key: str) -> bool:
+        """Return whether a state key is produced by contact feature extraction."""
+
+        return (
+            key.startswith("pair_")
+            or key.endswith("_force")
+            or key.endswith("_force_norm")
+            or key.endswith("_contact")
+            or key.endswith("_contact_count")
+            or key.startswith("robot_qf")
+            or key.startswith("robot_arm_qf")
+            or key.startswith("robot_gripper_qf")
+            or key.startswith("robot_passive_qf")
+            or key.startswith("robot_arm_passive_qf")
+            or key.startswith("robot_gripper_passive_qf")
+        )
 
     def _normalize_info(self, info: dict[str, Any]) -> dict[str, Any]:
         out: dict[str, Any] = {}
