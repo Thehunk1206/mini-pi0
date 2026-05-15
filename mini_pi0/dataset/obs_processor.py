@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from collections import deque
+from collections.abc import Iterable
 
 from mini_pi0.dataset.stats import ActionStats
 from mini_pi0.utils.device import resolve_device
@@ -25,6 +27,8 @@ class ObsProcessor:
         observation_mode: str = "image",
         feature_key: str = "vision_feat",
         feature_extractor: VisionFeatureExtractor | None = None,
+        obs_horizon: int = 1,
+        preserve_camera_dim: bool = False,
     ):
         """Initialize observation processor and action normalization tensors.
 
@@ -37,6 +41,9 @@ class ObsProcessor:
             observation_mode: ``image`` or ``precomputed``.
             feature_key: Observation key used to read precomputed features from obs dict.
             feature_extractor: Optional runtime encoder used when model expects features.
+            obs_horizon: Number of current/past observations to feed the model.
+            preserve_camera_dim: Keep cameras as an explicit tensor axis instead
+                of legacy width stitching.
         """
 
         self.device = resolve_device(device)
@@ -51,9 +58,30 @@ class ObsProcessor:
         self.observation_mode = str(observation_mode).strip().lower()
         self.feature_key = feature_key
         self.feature_extractor = feature_extractor
+        self.obs_horizon = int(max(1, obs_horizon))
+        self.preserve_camera_dim = bool(preserve_camera_dim)
+        self._history: deque[dict[str, np.ndarray]] = deque(maxlen=self.obs_horizon)
+        self._batch_history: dict[int, deque[dict[str, np.ndarray]]] = {}
         stats = ActionStats.load(action_stats_path)
         self.action_mean = torch.tensor(stats.mean, dtype=torch.float32, device=self.device)
         self.action_std = torch.tensor(stats.std, dtype=torch.float32, device=self.device)
+
+    def reset_history(self, obs: dict[str, np.ndarray]) -> None:
+        """Reset sequential rollout history using repeat padding."""
+
+        self._history.clear()
+        for _ in range(self.obs_horizon):
+            self._history.append(obs)
+
+    def reset_batch_history(self, obs_batch: list[dict[str, np.ndarray]]) -> None:
+        """Reset vectorized rollout histories using repeat padding."""
+
+        self._batch_history = {}
+        for idx, obs in enumerate(obs_batch):
+            hist: deque[dict[str, np.ndarray]] = deque(maxlen=self.obs_horizon)
+            for _ in range(self.obs_horizon):
+                hist.append(obs)
+            self._batch_history[int(idx)] = hist
 
     def _encode_runtime_features(self, obs: dict[str, np.ndarray]) -> torch.Tensor:
         """Encode one or multiple camera images with runtime feature extractor."""
@@ -74,23 +102,14 @@ class ObsProcessor:
             )
         return feats.reshape(1, -1)
 
-    def obs_to_tensors(self, obs: dict[str, np.ndarray]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Convert one raw observation dict to batched model input tensors.
-
-        Args:
-            obs: Canonical observation dictionary.
-
-        Returns:
-            Tuple ``(img, prop)`` where:
-            - ``img`` is ``[1, 3, H, W]`` float tensor in ``[0, 1]``
-            - ``prop`` is ``[1, P]`` float tensor of concatenated proprio values.
-        """
+    def _single_obs_to_arrays(self, obs: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+        """Convert one observation into unbatched visual/proprio arrays."""
 
         if self.observation_mode in {"precomputed", "feature", "features"}:
             if self.feature_key in obs:
-                img = torch.from_numpy(np.asarray(obs[self.feature_key], dtype=np.float32)).float().unsqueeze(0)
+                visual = np.asarray(obs[self.feature_key], dtype=np.float32).reshape(-1)
             else:
-                img = self._encode_runtime_features(obs)
+                visual = self._encode_runtime_features(obs).squeeze(0).detach().cpu().numpy().astype(np.float32)
         else:
             imgs = [np.asarray(obs[key], dtype=np.uint8) for key in self.image_keys]
             if len(imgs) > 1:
@@ -104,17 +123,101 @@ class ObsProcessor:
                             "All image_keys must share height and channels for image fusion. "
                             f"Got {imgs[0].shape} and {part.shape} at index {idx}."
                         )
-            merged = np.concatenate(imgs, axis=1)
-            img = torch.from_numpy(merged).float()
-            img = img.permute(2, 0, 1).unsqueeze(0) / 255.0
+            if self.preserve_camera_dim:
+                visual = np.stack(imgs, axis=0)
+            else:
+                visual = np.concatenate(imgs, axis=1)
 
         prop = np.concatenate(
             [np.asarray(obs[k], dtype=np.float32).reshape(-1) for k in self.proprio_keys],
             axis=0,
         )
-        prop = torch.from_numpy(prop).float().unsqueeze(0)
+        return visual, prop
 
+    def _history_to_tensors(self, history: Iterable[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert an observation history into batched model tensors."""
+
+        visual_hist: list[np.ndarray] = []
+        prop_hist: list[np.ndarray] = []
+        for obs in history:
+            visual, prop = self._single_obs_to_arrays(obs)
+            visual_hist.append(visual)
+            prop_hist.append(prop)
+
+        if self.obs_horizon == 1:
+            visual_arr = visual_hist[-1]
+            prop_arr = prop_hist[-1]
+        else:
+            visual_arr = np.stack(visual_hist, axis=0)
+            prop_arr = np.stack(prop_hist, axis=0).astype(np.float32)
+
+        img = torch.from_numpy(np.asarray(visual_arr))
+        if img.ndim == 3:
+            img = img.float().permute(2, 0, 1).unsqueeze(0) / 255.0
+        elif img.ndim == 4 and img.shape[-1] in {1, 3, 4}:
+            img = img.float().permute(0, 3, 1, 2).unsqueeze(0) / 255.0
+        elif img.ndim == 5:
+            img = img.float().permute(0, 1, 4, 2, 3).unsqueeze(0) / 255.0
+        else:
+            img = img.float().reshape(1, *img.shape)
+
+        prop = torch.from_numpy(np.asarray(prop_arr, dtype=np.float32)).float().unsqueeze(0)
         return img.to(self.device), prop.to(self.device)
+
+    def obs_to_tensors(self, obs: dict[str, np.ndarray]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert one raw observation dict to batched model input tensors.
+
+        Args:
+            obs: Canonical observation dictionary.
+
+        Returns:
+            Tuple ``(img, prop)`` where:
+            - ``img`` is ``[1, 3, H, W]`` float tensor in ``[0, 1]``
+            - ``prop`` is ``[1, P]`` float tensor of concatenated proprio values.
+        """
+
+        if not self._history:
+            self.reset_history(obs)
+        else:
+            self._history.append(obs)
+        return self._history_to_tensors(self._history)
+
+    def obs_batch_to_tensors(
+        self,
+        obs_batch: list[dict[str, np.ndarray]],
+        env_indices: list[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert a batch of canonical observations to model input tensors.
+
+        Args:
+            obs_batch: List of canonical observation dictionaries, one per
+                simulator sub-environment.
+
+        Returns:
+            Tuple ``(img, prop)`` where the leading dimension is batch size.
+        """
+
+        if not obs_batch:
+            raise ValueError("obs_batch_to_tensors requires at least one observation.")
+        imgs: list[torch.Tensor] = []
+        props: list[torch.Tensor] = []
+        if env_indices is None:
+            env_indices = list(range(len(obs_batch)))
+        if len(env_indices) != len(obs_batch):
+            raise ValueError("env_indices length must match obs_batch length.")
+        for env_idx, obs in zip(env_indices, obs_batch, strict=True):
+            hist = self._batch_history.get(int(env_idx))
+            if hist is None:
+                hist = deque(maxlen=self.obs_horizon)
+                for _ in range(self.obs_horizon):
+                    hist.append(obs)
+                self._batch_history[int(env_idx)] = hist
+            else:
+                hist.append(obs)
+            img, prop = self._history_to_tensors(hist)
+            imgs.append(img)
+            props.append(prop)
+        return torch.cat(imgs, dim=0), torch.cat(props, dim=0)
 
     def denormalize(self, actions: torch.Tensor) -> torch.Tensor:
         """Map normalized model actions back to environment action scale.

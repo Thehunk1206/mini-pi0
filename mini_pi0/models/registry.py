@@ -12,6 +12,12 @@ from mini_pi0.models.crossflow import CrossFlowActionModel
 from mini_pi0.models.fm import MiniPi0FlowMatching
 from mini_pi0.models.mini_pi05 import MiniPI05Config, PI05SmolVLM, load_minipi05_from_smolvlm
 
+ACTION_EXPERT_PRESETS: dict[str, int] = {
+    "ACTION_EXPERT_S": 384,
+    "ACTION_EXPERT_M": 768,
+    "ACTION_EXPERT_L": 1536,
+}
+
 _MODEL_REGISTRY = {
     "mini_pi0_fm": MiniPi0FlowMatching,
     "mini_pi0_crossflow": CrossFlowActionModel,
@@ -27,6 +33,43 @@ def list_models() -> list[str]:
     """
 
     return sorted(_MODEL_REGISTRY.keys())
+
+
+def resolve_action_expert_intermediate_size(
+    action_model: str | None,
+    expert_intermediate_size: int | None,
+) -> int | None:
+    """Resolve MiniPI05 expert preset and explicit size into one MLP width.
+
+    Args:
+        action_model: Optional preset name (`ACTION_EXPERT_S/M/L`).
+        expert_intermediate_size: Optional explicit MLP width override.
+
+    Returns:
+        Resolved expert MLP width, or ``None`` to use the model default.
+
+    Raises:
+        ValueError: If the preset is unknown or explicit size conflicts with it.
+    """
+
+    preset_name = str(action_model or "").strip().upper()
+    preset_size = None
+    if preset_name:
+        if preset_name not in ACTION_EXPERT_PRESETS:
+            options = ", ".join(sorted(ACTION_EXPERT_PRESETS))
+            raise ValueError(f"Unknown model.action_model {action_model!r}. Options: {options}")
+        preset_size = ACTION_EXPERT_PRESETS[preset_name]
+
+    explicit_size = int(expert_intermediate_size) if expert_intermediate_size is not None else None
+    if explicit_size is not None and explicit_size <= 0:
+        raise ValueError("model.expert_intermediate_size must be positive when set.")
+    if preset_size is not None and explicit_size is not None and explicit_size != preset_size:
+        raise ValueError(
+            "model.action_model and model.expert_intermediate_size disagree: "
+            f"{preset_name}={preset_size}, explicit={explicit_size}. "
+            "Use one of them, or set matching values."
+        )
+    return explicit_size if explicit_size is not None else preset_size
 
 
 def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
@@ -55,7 +98,17 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
         num_cameras = 1
         if isinstance(model_cfg, RootConfig):
             num_cameras = max(1, len(effective_image_keys(model_cfg.robot)))
-        dtype = "bfloat16" if torch.cuda.is_available() else "float32"
+        requested_dtype = getattr(cfg, "dtype", None)
+        dtype = str(requested_dtype).strip().lower() if requested_dtype else ("bfloat16" if torch.cuda.is_available() else "float32")
+        if dtype not in {"float32", "bfloat16"}:
+            raise ValueError(f"Unsupported mini_pi05 dtype {dtype!r}; expected float32 or bfloat16")
+        expert_overrides: dict[str, int] | None = None
+        expert_intermediate_size = resolve_action_expert_intermediate_size(
+            action_model=getattr(cfg, "action_model", None),
+            expert_intermediate_size=getattr(cfg, "expert_intermediate_size", None),
+        )
+        if expert_intermediate_size is not None:
+            expert_overrides = {"intermediate_size": int(expert_intermediate_size)}
         pi05_cfg = MiniPI05Config(
             action_dim=int(cfg.action_dim),
             action_horizon=int(cfg.chunk_size),
@@ -63,6 +116,8 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
             state_dim=int(cfg.prop_dim),
             dtype=dtype,
         )
+        if expert_overrides is not None:
+            pi05_cfg.expert.intermediate_size = int(expert_overrides["intermediate_size"])
         pretrained_path = getattr(cfg, "pretrained_model_name_or_path", None)
         if pretrained_path:
             variant = str(getattr(cfg, "pretrained_variant", "256M"))
@@ -75,6 +130,7 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
                 num_cameras=int(num_cameras),
                 state_dim=int(cfg.prop_dim),
                 dtype=dtype,
+                expert_overrides=expert_overrides,
                 device="cpu",
                 local_files_only=local_only,
             )
@@ -102,6 +158,16 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
         "use_context_layernorm": getattr(cfg, "use_context_layernorm", True),
         "vision_token_grid_size": getattr(cfg, "vision_token_grid_size", 4),
         "use_dit_adaln": getattr(cfg, "use_dit_adaln", True),
+        "action_backbone": getattr(cfg, "action_backbone", "transformer"),
+        "conditioning_mode": getattr(cfg, "conditioning_mode", "cross_attention"),
+        "action_attention_causal": getattr(cfg, "action_attention_causal", False),
+        "obs_horizon": getattr(cfg, "obs_horizon", 1),
+        "vision_backbone": getattr(cfg, "vision_backbone", "resnet18"),
+        "vision_model_name": getattr(cfg, "vision_model_name", None),
+        "vision_pretrained": getattr(cfg, "vision_pretrained", True),
+        "action_cnn_kernel_size": getattr(cfg, "action_cnn_kernel_size", 5),
+        "freeze_vision_backbone": getattr(cfg, "freeze_vision_backbone", True),
+        "dropout": getattr(cfg, "dropout", 0.1),
     }
     sig = inspect.signature(cls.__init__)
     for k, v in optional_kwargs.items():
@@ -180,6 +246,16 @@ def build_checkpoint_payload(
             "d_model": cfg.model.d_model,
             "nhead": cfg.model.nhead,
             "nlayers": cfg.model.nlayers,
+            "action_backbone": getattr(cfg.model, "action_backbone", "transformer"),
+            "conditioning_mode": getattr(cfg.model, "conditioning_mode", "cross_attention"),
+            "action_attention_causal": getattr(cfg.model, "action_attention_causal", False),
+            "obs_horizon": getattr(cfg.model, "obs_horizon", 1),
+            "vision_backbone": getattr(cfg.model, "vision_backbone", "resnet18"),
+            "vision_model_name": getattr(cfg.model, "vision_model_name", None),
+            "vision_pretrained": getattr(cfg.model, "vision_pretrained", True),
+            "action_cnn_kernel_size": getattr(cfg.model, "action_cnn_kernel_size", 5),
+            "freeze_vision_backbone": getattr(cfg.model, "freeze_vision_backbone", True),
+            "dropout": getattr(cfg.model, "dropout", 0.1),
             "num_timestep_buckets": getattr(cfg.model, "num_timestep_buckets", 1000),
             "noise_beta_alpha": getattr(cfg.model, "noise_beta_alpha", 1.5),
             "noise_beta_beta": getattr(cfg.model, "noise_beta_beta", 1.0),
@@ -193,6 +269,9 @@ def build_checkpoint_payload(
             "pretrained_model_name_or_path": getattr(cfg.model, "pretrained_model_name_or_path", None),
             "pretrained_variant": getattr(cfg.model, "pretrained_variant", "256M"),
             "pretrained_local_files_only": getattr(cfg.model, "pretrained_local_files_only", False),
+            "action_model": getattr(cfg.model, "action_model", None),
+            "expert_intermediate_size": getattr(cfg.model, "expert_intermediate_size", None),
+            "dtype": getattr(cfg.model, "dtype", None),
         },
         "sim_backend": cfg.simulator.backend,
         "sim_config": {

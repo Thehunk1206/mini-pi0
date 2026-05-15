@@ -39,6 +39,86 @@ class ParityTests(unittest.TestCase):
         self.assertIn("eval.n_episodes", diff)
         self.assertIn("train.ema_decay", diff)
 
+    def test_parity_report_detects_minipi05_expert_size_mismatch(self):
+        cfg = load_config(
+            overrides=[
+                "model.name=mini_pi05",
+                "model.expert_intermediate_size=768",
+            ]
+        )
+        ckpt = {
+            "model_config": {
+                "action_dim": 7,
+                "prop_dim": 9,
+                "obs_mode": "image",
+                "chunk_size": 16,
+                "expert_intermediate_size": 1536,
+            },
+        }
+
+        report = build_checkpoint_parity_report(cfg, ckpt)
+
+        self.assertFalse(report["ok"])
+        keys = {item["key"] for item in report["issues"]}
+        self.assertIn("model.expert_intermediate_size", keys)
+
+    def test_parity_report_detects_minipi05_action_model_mismatch(self):
+        cfg = load_config(
+            overrides=[
+                "model.name=mini_pi05",
+                "model.action_model=ACTION_EXPERT_S",
+            ]
+        )
+        ckpt = {
+            "model_config": {
+                "action_dim": 7,
+                "prop_dim": 9,
+                "obs_mode": "image",
+                "chunk_size": 16,
+                "action_model": "ACTION_EXPERT_M",
+            },
+        }
+
+        report = build_checkpoint_parity_report(cfg, ckpt)
+
+        self.assertFalse(report["ok"])
+        keys = {item["key"] for item in report["issues"]}
+        self.assertIn("model.action_model", keys)
+
+    def test_parity_report_ignores_runtime_dtype_mismatch(self):
+        cfg = load_config(overrides=["model.dtype=bfloat16"])
+        ckpt = {
+            "model_config": {
+                "action_dim": 7,
+                "prop_dim": 9,
+                "obs_mode": "image",
+                "chunk_size": 16,
+                "dtype": None,
+            },
+        }
+
+        report = build_checkpoint_parity_report(cfg, ckpt)
+
+        keys = {item["key"] for item in report["issues"]}
+        self.assertNotIn("model.dtype", keys)
+
+    def test_parity_report_treats_missing_fm_conditioning_as_legacy_compatible(self):
+        cfg = load_config(overrides=["model.conditioning_mode=cross_attention", "model.obs_horizon=2"])
+        ckpt = {
+            "model_config": {
+                "action_dim": 7,
+                "prop_dim": 9,
+                "obs_mode": "image",
+                "chunk_size": 16,
+            },
+        }
+
+        report = build_checkpoint_parity_report(cfg, ckpt)
+
+        keys = {item["key"] for item in report["issues"]}
+        self.assertNotIn("model.conditioning_mode", keys)
+        self.assertNotIn("model.obs_horizon", keys)
+
 
 if __name__ == "__main__":
     unittest.main()

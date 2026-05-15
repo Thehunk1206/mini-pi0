@@ -509,8 +509,10 @@ class SmolVLMWithExpertModel(nn.Module):
         """
         feats, pad_masks = [], []
         for img, mask in zip(images, image_masks):
-            # img: [B, C, H, W]  →  pixel_values: [B, 1, C, H, W]  (1 image per sample)
-            pv = img.unsqueeze(1)
+            # img: [B, C, H, W] -> pixel_values: [B, 1, C, H, W].
+            # SmolVLM's image processor rescales uint8 to [0, 1] and then
+            # normalizes with mean/std 0.5, so the vision tower expects [-1, 1].
+            pv = ((img.to(torch.float32) - 0.5) / 0.5).unsqueeze(1)
             out = self.smolvlm.model.get_image_features(pv)
             feat = out.pooler_output  # [B, num_patches, vlm_hidden]
             B, P, _ = feat.shape

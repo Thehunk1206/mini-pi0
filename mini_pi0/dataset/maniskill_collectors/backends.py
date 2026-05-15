@@ -264,6 +264,7 @@ def collect_vectorized_scripted_episodes(
 
     env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
     env_kwargs.pop("scripted_control_mode", None)
+    env_kwargs.pop("render_mode", None)
     task_id = str(ep_cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
     control_mode = _resolve_scripted_control_mode(ep_cfg)
     env = gym.make(
@@ -276,6 +277,7 @@ def collect_vectorized_scripted_episodes(
         render_backend=env_kwargs.pop("render_backend", "gpu"),
         sim_backend=env_kwargs.pop("sim_backend", "auto"),
         robot_uids=env_kwargs.pop("robot_uids", str(ep_cfg.simulator.robot).lower()),
+        max_episode_steps=env_kwargs.pop("max_episode_steps", int(ep_cfg.simulator.horizon)),
         **env_kwargs,
     )
     raw_obs, _ = env.reset(seed=int(ep_cfg.experiment.seed))
@@ -422,6 +424,7 @@ def collect_single_mplib_episode(
     env_kwargs = dict(ep_cfg.simulator.env_kwargs or {})
     env_kwargs["control_mode"] = "pd_joint_pos"
     env_kwargs["obs_mode"] = env_kwargs.get("obs_mode", "rgbd")
+    env_kwargs.pop("render_mode", None)
     env = gym.make(
         str(ep_cfg.simulator.task or "MiniPi0MultiObjectTray-v1"),
         obs_mode=env_kwargs.pop("obs_mode", "rgbd"),
@@ -431,6 +434,7 @@ def collect_single_mplib_episode(
         render_backend=env_kwargs.pop("render_backend", "cpu"),
         sim_backend=env_kwargs.pop("sim_backend", "cpu"),
         robot_uids=env_kwargs.pop("robot_uids", "panda"),
+        max_episode_steps=env_kwargs.pop("max_episode_steps", int(ep_cfg.simulator.horizon)),
         **env_kwargs,
     )
     raw_obs, _ = env.reset(seed=int(ep_cfg.experiment.seed))

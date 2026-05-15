@@ -369,12 +369,13 @@ robot:
     - robot0_eef_pos
     - robot0_eef_quat
     - robot0_gripper_qpos
-    - observation.state.object
-    - observation.state.place_targets
 ```
 
-The dataset also stores additional canonical fields when present, including
-object masks, placed masks, and task progress.
+The dataset also stores privileged simulator/debug fields when present,
+including object positions, placement targets, object masks, placed masks, and
+task progress. Do not include privileged object positions or placement targets
+in `robot.state_keys` for vision-based policy training unless you explicitly
+want a state-oracle policy.
 
 ## Domain Randomization
 

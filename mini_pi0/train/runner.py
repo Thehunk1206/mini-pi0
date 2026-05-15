@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Main training entrypoint with simple research-style structure."""
 
+import copy
 import json
 import time
 from pathlib import Path
@@ -40,12 +41,98 @@ from mini_pi0.train.optim import (
     snapshot_model_state,
 )
 from mini_pi0.utils.device import resolve_device
+from mini_pi0.utils.precision import autocast_context, resolve_runtime_dtype
 from mini_pi0.utils.runs import append_jsonl, create_run_dir
 
 try:
     from tqdm.auto import tqdm
 except Exception:
     tqdm = None
+
+
+def _model_forward_context(cfg: RootConfig, device: torch.device):
+    """Create the configured training autocast context."""
+
+    dtype = resolve_runtime_dtype(runtime_dtype=cfg.train.dtype, model_dtype=cfg.model.dtype)
+    return autocast_context(device=device, dtype=dtype)
+
+
+def _compute_policy_loss(model: torch.nn.Module, cfg: RootConfig, img: torch.Tensor, prop: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    """Compute model loss with optional FM trajectory regularizers."""
+
+    smooth = float(max(0.0, getattr(cfg.train, "action_smoothness_weight", 0.0)))
+    jerk = float(max(0.0, getattr(cfg.train, "action_jerk_weight", 0.0)))
+    compute_loss = getattr(model, "compute_loss", None)
+    if callable(compute_loss) and (smooth > 0.0 or jerk > 0.0):
+        return compute_loss(
+            img,
+            prop,
+            actions,
+            smoothness_weight=smooth,
+            jerk_weight=jerk,
+        )
+    return model(img, prop, actions)
+
+
+def _build_train_checkpoint_payload(
+    *,
+    model: torch.nn.Module,
+    cfg: RootConfig,
+    epoch: int,
+    train_avg: float,
+    val_avg: float | None,
+    best_metric: float,
+    best_metric_name: str,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any | None,
+    ema: ExponentialMovingAverage | None,
+) -> dict[str, Any]:
+    """Build a full training checkpoint with optimizer, scheduler, and EMA."""
+    payload = build_checkpoint_payload(
+        model=model,
+        cfg=cfg,
+        epoch=epoch,
+        loss=train_avg,
+        extra={
+            "best_metric": float(best_metric),
+            "best_metric_name": best_metric_name,
+            "best_loss": float(best_metric),
+            "train_loss": float(train_avg),
+            "val_loss": (float(val_avg) if val_avg is not None else None),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "ema": (ema.state_dict() if ema is not None else None),
+        },
+    )
+    payload["model_weight_source"] = "raw"
+    if ema is not None and bool(getattr(cfg.train, "checkpoint_use_ema", True)):
+        payload["model_raw"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+        payload["model"] = {k: v.detach().cpu() for k, v in ema.shadow.items()}
+        payload["model_weight_source"] = "ema"
+    return payload
+
+
+def _run_training_sim_eval(
+    *,
+    cfg: RootConfig,
+    run_dir: Path,
+    checkpoint_path: Path,
+    epoch: int,
+) -> dict[str, Any]:
+    """Evaluate a training checkpoint with simulator rollouts."""
+    from mini_pi0.eval.runner import run_eval
+
+    eval_cfg = copy.deepcopy(cfg)
+    eval_cfg.eval.checkpoint = str(checkpoint_path)
+    eval_cfg.eval.action_stats_path = str(run_dir / "artifacts" / "action_stats.json")
+    eval_cfg.eval.run_dir = str(run_dir / "sim_eval" / f"epoch_{epoch + 1:03d}")
+    eval_cfg.eval.n_episodes = int(max(1, getattr(cfg.train, "sim_eval_n_episodes", 10)))
+    sim_eval_max_steps = getattr(cfg.train, "sim_eval_max_steps", None)
+    eval_cfg.eval.max_steps = int(sim_eval_max_steps) if sim_eval_max_steps is not None else cfg.eval.max_steps
+    eval_cfg.eval.record_grid = bool(getattr(cfg.train, "sim_eval_record_grid", False))
+    eval_cfg.eval.record = False
+    eval_cfg.eval.device = cfg.train.device
+    return run_eval(eval_cfg)
 
 
 def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[EpisodeData], dict[str, Any], Any, Any | None, Path]:
@@ -128,6 +215,8 @@ def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[
         proprio_keys=state_keys,
         action_stats=stats,
         observation_key=observation_key,
+        obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
+        preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
     train_dataset, val_dataset = split_train_val(
         dataset,
@@ -291,7 +380,17 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     print(
         "EMA                : "
         f"enabled={ema is not None}, decay={float(getattr(cfg.train, 'ema_decay', 0.0)):.6f}, "
-        f"checkpoint_use_ema={bool(getattr(cfg.train, 'checkpoint_use_ema', True))}"
+        f"checkpoint_use_ema={bool(getattr(cfg.train, 'checkpoint_use_ema', True))}, "
+        f"val_use_ema={bool(getattr(cfg.train, 'val_use_ema', False))}"
+    )
+    sim_eval_every = int(max(0, getattr(cfg.train, "sim_eval_every_epochs", 0)))
+    print(
+        "Sim eval           : "
+        f"enabled={sim_eval_every > 0}, every_epochs={sim_eval_every}, "
+        f"n_episodes={int(getattr(cfg.train, 'sim_eval_n_episodes', 10))}, "
+        f"max_steps={getattr(cfg.train, 'sim_eval_max_steps', None)}, "
+        f"record_grid={bool(getattr(cfg.train, 'sim_eval_record_grid', False))}, "
+        f"save_best_success={bool(getattr(cfg.train, 'save_best_success', True))}"
     )
     print(f"Checkpointing      : save_best={cfg.train.save_best}, min_delta={cfg.train.save_best_min_delta}")
     print(f"Resume             : checkpoint={resume_from}, restore_opt={bool(getattr(cfg.train, 'resume_optimizer', True))}")
@@ -313,7 +412,9 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         )
 
     global_step = 0
-    use_ema_for_eval = bool(getattr(cfg.train, "checkpoint_use_ema", True))
+    use_ema_for_val = bool(getattr(cfg.train, "val_use_ema", False))
+    best_success_rate = float("-inf")
+    best_success_epoch: int | None = None
 
     for epoch in range(start_epoch, epochs):
         model.train()
@@ -350,7 +451,8 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             img = _augment_image_batch(img, cfg)
             actions = _augment_actions(actions, cfg)
 
-            loss = model(img, prop, actions)
+            with _model_forward_context(cfg, device):
+                loss = _compute_policy_loss(model, cfg, img, prop, actions)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if float(cfg.train.grad_clip_norm) > 0:
@@ -377,7 +479,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         if val_loader is not None:
             model.eval()
             backup_state = None
-            if ema is not None and use_ema_for_eval:
+            if ema is not None and use_ema_for_val:
                 backup_state = snapshot_model_state(model)
                 ema.copy_to(model)
             val_total = 0.0
@@ -387,7 +489,8 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
                     img = img.to(device)
                     prop = prop.to(device)
                     actions = actions.to(device)
-                    val_total += float(model(img, prop, actions).item())
+                    with _model_forward_context(cfg, device):
+                        val_total += float(_compute_policy_loss(model, cfg, img, prop, actions).item())
                     val_steps += 1
             val_avg = val_total / max(1, val_steps)
             if backup_state is not None:
@@ -398,35 +501,81 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         status = "no_improve"
         if bool(cfg.train.save_best) and improved:
             t_save0 = time.perf_counter()
-            backup_state = None
-            if ema is not None and bool(getattr(cfg.train, "checkpoint_use_ema", True)):
-                backup_state = snapshot_model_state(model)
-                ema.copy_to(model)
-            payload = build_checkpoint_payload(
+            payload = _build_train_checkpoint_payload(
                 model=model,
                 cfg=cfg,
                 epoch=epoch,
-                loss=train_avg,
-                extra={
-                    "best_metric": float(selected_metric),
-                    "best_metric_name": best_metric_name,
-                    "best_loss": float(selected_metric),
-                    "train_loss": float(train_avg),
-                    "val_loss": (float(val_avg) if val_avg is not None else None),
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict() if scheduler is not None else None,
-                    "ema": (ema.state_dict() if ema is not None else None),
-                },
+                train_avg=train_avg,
+                val_avg=val_avg,
+                best_metric=selected_metric,
+                best_metric_name=best_metric_name,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                ema=ema,
             )
             save_checkpoint(run_ckpt_dir / "best.pt", payload)
-            if backup_state is not None:
-                restore_model_state(model, backup_state)
             save_s = time.perf_counter() - t_save0
             best_metric = selected_metric
             status = "saved best.pt"
         elif selected_metric < best_metric:
             best_metric = selected_metric
             status = "improved(no-save:below-min-delta)"
+
+        sim_eval_summary: dict[str, Any] | None = None
+        if sim_eval_every > 0 and (epoch + 1) % sim_eval_every == 0:
+            t_eval0 = time.perf_counter()
+            latest_payload = _build_train_checkpoint_payload(
+                model=model,
+                cfg=cfg,
+                epoch=epoch,
+                train_avg=train_avg,
+                val_avg=val_avg,
+                best_metric=best_metric,
+                best_metric_name=best_metric_name,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                ema=ema,
+            )
+            latest_path = run_ckpt_dir / "latest.pt"
+            save_checkpoint(latest_path, latest_payload)
+
+            eval_result = _run_training_sim_eval(
+                cfg=cfg,
+                run_dir=run_dir,
+                checkpoint_path=latest_path,
+                epoch=epoch,
+            )
+            sim_eval_summary = dict(eval_result.get("summary", {}))
+            sim_success = float(sim_eval_summary.get("success_rate", 0.0))
+            sim_eval_summary.update(
+                {
+                    "epoch": int(epoch + 1),
+                    "checkpoint": str(latest_path),
+                    "eval_run_dir": str(eval_result.get("run_dir", "")),
+                    "elapsed_s": float(time.perf_counter() - t_eval0),
+                }
+            )
+            append_jsonl(run_dir / "metrics" / "sim_eval_metrics.jsonl", sim_eval_summary)
+            min_success_to_save = float(getattr(cfg.train, "save_best_success_min_rate", 0.0))
+            if (
+                bool(getattr(cfg.train, "save_best_success", True))
+                and sim_success > best_success_rate
+                and sim_success > min_success_to_save
+            ):
+                best_success_rate = sim_success
+                best_success_epoch = int(epoch + 1)
+                save_checkpoint(
+                    run_ckpt_dir / "best_success.pt",
+                    {
+                        **latest_payload,
+                        "best_success_rate": float(best_success_rate),
+                        "best_success_epoch": int(best_success_epoch),
+                        "sim_eval_summary": sim_eval_summary,
+                    },
+                )
+                status = f"{status}; saved best_success.pt"
+            else:
+                status = f"{status}; sim_eval_success={sim_success:.3f}"
 
         dt = time.perf_counter() - epoch_start
         other_s = max(0.0, dt - data_wait_s - compute_s - save_s)
@@ -449,6 +598,12 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             "iter_setup_s": float(iter_setup_s),
             "status": status,
         }
+        if sim_eval_summary is not None:
+            metrics_row["sim_success_rate"] = float(sim_eval_summary.get("success_rate", 0.0))
+            metrics_row["sim_episode_len_mean"] = float(sim_eval_summary.get("episode_len_mean", 0.0))
+            metrics_row["sim_action_clip_fraction_mean"] = float(
+                sim_eval_summary.get("action_clip_fraction_mean", 0.0)
+            )
         append_jsonl(run_dir / "metrics" / "train_metrics.jsonl", metrics_row)
         print(
             f"Epoch {epoch + 1:03d}/{epochs:03d} | "
@@ -473,6 +628,9 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         "episodes": int(len(episodes)),
         "data_curation": curation_summary,
         "best_checkpoint": str(run_ckpt_dir / "best.pt"),
+        "best_success_checkpoint": str(run_ckpt_dir / "best_success.pt"),
+        "best_success_rate": (float(best_success_rate) if best_success_epoch is not None else None),
+        "best_success_epoch": best_success_epoch,
         "action_stats": str(run_stats_path),
     }
     with (run_dir / "metrics" / "train_summary.json").open("w", encoding="utf-8") as f:
@@ -480,6 +638,11 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
 
     print(f"Run artifacts saved under: {run_dir}")
     print(f"Best checkpoint        : {run_ckpt_dir / 'best.pt'}")
+    if best_success_epoch is not None:
+        print(
+            f"Best success checkpoint: {run_ckpt_dir / 'best_success.pt'} "
+            f"(success_rate={best_success_rate:.3f}, epoch={best_success_epoch})"
+        )
     return summary
 
 

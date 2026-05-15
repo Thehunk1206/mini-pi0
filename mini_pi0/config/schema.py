@@ -218,6 +218,30 @@ class ModelConfig:
         d_model: Transformer hidden dimension.
         nhead: Number of attention heads per transformer layer.
         nlayers: Number of transformer encoder layers.
+        action_backbone: Action denoiser backbone for ``mini_pi0_fm``:
+            ``transformer``, ``cnn1d``, or ``unet1d``.
+        conditioning_mode: Observation conditioning strategy for ``mini_pi0_fm``:
+            ``cross_attention`` uses token memory, ``global`` uses the legacy
+            pooled vector.
+        action_attention_causal: Use a causal action self-attention mask in
+            transformer action denoisers.
+        obs_horizon: Number of observation timesteps supplied to the policy.
+            ``1`` preserves the legacy single-observation contract.
+        vision_backbone: Image token backbone for ``mini_pi0_fm`` image mode.
+            ``resnet18`` uses torchvision spatial grids, ``timm`` uses timm
+            token features when available.
+        vision_model_name: timm model name used when ``vision_backbone=timm``.
+            Ignored when ``vision_backbone=resnet18`` and may be null.
+        vision_pretrained: Load pretrained weights for timm image backbones.
+            Defaults to true because random ViT backbones are usually a poor
+            default for robot imitation learning.
+        action_cnn_kernel_size: Temporal Conv1D kernel size when
+            using a CNN action backbone.
+        freeze_vision_backbone: Freeze image encoder backbone parameters when
+            using image observations.
+        dropout: Dropout probability for FM transformer attention/FFN layers
+            and token-to-FiLM attention pooling. Dropout is active during
+            training only.
         num_timestep_buckets: Number of discrete diffusion timestep buckets.
         noise_beta_alpha: Alpha parameter for Beta timestep sampling distribution.
         noise_beta_beta: Beta parameter for Beta timestep sampling distribution.
@@ -233,6 +257,13 @@ class ModelConfig:
         pretrained_variant: Backbone shape hint used for ``mini_pi05`` pretrained
             loading (``256M`` or ``500M``).
         pretrained_local_files_only: Restrict Hugging Face loading to local cache only.
+        action_model: Optional named MiniPI05 action expert preset:
+            ``ACTION_EXPERT_S``, ``ACTION_EXPERT_M``, or ``ACTION_EXPERT_L``.
+        expert_intermediate_size: Optional MiniPI05 action-expert MLP width.
+            Attention structure remains locked to the SmolVLM text backbone, but
+            the expert MLP can be narrowed to reduce parameters and inference cost.
+        dtype: Runtime dtype for models that support it, especially ``mini_pi05``
+            (``float32`` or ``bfloat16``).
     """
 
     name: str = "mini_pi0_fm"
@@ -245,6 +276,16 @@ class ModelConfig:
     d_model: int = 256
     nhead: int = 4
     nlayers: int = 4
+    action_backbone: str = "transformer"
+    conditioning_mode: str = "cross_attention"
+    action_attention_causal: bool = False
+    obs_horizon: int = 1
+    vision_backbone: str = "resnet18"
+    vision_model_name: str | None = None
+    vision_pretrained: bool = True
+    action_cnn_kernel_size: int = 5
+    freeze_vision_backbone: bool = True
+    dropout: float = 0.1
     num_timestep_buckets: int = 1000
     noise_beta_alpha: float = 1.5
     noise_beta_beta: float = 1.0
@@ -258,6 +299,9 @@ class ModelConfig:
     pretrained_model_name_or_path: str | None = None
     pretrained_variant: str = "256M"
     pretrained_local_files_only: bool = False
+    action_model: str | None = None
+    expert_intermediate_size: int | None = None
+    dtype: str | None = None
 
 
 @dataclass
@@ -312,6 +356,8 @@ class TrainConfig:
         val_ratio: Fraction of training samples reserved for validation (0 disables validation).
         ema_decay: Exponential moving average decay for model weights (0 disables EMA).
         checkpoint_use_ema: Save EMA weights into checkpoint model payload when EMA is enabled.
+        val_use_ema: Evaluate validation loss with EMA weights when EMA is enabled. Keep
+            this disabled when comparing train and validation losses directly.
         lr_backbone: Optional override LR for pretrained VLM backbone params.
             When null, falls back to ``lr * 0.1`` for ``mini_pi05``.
         lr_expert: Optional override LR for action expert/head params.
@@ -329,6 +375,21 @@ class TrainConfig:
             into training targets (normalized action space).
         action_noise_clip: Optional absolute clipping after action noise.
             0 disables clipping.
+        action_smoothness_weight: Optional first-difference regularization
+            weight applied to the model's predicted clean action estimate.
+        action_jerk_weight: Optional second-difference regularization weight
+            applied to the model's predicted clean action estimate.
+        sim_eval_every_epochs: Run simulation rollout eval every N epochs.
+            ``0`` disables training-time sim eval.
+        sim_eval_n_episodes: Number of rollout episodes for training-time sim eval.
+        sim_eval_max_steps: Rollout step budget for training-time sim eval.
+        sim_eval_record_grid: Save success/failure grid videos during sim eval.
+        save_best_success: Save ``best_success.pt`` when sim success improves.
+        save_best_success_min_rate: Minimum success rate required before writing
+            ``best_success.pt``. Keeps a 0% rollout from being labeled "best".
+        dtype: Optional training forward precision override. ``auto``/null falls
+            back to ``model.dtype``; ``fp32`` disables autocast; ``bf16`` enables
+            bfloat16 autocast for any model on supported devices.
         device: Requested torch device (``auto``, ``cpu``, ``cuda``, ``mps``).
     """
 
@@ -352,6 +413,7 @@ class TrainConfig:
     val_ratio: float = 0.1
     ema_decay: float = 0.0
     checkpoint_use_ema: bool = True
+    val_use_ema: bool = False
     lr_backbone: float | None = None
     lr_expert: float | None = None
     freeze_backbone_steps: int = 0
@@ -362,6 +424,15 @@ class TrainConfig:
     image_aug_saturation: float = 0.0
     action_noise_std: float = 0.0
     action_noise_clip: float = 0.0
+    action_smoothness_weight: float = 0.0
+    action_jerk_weight: float = 0.0
+    sim_eval_every_epochs: int = 0
+    sim_eval_n_episodes: int = 10
+    sim_eval_max_steps: int | None = None
+    sim_eval_record_grid: bool = False
+    save_best_success: bool = True
+    save_best_success_min_rate: float = 0.0
+    dtype: str | None = None
     device: str = "auto"
 
 
@@ -373,10 +444,17 @@ class EvalConfig:
         run_dir: Optional run directory to write eval artifacts into. If ``None``,
             eval will reuse checkpoint run dir when discoverable, otherwise create a new run.
         checkpoint: Path to model checkpoint used for evaluation.
+        weight_source: Checkpoint weight source to load. ``model`` uses the
+            canonical checkpoint payload, ``raw`` requests non-EMA weights, and
+            ``ema`` requests EMA weights.
         action_stats_path: Path to action normalization stats.
         n_episodes: Number of rollout episodes.
         execute_steps: Actions executed from each predicted chunk before re-planning.
         n_flow_steps: Euler integration steps used in flow-matching sampling.
+        flow_solver: Flow ODE solver used by ``mini_pi0_fm`` sampling
+            (``euler`` or ``heun``).
+        chunk_overlap_blend: Blend factor in ``[0, 1]`` used to smooth
+            transition from an unused previous chunk tail into a new chunk.
         max_steps: Optional hard step limit per episode.
         verbose: Enables live progress logging during eval.
         log_every_episodes: Episode log interval when ``verbose=True``.
@@ -394,20 +472,37 @@ class EvalConfig:
         strict_parity: Enforce checkpoint/runtime parity checks before rollout.
         action_smoothing_alpha: Action exponential smoothing factor in ``[0, 1]`` (0 disables).
         action_scale: Optional per-dimension multiplicative scale applied before clipping.
+        binary_gripper: Convert one gripper action dimension into a binary command before clipping.
+        binary_gripper_index: Action dimension index used for binary gripper postprocessing.
+        binary_gripper_threshold: Threshold used to choose lower vs upper gripper command.
+        binary_gripper_low_value: Command emitted when gripper value is below threshold.
+        binary_gripper_high_value: Command emitted when gripper value is at or above threshold.
+        action_clip: Clip actions to simulator action-space bounds before stepping.
+        disable_domain_randomization: Disable simulator domain randomization during
+            policy eval. This gives a stable held-out task metric; robustness eval
+            can explicitly set it to ``False``.
+        vectorized: Enable ManiSkill vectorized rollout evaluation when supported.
+        num_envs: Number of parallel ManiSkill environments for vectorized eval.
         failure_reward_threshold: Threshold for classifying failures as ``no_progress``.
         stability_warmup_steps: Number of initial env steps using warmup rollout controls.
         stability_warmup_execute_steps: Warmup override for execute steps (null keeps base value).
         stability_warmup_n_flow_steps: Warmup override for denoising flow steps.
         stability_warmup_action_smoothing_alpha: Warmup override for action smoothing alpha.
+        dtype: Optional eval forward precision override. ``auto``/null falls
+            back to ``model.dtype``; ``fp32`` disables autocast; ``bf16`` enables
+            bfloat16 autocast for any model on supported devices.
         device: Requested torch device for evaluation.
     """
 
     run_dir: str | None = None
     checkpoint: str = "checkpoints/best.pt"
+    weight_source: str = "model"
     action_stats_path: str = "action_stats.json"
     n_episodes: int = 50
     execute_steps: int = 8
     n_flow_steps: int = 10
+    flow_solver: str = "euler"
+    chunk_overlap_blend: float = 0.0
     max_steps: int | None = None
     verbose: bool = True
     log_every_episodes: int = 1
@@ -425,11 +520,21 @@ class EvalConfig:
     strict_parity: bool = True
     action_smoothing_alpha: float = 0.0
     action_scale: list[float] | None = None
+    binary_gripper: bool = False
+    binary_gripper_index: int = -1
+    binary_gripper_threshold: float = 0.0
+    binary_gripper_low_value: float = -1.0
+    binary_gripper_high_value: float = 1.0
+    action_clip: bool = True
+    disable_domain_randomization: bool = True
+    vectorized: bool = False
+    num_envs: int = 1
     failure_reward_threshold: float = 0.2
     stability_warmup_steps: int = 0
     stability_warmup_execute_steps: int | None = None
     stability_warmup_n_flow_steps: int | None = None
     stability_warmup_action_smoothing_alpha: float | None = None
+    dtype: str | None = None
     device: str = "auto"
 
 
@@ -443,11 +548,21 @@ class DeployConfig:
         action_stats_path: Path to action normalization stats.
         execute_steps: Number of predicted actions executed before re-planning.
         n_flow_steps: Flow sampler integration steps.
+        flow_solver: Flow ODE solver used by ``mini_pi0_fm`` sampling
+            (``euler`` or ``heun``).
+        chunk_overlap_blend: Blend factor in ``[0, 1]`` used to smooth
+            transition from an unused previous chunk tail into a new chunk.
         max_steps: Maximum loop iterations per deploy run.
         record_path: Optional output video path.
         strict_parity: Enforce checkpoint/runtime parity checks before rollout.
         action_smoothing_alpha: Action exponential smoothing factor in ``[0, 1]`` (0 disables).
         action_scale: Optional per-dimension multiplicative scale applied before clipping.
+        binary_gripper: Convert one gripper action dimension into a binary command before clipping.
+        binary_gripper_index: Action dimension index used for binary gripper postprocessing.
+        binary_gripper_threshold: Threshold used to choose lower vs upper gripper command.
+        binary_gripper_low_value: Command emitted when gripper value is below threshold.
+        binary_gripper_high_value: Command emitted when gripper value is at or above threshold.
+        action_clip: Clip actions to simulator action-space bounds before stepping.
         stability_warmup_steps: Number of initial env steps using warmup rollout controls.
         stability_warmup_execute_steps: Warmup override for execute steps (null keeps base value).
         stability_warmup_n_flow_steps: Warmup override for denoising flow steps.
@@ -460,11 +575,19 @@ class DeployConfig:
     action_stats_path: str = "action_stats.json"
     execute_steps: int = 4
     n_flow_steps: int = 10
+    flow_solver: str = "euler"
+    chunk_overlap_blend: float = 0.0
     max_steps: int = 500
     record_path: str | None = None
     strict_parity: bool = True
     action_smoothing_alpha: float = 0.0
     action_scale: list[float] | None = None
+    binary_gripper: bool = False
+    binary_gripper_index: int = -1
+    binary_gripper_threshold: float = 0.0
+    binary_gripper_low_value: float = -1.0
+    binary_gripper_high_value: float = 1.0
+    action_clip: bool = True
     stability_warmup_steps: int = 0
     stability_warmup_execute_steps: int | None = None
     stability_warmup_n_flow_steps: int | None = None
