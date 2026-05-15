@@ -167,15 +167,8 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
     tcp_p = to_numpy(uw.agent.tcp.pose.p).astype(np.float32)
     tcp_q = to_numpy(uw.agent.tcp.pose.q).astype(np.float32)
     qpos = to_numpy(uw.agent.robot.get_qpos()).astype(np.float32)
-    obj_pos = to_numpy(uw._get_object_pos_tensor()).reshape(num_envs, -1).astype(np.float32)
-    active = to_numpy(uw._active_object_mask).astype(np.float32)
-    placed = to_numpy(uw._placed_mask).astype(np.float32)
-    place_targets_raw = getattr(uw, "_placement_targets", None)
-    if place_targets_raw is None:
-        place_targets = np.zeros_like(obj_pos, dtype=np.float32)
-    else:
-        place_targets = to_numpy(place_targets_raw).reshape(num_envs, -1).astype(np.float32)
-    frac = to_numpy(uw._last_success_fraction).astype(np.float32)
+    qvel = to_numpy(uw.agent.robot.get_qvel()).astype(np.float32)
+    obj_pos, active, placed, place_targets, frac = _object_state_batch_from_env(uw, num_envs)
 
     sensor_frames: dict[str, np.ndarray] = {}
     if isinstance(raw_obs, dict):
@@ -197,6 +190,14 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
 
     def camera_name_for_image_key(image_key: str) -> str:
         """Map canonical image keys to ManiSkill sensor camera names."""
+        aliases = {
+            "agentview_image": "base_camera",
+            "base_image": "base_camera",
+            "robot0_eye_in_hand_image": "hand_camera",
+            "hand_image": "hand_camera",
+        }
+        if image_key in aliases:
+            return aliases[image_key]
         if image_key.endswith("_image"):
             return f"{image_key[:-6]}_camera"
         return image_key
@@ -210,6 +211,8 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
             "observation.state.eef_quat": tcp_q[i],
             "robot0_gripper_qpos": qpos[i][-2:] if qpos.shape[1] >= 2 else qpos[i],
             "observation.state.tool": qpos[i][-2:] if qpos.shape[1] >= 2 else qpos[i],
+            "robot0_joint_vel": qvel[i],
+            "observation.state.joint_vel": qvel[i],
             "observation.state.object": obj_pos[i],
             "observation.state.object_mask": active[i],
             "observation.state.placed_mask": placed[i],
@@ -232,6 +235,79 @@ def canonical_obs_batch_from_raw_env(env, image_keys: list[str], state_keys: lis
             obs_i[key] = np.asarray(default_state[key], dtype=np.float32)
         out_batch.append(obs_i)
     return out_batch
+
+
+def _object_state_batch_from_env(uw: Any, num_envs: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extract object progress tensors from custom or built-in ManiSkill envs."""
+
+    if hasattr(uw, "_get_object_pos_tensor"):
+        obj_pos = to_numpy(uw._get_object_pos_tensor()).reshape(num_envs, -1).astype(np.float32)
+        active = to_numpy(uw._active_object_mask).astype(np.float32)
+        placed = to_numpy(uw._placed_mask).astype(np.float32)
+        place_targets_raw = getattr(uw, "_placement_targets", None)
+        if place_targets_raw is None:
+            place_targets = np.zeros_like(obj_pos, dtype=np.float32)
+        else:
+            place_targets = to_numpy(place_targets_raw).reshape(num_envs, -1).astype(np.float32)
+        frac = to_numpy(uw._last_success_fraction).reshape(num_envs).astype(np.float32)
+        return obj_pos, active, placed, place_targets, frac
+
+    actor_names = [name for name in ("cubeA", "cubeB", "obj") if hasattr(uw, name)]
+    actor_states = [_actor_pose_batch(getattr(uw, name), num_envs) for name in actor_names]
+    if not actor_states:
+        obj_pos = np.zeros((num_envs, 1), dtype=np.float32)
+        active = np.ones((num_envs, 1), dtype=np.float32)
+        placed = np.zeros((num_envs, 1), dtype=np.float32)
+        place_targets = np.zeros_like(obj_pos, dtype=np.float32)
+        frac = np.zeros((num_envs,), dtype=np.float32)
+        return obj_pos, active, placed, place_targets, frac
+
+    obj_pos = np.concatenate(actor_states, axis=1).astype(np.float32)
+    active = np.ones((num_envs, len(actor_states)), dtype=np.float32)
+    frac = _success_fraction_batch_from_eval(uw, num_envs)
+    placed = np.repeat(frac[:, None], len(actor_states), axis=1).astype(np.float32)
+    place_targets = np.zeros_like(obj_pos, dtype=np.float32)
+    return obj_pos, active, placed, place_targets, frac
+
+
+def _actor_pose_batch(actor: Any, num_envs: int) -> np.ndarray:
+    """Return actor poses as ``[num_envs, 7]`` arrays."""
+
+    pose = getattr(actor, "pose", None)
+    raw_pose = getattr(pose, "raw_pose", None)
+    if raw_pose is not None:
+        arr = to_numpy(raw_pose)
+    elif pose is not None and hasattr(pose, "p") and hasattr(pose, "q"):
+        arr = np.concatenate([to_numpy(pose.p), to_numpy(pose.q)], axis=-1)
+    else:
+        return np.zeros((num_envs, 7), dtype=np.float32)
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    if arr.shape[0] != num_envs:
+        arr = np.resize(arr, (num_envs, arr.shape[-1]))
+    if arr.shape[1] < 7:
+        padded = np.zeros((num_envs, 7), dtype=np.float32)
+        padded[:, : arr.shape[1]] = arr
+        return padded
+    return arr[:, :7].astype(np.float32)
+
+
+def _success_fraction_batch_from_eval(uw: Any, num_envs: int) -> np.ndarray:
+    """Read built-in ManiSkill success tensors as float progress values."""
+
+    if not hasattr(uw, "evaluate"):
+        return np.zeros((num_envs,), dtype=np.float32)
+    try:
+        info = uw.evaluate()
+    except Exception:
+        return np.zeros((num_envs,), dtype=np.float32)
+    if not isinstance(info, dict) or "success" not in info:
+        return np.zeros((num_envs,), dtype=np.float32)
+    success = to_numpy(info["success"]).reshape(-1).astype(np.float32)
+    if success.shape[0] != num_envs:
+        success = np.resize(success, (num_envs,))
+    return success
 
 
 def normalize_info_batched(info: dict[str, Any], num_envs: int) -> list[dict[str, Any]]:

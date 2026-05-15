@@ -31,6 +31,7 @@ class ObservationContextEncoder(nn.Module):
         state_dropout_prob: float = 0.0,
         state_additive_noise_scale: float = 0.0,
         use_context_layernorm: bool = True,
+        freeze_vision_backbone: bool = True,
     ):
         super().__init__()
         self.obs_mode = str(obs_mode).strip().lower()
@@ -60,7 +61,7 @@ class ObservationContextEncoder(nn.Module):
             # Keep feature map before global avg pool to preserve spatial tokens.
             self.img_backbone = nn.Sequential(*list(resnet.children())[:-2])
             for p in self.img_backbone.parameters():
-                p.requires_grad = False
+                p.requires_grad = not bool(freeze_vision_backbone)
             self.vision_proj = nn.Linear(512, d_model)
             self.n_vision_tokens = self.vision_token_grid_size * self.vision_token_grid_size
             self.vision_pos_embed = nn.Parameter(0.02 * torch.randn(1, self.n_vision_tokens, d_model))
@@ -323,6 +324,7 @@ class CrossFlowActionModel(nn.Module):
         use_context_layernorm: bool = True,
         vision_token_grid_size: int = 4,
         use_dit_adaln: bool = True,
+        freeze_vision_backbone: bool = True,
     ):
         super().__init__()
         _ = cond_dim  # not used; retained for uniform config surface.
@@ -342,6 +344,7 @@ class CrossFlowActionModel(nn.Module):
             state_dropout_prob=state_dropout_prob,
             state_additive_noise_scale=state_additive_noise_scale,
             use_context_layernorm=use_context_layernorm,
+            freeze_vision_backbone=freeze_vision_backbone,
         )
         self.denoiser = ActionFlowDecoder(
             action_dim=action_dim,

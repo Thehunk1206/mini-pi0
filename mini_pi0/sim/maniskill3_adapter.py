@@ -5,6 +5,7 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.sim.base import SimulatorAdapter, StepOutput
@@ -38,18 +39,24 @@ class ManiSkill3Adapter(SimulatorAdapter):
             task_id = "MiniPi0MultiObjectTray-v1"
 
         render_mode = "rgb_array" if bool(cfg.simulator.has_offscreen_renderer) else "none"
+        env_kwargs.pop("render_mode", None)
         render_backend = env_kwargs.pop("render_backend", "cpu")
         env_kwargs.pop("scripted_control_mode", None)
+
+        control_mode = str(cfg.simulator.controller)
+        if control_mode.strip().upper() == "BASIC":
+            control_mode = "pd_ee_delta_pose"
 
         self.env = gym.make(
             task_id,
             obs_mode=env_kwargs.pop("obs_mode", "state_dict"),
             reward_mode=env_kwargs.pop("reward_mode", "dense"),
-            control_mode=env_kwargs.pop("control_mode", str(cfg.simulator.controller)),
+            control_mode=env_kwargs.pop("control_mode", control_mode),
             render_mode=render_mode,
             render_backend=render_backend,
             sim_backend=env_kwargs.pop("sim_backend", "auto"),
             robot_uids=env_kwargs.pop("robot_uids", str(cfg.simulator.robot).lower()),
+            max_episode_steps=env_kwargs.pop("max_episode_steps", int(cfg.simulator.horizon)),
             **env_kwargs,
         )
         self._last_info: dict[str, Any] = {}
@@ -69,15 +76,63 @@ class ManiSkill3Adapter(SimulatorAdapter):
 
     def _get_object_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         uw = self.unwrapped
-        obj_pos = uw._get_object_pos_tensor()
-        active = uw._active_object_mask.float()
-        placed = uw._placed_mask.float()
-        frac = float(uw._last_success_fraction[0].item()) if uw._last_success_fraction is not None else 0.0
+        if hasattr(uw, "_get_object_pos_tensor"):
+            obj_pos = uw._get_object_pos_tensor()
+            active = uw._active_object_mask.float()
+            placed = uw._placed_mask.float()
+            frac = float(uw._last_success_fraction[0].item()) if uw._last_success_fraction is not None else 0.0
 
-        obj_pos_np = self._to_numpy(obj_pos)[0].reshape(-1)
-        active_np = self._to_numpy(active)[0]
-        placed_np = self._to_numpy(placed)[0]
-        return obj_pos_np.astype(np.float32), active_np.astype(np.float32), placed_np.astype(np.float32), frac
+            obj_pos_np = self._to_numpy(obj_pos)[0].reshape(-1)
+            active_np = self._to_numpy(active)[0]
+            placed_np = self._to_numpy(placed)[0]
+            return obj_pos_np.astype(np.float32), active_np.astype(np.float32), placed_np.astype(np.float32), frac
+
+        actor_names = [name for name in ("cubeA", "cubeB", "obj") if hasattr(uw, name)]
+        actor_states = [self._actor_pose_vector(getattr(uw, name)) for name in actor_names]
+        if actor_states:
+            eval_info = self._evaluate_task()
+            success = bool(eval_info.get("success", False))
+            obj_state = np.concatenate(actor_states, axis=0).astype(np.float32)
+            active = np.ones((len(actor_states),), dtype=np.float32)
+            placed = np.ones((len(actor_states),), dtype=np.float32) if success else np.zeros((len(actor_states),), dtype=np.float32)
+            return obj_state, active, placed, float(success)
+
+        return (
+            np.zeros((1,), dtype=np.float32),
+            np.ones((1,), dtype=np.float32),
+            np.zeros((1,), dtype=np.float32),
+            0.0,
+        )
+
+    def _actor_pose_vector(self, actor: Any) -> np.ndarray:
+        """Return one actor pose as a flat ``[x, y, z, qw, qx, qy, qz]`` vector."""
+
+        pose = getattr(actor, "pose", None)
+        raw_pose = getattr(pose, "raw_pose", None)
+        if raw_pose is not None:
+            arr = self._to_numpy(raw_pose)
+        elif pose is not None and hasattr(pose, "p") and hasattr(pose, "q"):
+            arr = np.concatenate([self._to_numpy(pose.p), self._to_numpy(pose.q)], axis=-1)
+        else:
+            return np.zeros((7,), dtype=np.float32)
+        arr = np.asarray(arr, dtype=np.float32)
+        if arr.ndim >= 2:
+            arr = arr[0]
+        return arr.reshape(-1)[:7].astype(np.float32)
+
+    def _evaluate_task(self) -> dict[str, Any]:
+        """Return scalarized ManiSkill task evaluation info when available."""
+
+        uw = self.unwrapped
+        if not hasattr(uw, "evaluate"):
+            return {}
+        try:
+            raw = uw.evaluate()
+        except Exception:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return self._normalize_info(raw)
 
     def _extract_sensor_frames(self) -> dict[str, np.ndarray]:
         raw = self._last_raw_obs
@@ -113,6 +168,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
         tcp_p = self._to_numpy(uw.agent.tcp.pose.p)[0].astype(np.float32)
         tcp_q = self._to_numpy(uw.agent.tcp.pose.q)[0].astype(np.float32)
         qpos = self._to_numpy(uw.agent.robot.get_qpos())[0].astype(np.float32)
+        qvel = self._to_numpy(uw.agent.robot.get_qvel())[0].astype(np.float32)
 
         obj_flat, obj_mask, placed_mask, frac = self._get_object_state()
         grasped_mask = np.zeros_like(placed_mask, dtype=np.float32)
@@ -154,7 +210,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
                 out[key] = np.asarray(frame, dtype=np.uint8)
         else:
             for idx, key in enumerate(self._image_keys):
-                cam_name = f"{key[:-6]}_camera" if key.endswith("_image") else camera_order[min(idx, len(camera_order) - 1)]
+                cam_name = _camera_name_for_image_key(key)
                 if cam_name not in sensor_frames:
                     cam_name = camera_order[min(idx, len(camera_order) - 1)]
                 out[key] = np.asarray(sensor_frames.get(cam_name, frame), dtype=np.uint8)
@@ -166,6 +222,8 @@ class ManiSkill3Adapter(SimulatorAdapter):
             "observation.state.eef_quat": tcp_q,
             "robot0_gripper_qpos": qpos[-2:] if qpos.shape[0] >= 2 else qpos,
             "observation.state.tool": qpos[-2:] if qpos.shape[0] >= 2 else qpos,
+            "robot0_joint_vel": qvel,
+            "observation.state.joint_vel": qvel,
             "observation.state.object": obj_flat,
             "observation.state.object_mask": obj_mask,
             "observation.state.placed_mask": placed_mask,
@@ -227,8 +285,11 @@ class ManiSkill3Adapter(SimulatorAdapter):
 
     def step(self, action: np.ndarray) -> StepOutput:
         lo, hi = self.action_spec()
-        clipped = np.clip(np.asarray(action, dtype=np.float32).reshape(-1), lo, hi)
-        raw_obs, reward, terminated, truncated, info = self.env.step(clipped)
+        raw_action = np.asarray(action, dtype=np.float32).reshape(-1)
+        should_clip = bool(getattr(getattr(self.cfg, "eval", None), "action_clip", True))
+        if should_clip:
+            raw_action = np.clip(raw_action, lo, hi).astype(np.float32)
+        raw_obs, reward, terminated, truncated, info = self.env.step(raw_action)
         self._last_raw_obs = raw_obs
         norm_info = self._normalize_info(dict(info))
 
@@ -255,13 +316,36 @@ class ManiSkill3Adapter(SimulatorAdapter):
         return lo, hi
 
     def render(self, camera: str = "agentview", width: int = 512, height: int = 512) -> np.ndarray:
+        frame = self._render_from_latest_sensor(camera=camera)
+        if frame is not None:
+            return _resize_uint8_frame(frame, width=width, height=height)
         try:
             frame = self.env.render()
             if isinstance(frame, np.ndarray):
-                return frame.astype(np.uint8)
+                return _resize_uint8_frame(frame.astype(np.uint8), width=width, height=height)
         except Exception:
             pass
         return np.zeros((int(height), int(width), 3), dtype=np.uint8)
+
+    def _render_from_latest_sensor(self, camera: str) -> np.ndarray | None:
+        """Return the latest RGB sensor frame for a requested render camera."""
+
+        sensor_frames = self._extract_sensor_frames()
+        if not sensor_frames:
+            return None
+        candidates = [str(camera)]
+        mapped = _camera_name_for_image_key(str(camera))
+        if mapped != str(camera):
+            candidates.append(mapped)
+        if not str(camera).endswith("_camera"):
+            candidates.append(f"{camera}_camera")
+        for name in self._preferred_camera_names:
+            candidates.append(name)
+        candidates.extend(sensor_frames.keys())
+        for name in candidates:
+            if name in sensor_frames:
+                return np.asarray(sensor_frames[name], dtype=np.uint8)
+        return None
 
     def check_success(self, info: dict[str, Any] | None = None, obs: dict[str, np.ndarray] | None = None) -> bool:
         src = info if info is not None else self._last_info
@@ -270,3 +354,40 @@ class ManiSkill3Adapter(SimulatorAdapter):
 
     def close(self) -> None:
         self.env.close()
+
+
+def _resize_uint8_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Resize an RGB frame to the requested output size."""
+
+    arr = np.asarray(frame)
+    if arr.ndim == 2:
+        arr = np.repeat(arr[:, :, None], 3, axis=2)
+    if arr.ndim != 3:
+        return np.zeros((int(height), int(width), 3), dtype=np.uint8)
+    if arr.shape[-1] > 3:
+        arr = arr[..., :3]
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    target_h = int(height)
+    target_w = int(width)
+    if arr.shape[0] == target_h and arr.shape[1] == target_w:
+        return arr
+    tensor = torch.from_numpy(np.ascontiguousarray(arr)).permute(2, 0, 1).unsqueeze(0).float()
+    resized = F.interpolate(tensor, size=(target_h, target_w), mode="bilinear", align_corners=False)
+    return resized.squeeze(0).permute(1, 2, 0).clamp(0, 255).byte().cpu().numpy()
+
+
+def _camera_name_for_image_key(image_key: str) -> str:
+    """Map canonical mini-pi0 image keys to ManiSkill camera names."""
+
+    aliases = {
+        "agentview_image": "base_camera",
+        "base_image": "base_camera",
+        "robot0_eye_in_hand_image": "hand_camera",
+        "hand_image": "hand_camera",
+    }
+    if image_key in aliases:
+        return aliases[image_key]
+    if image_key.endswith("_image"):
+        return f"{image_key[:-6]}_camera"
+    return image_key

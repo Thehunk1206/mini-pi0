@@ -33,6 +33,12 @@ train:
         self.assertTrue(cfg.eval.record)
         self.assertEqual(cfg.eval.grid_size, 4)
 
+    def test_eval_vectorized_overrides(self):
+        cfg = load_config(overrides=["eval.vectorized=true", "eval.num_envs=8"])
+
+        self.assertTrue(cfg.eval.vectorized)
+        self.assertEqual(cfg.eval.num_envs, 8)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,8 @@ from mini_pi0.dataset.episodes import EpisodeData
 from mini_pi0.deploy.sim_runner import _resolve_deploy_rollout_controls
 from mini_pi0.eval.core import _resolve_eval_rollout_controls
 from mini_pi0.models.mini_pi05 import ExpertConfig, MiniPI05Config, PI05SmolVLM
+from mini_pi0.models.registry import make_model
+from mini_pi0.train.optim import ExponentialMovingAverage
 from mini_pi0.train.runner import _augment_actions, _augment_image_batch, _build_optimizer, _curate_episodes
 
 
@@ -129,6 +131,35 @@ class TrainingStabilityControlTests(unittest.TestCase):
         group_lrs = sorted(float(g["lr"]) for g in optimizer.param_groups)
         self.assertEqual(group_lrs, [1e-5, 1e-4])
 
+    def test_minipi0_fm_optimizer_uses_backbone_and_expert_lrs(self):
+        cfg = load_config(
+            overrides=[
+                "model.name='mini_pi0_fm'",
+                "model.obs_mode='feature'",
+                "model.vision_dim=16",
+                "model.action_dim=7",
+                "model.prop_dim=9",
+                "model.chunk_size=4",
+                "model.cond_dim=32",
+                "model.d_model=32",
+                "model.nlayers=2",
+                "model.action_backbone='cnn1d'",
+                "train.lr=1e-4",
+                "train.lr_backbone=2e-5",
+                "train.lr_expert=8e-5",
+            ]
+        )
+        model = make_model(cfg)
+
+        optimizer, lr_summary = _build_optimizer(model, cfg)
+
+        self.assertIsInstance(optimizer, torch.optim.AdamW)
+        self.assertAlmostEqual(lr_summary["backbone_lr"], 2e-5, places=10)
+        self.assertAlmostEqual(lr_summary["expert_lr"], 8e-5, places=10)
+        groups_by_name = {str(g.get("name")): float(g["lr"]) for g in optimizer.param_groups}
+        self.assertEqual(groups_by_name["backbone"], 2e-5)
+        self.assertEqual(groups_by_name["expert"], 8e-5)
+
     def test_training_augmentations_image_and_action(self):
         cfg = load_config(
             overrides=[
@@ -155,6 +186,25 @@ class TrainingStabilityControlTests(unittest.TestCase):
         self.assertEqual(tuple(actions_aug.shape), (4, 8, 7))
         self.assertFalse(torch.allclose(actions_aug, actions))
         self.assertTrue(torch.all(actions_aug.abs() <= 1.0 + 1e-6).item())
+
+    def test_ema_update_aligns_shadow_dtype_after_resume(self):
+        model = torch.nn.Linear(2, 2).float()
+        ema = ExponentialMovingAverage(model, decay=0.5)
+        state = ema.state_dict()
+        model = model.double()
+        ema.load_state_dict(state)
+
+        ema.update(model)
+
+        for name, value in model.state_dict().items():
+            self.assertEqual(ema.shadow[name].dtype, value.dtype)
+            self.assertEqual(ema.shadow[name].device, value.device)
+
+    def test_validation_ema_is_disabled_by_default(self):
+        cfg = load_config(overrides=["train.ema_decay=0.999", "train.checkpoint_use_ema=true"])
+
+        self.assertFalse(cfg.train.val_use_ema)
+        self.assertTrue(cfg.train.checkpoint_use_ema)
 
 
 if __name__ == "__main__":

@@ -8,11 +8,12 @@ from typing import Any
 from mini_pi0.config.io import dump_config
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.dataset.obs_processor import ObsProcessor
-from mini_pi0.eval.core import evaluate, record_episode, report, save_rollout_grid
+from mini_pi0.eval.core import evaluate, evaluate_vectorized_maniskill, record_episode, report, save_rollout_grid
 from mini_pi0.models.registry import load_checkpoint, make_model
 from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.utils.device import resolve_device
 from mini_pi0.utils.parity import build_checkpoint_parity_report, config_diff, format_parity_issues
+from mini_pi0.utils.precision import describe_runtime_dtype
 from mini_pi0.utils.runs import create_run_dir
 from mini_pi0.vision.encoders import build_vision_extractor
 
@@ -50,8 +51,27 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
     model_cfg = ckpt.get("model_config")
     if isinstance(model_cfg, dict):
         for k, v in model_cfg.items():
+            if k == "dtype" and cfg.model.dtype is not None:
+                continue
             if hasattr(cfg.model, k):
                 setattr(cfg.model, k, v)
+        if str(cfg.model.name).strip().lower() == "mini_pi0_fm":
+            if "conditioning_mode" not in model_cfg:
+                cfg.model.conditioning_mode = "global"
+            if "obs_horizon" not in model_cfg:
+                cfg.model.obs_horizon = 1
+            if "action_attention_causal" not in model_cfg:
+                cfg.model.action_attention_causal = False
+            is_timm_backbone = str(getattr(cfg.model, "vision_backbone", "")).strip().lower() == "timm"
+            if "vision_pretrained" not in model_cfg and is_timm_backbone:
+                # Legacy timm FM checkpoints were created with pretrained=False.
+                # Avoid downloading unrelated weights before loading their state dict.
+                cfg.model.vision_pretrained = False
+        if str(cfg.model.name).strip().lower() == "mini_pi05":
+            if "action_model" not in model_cfg:
+                cfg.model.action_model = None
+            if "expert_intermediate_size" not in model_cfg:
+                cfg.model.expert_intermediate_size = None
 
     # Keep runtime vision config under user control (config / CLI overrides).
     # Checkpoint vision metadata can be stale relative to the model's expected
@@ -64,6 +84,62 @@ def _inject_model_cfg_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) -> 
             cur = getattr(cfg.vision, k)
             if cur is None or (isinstance(cur, str) and not cur.strip()):
                 setattr(cfg.vision, k, v)
+
+
+def _apply_eval_runtime_overrides(cfg: RootConfig) -> None:
+    """Apply eval-only simulator overrides that should not affect collection/training."""
+
+    if not bool(getattr(cfg.eval, "disable_domain_randomization", True)):
+        return
+    env_kwargs = cfg.simulator.env_kwargs
+    dr_cfg = env_kwargs.get("domain_randomization")
+    if isinstance(dr_cfg, dict):
+        dr_cfg["enabled"] = False
+
+
+def _select_checkpoint_model_state(ckpt: dict[str, Any], weight_source: str) -> dict[str, Any]:
+    """Select model weights from a checkpoint payload.
+
+    Args:
+        ckpt: Loaded checkpoint dictionary.
+        weight_source: One of ``model``, ``raw``, or ``ema``.
+
+    Returns:
+        State dict to load into the model.
+
+    Raises:
+        ValueError: If the requested weight source is unsupported or unavailable.
+    """
+
+    source = str(weight_source or "model").strip().lower()
+    if source == "model":
+        if "model" in ckpt:
+            return ckpt["model"]
+        return ckpt
+
+    if source == "raw":
+        if "model_raw" in ckpt:
+            return ckpt["model_raw"]
+        if ckpt.get("model_weight_source") == "raw" and "model" in ckpt:
+            return ckpt["model"]
+        raise ValueError(
+            "Requested eval.weight_source=raw, but checkpoint does not contain raw weights. "
+            "Use a checkpoint saved after raw/EMA dual-weight support was added, or evaluate "
+            "with eval.weight_source=model."
+        )
+
+    if source == "ema":
+        ema_state = ckpt.get("ema")
+        if isinstance(ema_state, dict) and isinstance(ema_state.get("shadow"), dict):
+            return ema_state["shadow"]
+        if ckpt.get("model_weight_source") == "ema" and "model" in ckpt:
+            return ckpt["model"]
+        raise ValueError(
+            "Requested eval.weight_source=ema, but checkpoint does not contain EMA weights. "
+            "Train with train.ema_decay > 0 or evaluate with eval.weight_source=model."
+        )
+
+    raise ValueError("eval.weight_source must be one of: model, raw, ema")
 
 
 def _resolve_eval_run_dir(cfg: RootConfig) -> Path:
@@ -130,12 +206,15 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         print(f"[eval] WARNING: {w}", flush=True)
 
     _inject_model_cfg_from_checkpoint(cfg, ckpt)
+    _apply_eval_runtime_overrides(cfg)
     runtime_cfg = copy.deepcopy(cfg)
     print(
         "[eval] Preflight | "
         f"backend={cfg.simulator.backend} task={cfg.simulator.task} robot={cfg.simulator.robot} "
         f"controller={cfg.simulator.controller} obs_mode={cfg.model.obs_mode} "
-        f"image_keys={effective_image_keys(cfg.robot)} strict_parity={strict}",
+        f"image_keys={effective_image_keys(cfg.robot)} "
+        f"dtype={describe_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=cfg.model.dtype)} "
+        f"strict_parity={strict}",
         flush=True,
     )
 
@@ -154,10 +233,9 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         )
 
     model = make_model(cfg).to(device)
-    if "model" in ckpt:
-        model.load_state_dict(ckpt["model"])
-    else:
-        model.load_state_dict(ckpt)
+    weight_source = str(getattr(cfg.eval, "weight_source", "model"))
+    model.load_state_dict(_select_checkpoint_model_state(ckpt, weight_source))
+    print(f"[eval] Loaded checkpoint weights | source={weight_source}", flush=True)
 
     model.eval()
 
@@ -203,18 +281,41 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         observation_mode=cfg.model.obs_mode,
         feature_key=cfg.data.precomputed_feature_key,
         feature_extractor=feature_extractor,
+        obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
+        preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
     )
 
     adapter_maker = _adapter_factory(cfg)
-    eval_out = evaluate(
-        model=model,
-        processor=processor,
-        cfg=cfg,
-        make_adapter=adapter_maker,
-        collect_grid=bool(cfg.eval.record_grid),
+    use_vectorized = (
+        bool(getattr(cfg.eval, "vectorized", False))
+        and str(cfg.simulator.backend).strip().lower() == "maniskill3"
+        and not bool(cfg.eval.record)
+        and not bool(cfg.eval.record_grid)
     )
+    if bool(getattr(cfg.eval, "vectorized", False)) and not use_vectorized:
+        print(
+            "[eval] Vectorized eval requested but unavailable for this run; "
+            "falling back to sequential eval. Vectorized eval requires "
+            "backend=maniskill3 and record=false/record_grid=false.",
+            flush=True,
+        )
 
-    if cfg.eval.record_grid:
+    if use_vectorized:
+        eval_out = evaluate_vectorized_maniskill(
+            model=model,
+            processor=processor,
+            cfg=cfg,
+        )
+    else:
+        eval_out = evaluate(
+            model=model,
+            processor=processor,
+            cfg=cfg,
+            make_adapter=adapter_maker,
+            collect_grid=bool(cfg.eval.record_grid),
+        )
+
+    if cfg.eval.record_grid and not use_vectorized:
         results, grid_data = eval_out
     else:
         results = eval_out
@@ -227,7 +328,7 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
     with (run_dir / "metrics" / "eval_arrays.json").open("w", encoding="utf-8") as f:
         json.dump({k: v.tolist() for k, v in results.items()}, f, indent=2)
 
-    if cfg.eval.record_grid:
+    if cfg.eval.record_grid and not use_vectorized:
         save_rollout_grid(
             grid_data["success"],
             path=str(run_dir / "artifacts" / f"success_grid_{cfg.eval.grid_size}x{cfg.eval.grid_size}.mp4"),
