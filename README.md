@@ -271,34 +271,24 @@ Full task benchmark tracking lives in [docs/TASK_BENCHMARK.md](docs/TASK_BENCHMA
 Config:
 `examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml`
 
-Run:
-`runs/maniskill3-stackcube-motionplanning-transformer-vit-hist2-medium/run1/final_eval_best_seed42`
-
 | Metric | Value |
 | --- | ---: |
 | Success rate | 95.5% |
 | CI95 | 92.5% - 98.0% |
 | Episodes | 200 |
 | Mean episode length | 166.2 steps |
-| Mean reward | 586.7 |
 | Mean inference speed | 31.9 ms/chunk |
-| Mean action clipping | 58.4% |
 
 ![StackCube eval metrics](./assets/stackcube_eval_metrics.png)
 
 Artifacts:
 - [success grid](./assets/stackcube_success_grid_3x3.mp4)
 - [eval metrics](./assets/stackcube_eval_metrics.png)
-- Source run artifacts:
-  `runs/maniskill3-stackcube-motionplanning-transformer-vit-hist2-medium/run1/final_eval_best_seed42/artifacts`
 
 ### PegInsertionSide-v1
 
 Config:
 `examples/configs/maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml`
-
-Run:
-`runs/maniskill3-peginsertion-motionplanning-transformer-vit-hist3-medium-holecam-contacts/run2/final_eval_best_seed4278`
 
 | Metric | Value |
 | --- | ---: |
@@ -306,9 +296,7 @@ Run:
 | CI95 | 5.0% - 16.0% |
 | Episodes | 100 |
 | Mean episode length | 474.8 steps |
-| Mean reward | 1365.8 |
 | Mean inference speed | 43.4 ms/chunk |
-| Mean action clipping | 0.02% |
 | Failure modes | 90 timeout after progress, 10 success |
 
 ![PegInsertion eval metrics](./assets/peginsertion_seed4278_eval_metrics.png)
@@ -318,8 +306,6 @@ Artifacts:
 - [left hole-camera success grid](./assets/peginsertion_seed4278_success_grid_hole_left_camera_3x3.mp4)
 - [right hole-camera success grid](./assets/peginsertion_seed4278_success_grid_hole_right_camera_3x3.mp4)
 - [eval metrics](./assets/peginsertion_seed4278_eval_metrics.png)
-- Source run artifacts:
-  `runs/maniskill3-peginsertion-motionplanning-transformer-vit-hist3-medium-holecam-contacts/run2/final_eval_best_seed4278/artifacts`
 
 Current interpretation: the policy now solves a small but real fraction of
 rollouts. Most failures still make progress toward the hole, so the next useful

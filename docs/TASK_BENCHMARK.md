@@ -16,6 +16,4 @@ visible highlights.
 
 - Report simulator success from ManiSkill native `info["success"]` when available.
 - Record the controller and observation cameras with every result.
-- Keep eval seeds and run paths in the artifact sections so results are reproducible.
-- Include action clipping because high clipping can hide policy-quality issues.
 - Prefer at least 100 episodes for hard tasks and 200 episodes for stable headline results.
