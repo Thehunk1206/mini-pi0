@@ -6,6 +6,53 @@ from pathlib import Path
 import numpy as np
 
 
+class ActionStatsAccumulator:
+    """Streaming accumulator for per-dimension action statistics."""
+
+    def __init__(self) -> None:
+        """Create an empty accumulator."""
+
+        self.count = 0
+        self.mean: np.ndarray | None = None
+        self.m2: np.ndarray | None = None
+
+    def update(self, actions: np.ndarray) -> None:
+        """Add action rows to the accumulator.
+
+        Args:
+            actions: Action vector or matrix with action dimension last.
+        """
+
+        arr = np.asarray(actions, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr[None, :]
+        arr = arr.reshape(-1, arr.shape[-1])
+        for row in arr:
+            self.count += 1
+            if self.mean is None:
+                self.mean = np.zeros_like(row, dtype=np.float64)
+                self.m2 = np.zeros_like(row, dtype=np.float64)
+            delta = row - self.mean
+            self.mean += delta / self.count
+            assert self.m2 is not None
+            self.m2 += delta * (row - self.mean)
+
+    def to_stats(self) -> "ActionStats":
+        """Return finalized action statistics.
+
+        Raises:
+            ValueError: If no actions were added.
+        """
+
+        if self.count == 0 or self.mean is None or self.m2 is None:
+            raise ValueError("Cannot compute action statistics from an empty action stream.")
+        variance = self.m2 / self.count
+        return ActionStats(
+            mean=self.mean.astype(np.float32),
+            std=(np.sqrt(variance) + 1e-6).astype(np.float32),
+        )
+
+
 class ActionStats:
     """Container for per-dimension action normalization statistics."""
 
@@ -34,6 +81,26 @@ class ActionStats:
         mean = actions.mean(axis=0)
         std = actions.std(axis=0) + 1e-6
         return cls(mean=mean, std=std)
+
+    @classmethod
+    def from_iterable(cls, actions: object) -> "ActionStats":
+        """Estimate action statistics from a streaming iterable.
+
+        Args:
+            actions: Iterable yielding action vectors or matrices with the
+                action dimension on the final axis.
+
+        Returns:
+            New ``ActionStats`` estimated without concatenating all actions.
+
+        Raises:
+            ValueError: If no action rows are provided.
+        """
+
+        accumulator = ActionStatsAccumulator()
+        for item in actions:  # type: ignore[operator]
+            accumulator.update(np.asarray(item))
+        return accumulator.to_stats()
 
     @classmethod
     def load(cls, path: str) -> "ActionStats":

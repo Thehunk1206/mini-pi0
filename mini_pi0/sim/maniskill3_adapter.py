@@ -16,6 +16,48 @@ import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
 import mini_pi0.sim.maniskill3_peginsertion_env  # noqa: F401
 
 
+def default_maniskill_reward_mode(cfg: RootConfig) -> str:
+    """Return a ManiSkill reward mode compatible with shaping settings.
+
+    Args:
+        cfg: Root runtime configuration.
+
+    Returns:
+        ``"dense"`` when shaped reward is requested, otherwise ``"sparse"``.
+    """
+
+    return "dense" if bool(getattr(cfg.simulator, "reward_shaping", True)) else "sparse"
+
+
+def make_maniskill_env_with_reward_fallback(task_id: str, env_kwargs: dict[str, Any]):
+    """Create a ManiSkill env, retrying sparse reward for unsupported dense tasks.
+
+    Args:
+        task_id: Gymnasium/ManiSkill task id.
+        env_kwargs: Keyword arguments passed to ``gym.make``.
+
+    Returns:
+        Constructed Gymnasium environment.
+
+    Raises:
+        Exception: Re-raises non reward-mode construction errors.
+    """
+
+    try:
+        return gym.make(task_id, **env_kwargs)
+    except NotImplementedError as exc:
+        reward_mode = str(env_kwargs.get("reward_mode", ""))
+        if "Unsupported reward mode" not in str(exc) or reward_mode == "sparse":
+            raise
+        retry_kwargs = dict(env_kwargs)
+        retry_kwargs["reward_mode"] = "sparse"
+        print(
+            f"[maniskill] reward_mode={reward_mode!r} is unsupported for {task_id}; retrying with 'sparse'.",
+            flush=True,
+        )
+        return gym.make(task_id, **retry_kwargs)
+
+
 class ManiSkill3Adapter(SimulatorAdapter):
     """ManiSkill3 backend adapter using custom registered task env."""
 
@@ -49,17 +91,19 @@ class ManiSkill3Adapter(SimulatorAdapter):
         if control_mode.strip().upper() == "BASIC":
             control_mode = "pd_ee_delta_pose"
 
-        self.env = gym.make(
+        self.env = make_maniskill_env_with_reward_fallback(
             task_id,
-            obs_mode=env_kwargs.pop("obs_mode", "state_dict"),
-            reward_mode=env_kwargs.pop("reward_mode", "dense"),
-            control_mode=env_kwargs.pop("control_mode", control_mode),
-            render_mode=render_mode,
-            render_backend=render_backend,
-            sim_backend=env_kwargs.pop("sim_backend", "auto"),
-            robot_uids=env_kwargs.pop("robot_uids", str(cfg.simulator.robot).lower()),
-            max_episode_steps=env_kwargs.pop("max_episode_steps", int(cfg.simulator.horizon)),
-            **env_kwargs,
+            {
+                "obs_mode": env_kwargs.pop("obs_mode", "state_dict"),
+                "reward_mode": env_kwargs.pop("reward_mode", default_maniskill_reward_mode(cfg)),
+                "control_mode": env_kwargs.pop("control_mode", control_mode),
+                "render_mode": render_mode,
+                "render_backend": render_backend,
+                "sim_backend": env_kwargs.pop("sim_backend", "auto"),
+                "robot_uids": env_kwargs.pop("robot_uids", str(cfg.simulator.robot).lower()),
+                "max_episode_steps": env_kwargs.pop("max_episode_steps", int(cfg.simulator.horizon)),
+                **env_kwargs,
+            },
         )
         self._last_info: dict[str, Any] = {}
         self._last_obs: dict[str, np.ndarray] | None = None
@@ -99,11 +143,13 @@ class ManiSkill3Adapter(SimulatorAdapter):
             placed = np.ones((len(actor_states),), dtype=np.float32) if success else np.zeros((len(actor_states),), dtype=np.float32)
             return obj_state, active, placed, float(success)
 
+        eval_info = self._evaluate_task()
+        success = bool(eval_info.get("success", False))
         return (
             np.zeros((1,), dtype=np.float32),
             np.ones((1,), dtype=np.float32),
-            np.zeros((1,), dtype=np.float32),
-            0.0,
+            np.ones((1,), dtype=np.float32) if success else np.zeros((1,), dtype=np.float32),
+            float(success),
         )
 
     def _actor_pose_vector(self, actor: Any) -> np.ndarray:
@@ -325,9 +371,13 @@ class ManiSkill3Adapter(SimulatorAdapter):
         norm_info = self._normalize_info(dict(info))
 
         obs = self._canonical_obs_from_env()
-        frac = float(norm_info.get("success_fraction", obs["observation.state.task_progress"][0]))
+        native_success = bool(norm_info.get("success", False))
+        if "success_fraction" in norm_info:
+            frac = float(norm_info["success_fraction"])
+        else:
+            frac = 1.0 if native_success else float(obs["observation.state.task_progress"][0])
         norm_info["success_fraction"] = frac
-        norm_info["success"] = bool(frac >= 1.0 - 1e-6)
+        norm_info["success"] = bool(native_success or frac >= 1.0 - 1e-6)
 
         if "placed_count" not in norm_info:
             norm_info["placed_count"] = int(np.sum(obs["observation.state.placed_mask"] > 0.5))
@@ -380,6 +430,8 @@ class ManiSkill3Adapter(SimulatorAdapter):
 
     def check_success(self, info: dict[str, Any] | None = None, obs: dict[str, np.ndarray] | None = None) -> bool:
         src = info if info is not None else self._last_info
+        if bool(src.get("success", False)):
+            return True
         frac = float(src.get("success_fraction", 0.0))
         return bool(frac >= 1.0 - 1e-6)
 

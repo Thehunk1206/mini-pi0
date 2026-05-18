@@ -15,6 +15,8 @@ class ActionChunkDataset(Dataset):
     action sequence ``[t, t + chunk_size)``.
     """
 
+    actions_are_normalized = True
+
     def __init__(
         self,
         episodes: list[EpisodeData],

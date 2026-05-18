@@ -3,34 +3,30 @@ from __future__ import annotations
 """Main training entrypoint with simple research-style structure."""
 
 import copy
+import inspect
 import json
 import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data import Sampler
 
 from mini_pi0.config.io import dump_config
-from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
-from mini_pi0.dataset.episodes import EpisodeData, load_episodes_from_config
-from mini_pi0.dataset.stats import ActionStats
-from mini_pi0.dataset.torch_dataset import ActionChunkDataset
+from mini_pi0.config.schema import RootConfig
 from mini_pi0.models.registry import build_checkpoint_payload, load_checkpoint, make_model, save_checkpoint
+from mini_pi0.train.augmentation import GpuBatchProcessor
 from mini_pi0.train.augmentation import augment_actions as _augment_actions
 from mini_pi0.train.augmentation import augment_image_batch as _augment_image_batch
+from mini_pi0.train.dataset_builder import PreparedTrainingData, TrainingDatasetBuilder
 from mini_pi0.train.data import (
     curate_episodes as _curate_episodes,
 )
 from mini_pi0.train.data import (
-    infer_action_dim,
-    infer_prop_dim,
     print_train_header,
     resolve_num_workers,
     seed_everything,
-    split_train_val,
-    validate_image_observations,
 )
 from mini_pi0.train.optim import (
     ExponentialMovingAverage,
@@ -38,6 +34,11 @@ from mini_pi0.train.optim import (
     build_scheduler,
     restore_model_state,
     snapshot_model_state,
+)
+from mini_pi0.train.samplers import (
+    BlockShuffleSampler,
+    dataset_prefers_locality_sampler,
+    locality_order_for_dataset,
 )
 from mini_pi0.utils.device import resolve_device
 from mini_pi0.utils.precision import autocast_context, resolve_runtime_dtype
@@ -134,80 +135,10 @@ def _run_training_sim_eval(
     return run_eval(eval_cfg)
 
 
-def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> tuple[list[EpisodeData], dict[str, Any], Any, Any | None, Path]:
-    """Load data, align config dims, build action-chunk dataset, and split train/val."""
-    print(
-        "[train] Loading dataset | "
-        f"format={cfg.data.format} n_demos={cfg.data.n_demos}",
-        flush=True,
-    )
-    episodes = load_episodes_from_config(cfg)
-    print(f"[train] Dataset loaded | episodes={len(episodes)}", flush=True)
+def _prepare_episodes_and_dataset(cfg: RootConfig, run_dir: Path) -> PreparedTrainingData:
+    """Compatibility wrapper around the class-based dataset builder."""
 
-    episodes, curation_summary = _curate_episodes(episodes, cfg)
-    if curation_summary.get("enabled", False):
-        print(
-            "[train] Data curation | "
-            f"before={curation_summary['before_episodes']} after={curation_summary['after_episodes']} "
-            f"removed={curation_summary['removed_episodes']} "
-            f"progress_key={curation_summary.get('progress_key')}",
-            flush=True,
-        )
-        if curation_summary.get("reasons"):
-            print(f"[train] Data curation reasons | {curation_summary['reasons']}", flush=True)
-
-    state_keys = effective_state_keys(cfg.robot)
-    image_keys = effective_image_keys(cfg.robot)
-
-    inferred_action_dim = infer_action_dim(episodes)
-    inferred_prop_dim = infer_prop_dim(episodes[0].obs[0], state_keys)
-    validate_image_observations(episodes[0].obs[0], image_keys)
-    if cfg.robot.action_dim != inferred_action_dim:
-        print(
-            f"[train] Overriding robot.action_dim from {cfg.robot.action_dim} to inferred {inferred_action_dim} "
-            "based on dataset actions."
-        )
-    if cfg.model.action_dim != inferred_action_dim:
-        print(
-            f"[train] Overriding model.action_dim from {cfg.model.action_dim} to inferred {inferred_action_dim} "
-            "based on dataset actions."
-        )
-    if cfg.model.prop_dim != inferred_prop_dim:
-        print(
-            f"[train] Overriding model.prop_dim from {cfg.model.prop_dim} to inferred {inferred_prop_dim} "
-            "based on dataset state keys."
-        )
-    cfg.robot.action_dim = inferred_action_dim
-    cfg.model.action_dim = inferred_action_dim
-    cfg.model.prop_dim = inferred_prop_dim
-    dump_config(run_dir / "config_resolved.yaml", cfg)
-
-    all_actions = np.concatenate([ep.actions.astype(np.float32) for ep in episodes], axis=0)
-    stats = ActionStats.from_actions(all_actions)
-    run_stats_path = run_dir / "artifacts" / "action_stats.json"
-    stats.save(str(run_stats_path))
-
-    dataset = ActionChunkDataset(
-        episodes=episodes,
-        chunk_size=cfg.data.chunk_size,
-        image_key=cfg.robot.image_key,
-        image_keys=image_keys,
-        proprio_keys=state_keys,
-        action_stats=stats,
-        obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
-        preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
-    )
-    train_dataset, val_dataset = split_train_val(
-        dataset,
-        val_ratio=float(getattr(cfg.train, "val_ratio", 0.0)),
-        seed=int(cfg.experiment.seed),
-    )
-    print(
-        f"[train] Prepared action-chunk dataset | total={len(dataset)} train={len(train_dataset)} "
-        f"val={(len(val_dataset) if val_dataset is not None else 0)}",
-        flush=True,
-    )
-    return episodes, curation_summary, train_dataset, val_dataset, run_stats_path
+    return TrainingDatasetBuilder(cfg, run_dir).build()
 
 
 def _build_dataloaders(
@@ -215,20 +146,27 @@ def _build_dataloaders(
     val_dataset: Any | None,
     cfg: RootConfig,
     device: torch.device,
-) -> tuple[DataLoader, DataLoader | None, int, bool]:
+) -> tuple[DataLoader, DataLoader | None, int, bool, int | None]:
     """Create train and optional validation dataloaders."""
     num_workers = resolve_num_workers(cfg.train.num_workers)
     use_persistent = bool(cfg.train.persistent_workers and num_workers > 0)
+    train_sampler = _build_train_sampler(train_dataset, cfg)
     loader_kwargs: dict[str, Any] = {
         "batch_size": int(cfg.train.batch_size),
-        "shuffle": True,
+        "shuffle": train_sampler is None,
         "num_workers": num_workers,
         "pin_memory": (device.type == "cuda"),
         "drop_last": False,
         "persistent_workers": use_persistent,
     }
+    if "in_order" in inspect.signature(DataLoader).parameters:
+        loader_kwargs["in_order"] = bool(getattr(cfg.train, "dataloader_in_order", True))
+    if train_sampler is not None:
+        loader_kwargs["sampler"] = train_sampler
+    prefetch_factor = None
     if num_workers > 0:
-        loader_kwargs["prefetch_factor"] = 2
+        prefetch_factor = int(max(1, getattr(cfg.train, "prefetch_factor", 4)))
+        loader_kwargs["prefetch_factor"] = prefetch_factor
 
     loader = DataLoader(train_dataset, **loader_kwargs)
     val_loader = None
@@ -236,7 +174,51 @@ def _build_dataloaders(
         val_kwargs = dict(loader_kwargs)
         val_kwargs["shuffle"] = False
         val_loader = DataLoader(val_dataset, **val_kwargs)
-    return loader, val_loader, num_workers, use_persistent
+    return loader, val_loader, num_workers, use_persistent, prefetch_factor
+
+
+def _build_train_sampler(train_dataset: Any, cfg: RootConfig) -> Sampler[int] | None:
+    """Build the configured training sampler strategy."""
+
+    sample_order = str(getattr(cfg.train, "sample_order", "auto")).strip().lower()
+    if sample_order == "auto":
+        sample_order = "block_shuffle" if dataset_prefers_locality_sampler(train_dataset) else "random"
+    if sample_order in {"random", "shuffle"}:
+        return None
+    if sample_order in {"sequential", "none"}:
+        return torch.utils.data.SequentialSampler(train_dataset)
+    if sample_order != "block_shuffle":
+        raise ValueError(
+            "train.sample_order must be one of: auto, random, block_shuffle, sequential. "
+            f"Got {cfg.train.sample_order!r}."
+        )
+    return BlockShuffleSampler(
+        locality_order_for_dataset(train_dataset),
+        block_size=int(max(1, getattr(cfg.train, "block_shuffle_size", 2048))),
+        seed=int(cfg.experiment.seed),
+        shuffle_within_block=bool(getattr(cfg.train, "block_shuffle_within_block", False)),
+    )
+
+
+def _set_epoch_for_sampler(loader: DataLoader, epoch: int) -> None:
+    """Notify epoch-aware samplers that a new epoch has started."""
+
+    set_epoch = getattr(getattr(loader, "sampler", None), "set_epoch", None)
+    if callable(set_epoch):
+        set_epoch(epoch)
+
+
+def _sampler_description(loader: DataLoader) -> str:
+    """Return a compact sampler description for training logs."""
+
+    sampler = getattr(loader, "sampler", None)
+    if isinstance(sampler, BlockShuffleSampler):
+        return (
+            "block_shuffle("
+            f"block_size={sampler.block_size}, "
+            f"shuffle_within_block={sampler.shuffle_within_block})"
+        )
+    return type(sampler).__name__ if sampler is not None else "unknown"
 
 
 def _restore_from_checkpoint(
@@ -299,14 +281,25 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     dump_config(run_dir / "config_resolved.yaml", cfg)
     seed_everything(int(cfg.experiment.seed))
 
-    episodes, curation_summary, train_dataset, val_dataset, run_stats_path = _prepare_episodes_and_dataset(cfg, run_dir)
+    prepared = _prepare_episodes_and_dataset(cfg, run_dir)
 
     model = make_model(cfg)
     device = resolve_device(cfg.train.device)
     model = model.to(device)
-    print_train_header(cfg, device, n_episodes=len(episodes), n_samples=len(train_dataset), model=model)
+    print_train_header(cfg, device, n_episodes=prepared.episode_count, n_samples=len(prepared.train_dataset), model=model)
 
-    loader, val_loader, num_workers, use_persistent = _build_dataloaders(train_dataset, val_dataset, cfg, device)
+    loader, val_loader, num_workers, use_persistent, prefetch_factor = _build_dataloaders(
+        prepared.train_dataset,
+        prepared.val_dataset,
+        cfg,
+        device,
+    )
+    batch_processor = GpuBatchProcessor(
+        cfg=cfg,
+        device=device,
+        action_stats=prepared.action_stats,
+        normalize_actions=prepared.normalize_actions_on_device,
+    )
 
     optimizer, lr_summary = _build_optimizer(model, cfg)
     scheduler, scheduler_desc = build_scheduler(optimizer, cfg)
@@ -325,7 +318,9 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     print(f"Training on device : {device}")
     print(
         f"Dataloader         : batch_size={cfg.train.batch_size}, num_workers={num_workers}, "
-        f"pin_memory={device.type == 'cuda'}, persistent_workers={use_persistent}"
+        f"pin_memory={device.type == 'cuda'}, persistent_workers={use_persistent}, "
+        f"prefetch_factor={prefetch_factor}, in_order={getattr(loader, 'in_order', 'NA')}, "
+        f"sample_order={_sampler_description(loader)}"
     )
     print(
         "Validation         : "
@@ -389,6 +384,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     best_success_epoch: int | None = None
 
     for epoch in range(start_epoch, epochs):
+        _set_epoch_for_sampler(loader, epoch)
         model.train()
         total_loss = 0.0
         epoch_start = time.perf_counter()
@@ -413,11 +409,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             data_wait_s += batch_ready - iter_end
 
             step_start = time.perf_counter()
-            img = img.to(device)
-            prop = prop.to(device)
-            actions = actions.to(device)
-            img = _augment_image_batch(img, cfg)
-            actions = _augment_actions(actions, cfg)
+            img, prop, actions = batch_processor.train_batch(img, prop, actions)
 
             with _model_forward_context(cfg, device):
                 loss = _compute_policy_loss(model, cfg, img, prop, actions)
@@ -454,9 +446,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             val_steps = 0
             with torch.no_grad():
                 for img, prop, actions in val_loader:
-                    img = img.to(device)
-                    prop = prop.to(device)
-                    actions = actions.to(device)
+                    img, prop, actions = batch_processor.eval_batch(img, prop, actions)
                     with _model_forward_context(cfg, device):
                         val_total += float(_compute_policy_loss(model, cfg, img, prop, actions).item())
                     val_steps += 1
@@ -591,15 +581,15 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         "start_epoch": int(start_epoch),
         "epochs": int(epochs),
         "resume_from": str(resume_from) if resume_from else None,
-        "train_samples": int(len(train_dataset)),
-        "val_samples": int(len(val_dataset) if val_dataset is not None else 0),
-        "episodes": int(len(episodes)),
-        "data_curation": curation_summary,
+        "train_samples": int(len(prepared.train_dataset)),
+        "val_samples": int(len(prepared.val_dataset) if prepared.val_dataset is not None else 0),
+        "episodes": int(prepared.episode_count),
+        "data_curation": prepared.curation_summary,
         "best_checkpoint": str(run_ckpt_dir / "best.pt"),
         "best_success_checkpoint": str(run_ckpt_dir / "best_success.pt"),
         "best_success_rate": (float(best_success_rate) if best_success_epoch is not None else None),
         "best_success_epoch": best_success_epoch,
-        "action_stats": str(run_stats_path),
+        "action_stats": str(prepared.action_stats_path),
     }
     with (run_dir / "metrics" / "train_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)

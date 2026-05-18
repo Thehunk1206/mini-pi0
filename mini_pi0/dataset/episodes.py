@@ -81,7 +81,7 @@ def list_supported_dataset_formats() -> list[str]:
         List of supported format keys.
     """
 
-    return ["robomimic_hdf5", "lerobot_hf"]
+    return ["robomimic_hdf5", "lerobot_v3", "lerobot_hf"]
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -510,7 +510,7 @@ def load_episodes_from_config(cfg) -> list[EpisodeData]:
             fallback_image_hw=fallback_hw,
         )
 
-    if fmt in {"lerobot", "lerobot_hf", "hf"}:
+    if fmt in {"lerobot", "lerobot_hf", "lerobot_v3", "hf"}:
         repo_id = cfg.data.lerobot_repo_id
         if not repo_id:
             raise ValueError("data.lerobot_repo_id must be set when data.format=lerobot_hf")

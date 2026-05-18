@@ -132,11 +132,16 @@ class DataConfig:
     """Dataset loading and preprocessing configuration.
 
     Attributes:
-        format: Dataset format identifier (``robomimic_hdf5`` or ``lerobot_hf``).
+        format: Dataset format identifier (``robomimic_hdf5`` or ``lerobot_v3``).
         robomimic_hdf5: Path to robomimic HDF5 file for ``robomimic_hdf5`` format.
         robomimic_data_group: Top-level HDF5 group containing demonstrations.
-        lerobot_repo_id: Hugging Face LeRobot dataset repo id for ``lerobot_hf``.
+        lerobot_repo_id: Hugging Face LeRobot dataset repo id for ``lerobot_v3``.
+        lerobot_root: Optional local root directory for LeRobot datasets.
+        lerobot_revision: Optional Hugging Face dataset revision.
+        lerobot_episodes: Optional list of episode indices to load.
         lerobot_action_key: Sample key used as action vector in LeRobot samples.
+        lerobot_state_key: Sample key used as the policy proprio/state vector.
+        lerobot_image_keys: Optional ordered image feature keys for LeRobot samples.
         lerobot_episode_index_key: Sample key used for episode grouping in LeRobot samples.
         lerobot_local_files_only: Load LeRobot dataset from local cache only.
         lerobot_video_backend: Video decoding backend for LeRobot frames (`pyav`, `torchcodec`, or `video_reader`).
@@ -155,7 +160,12 @@ class DataConfig:
     robomimic_hdf5: str | None = "data/robomimic/lift/ph/low_dim_v15.hdf5"
     robomimic_data_group: str = "data"
     lerobot_repo_id: str | None = None
+    lerobot_root: str | None = None
+    lerobot_revision: str | None = None
+    lerobot_episodes: list[int] | None = None
     lerobot_action_key: str = "action"
+    lerobot_state_key: str = "observation.state"
+    lerobot_image_keys: list[str] | None = None
     lerobot_episode_index_key: str = "episode_index"
     lerobot_local_files_only: bool = False
     lerobot_video_backend: str | None = "pyav"
@@ -291,6 +301,18 @@ class TrainConfig:
         weight_decay: AdamW weight decay.
         num_workers: DataLoader worker count (-1 means auto).
         persistent_workers: Keep DataLoader workers alive between epochs.
+        prefetch_factor: DataLoader prefetch factor when workers are enabled.
+        dataloader_in_order: Preserve first-in-first-out worker batch ordering.
+            Disable for video-backed LeRobot datasets to avoid waiting on one
+            slow random-seek worker when other workers already produced batches.
+        sample_order: Training sample order strategy. ``auto`` uses regular
+            random shuffle for in-memory datasets and locality-aware block
+            shuffle for video-backed datasets.
+        block_shuffle_size: Number of locality-ordered samples per block when
+            ``sample_order`` resolves to ``block_shuffle``.
+        block_shuffle_within_block: Shuffle samples inside locality blocks.
+            Disable this for video-backed datasets to keep decoding mostly
+            sequential.
         save_best: Save checkpoints when loss improves.
         save_best_min_delta: Minimum loss improvement required to trigger save.
         grad_clip_norm: Gradient clipping norm threshold (<=0 disables clipping).
@@ -344,6 +366,11 @@ class TrainConfig:
     weight_decay: float = 1e-4
     num_workers: int = -1
     persistent_workers: bool = True
+    prefetch_factor: int = 4
+    dataloader_in_order: bool = True
+    sample_order: str = "auto"
+    block_shuffle_size: int = 2048
+    block_shuffle_within_block: bool = False
     save_best: bool = True
     save_best_min_delta: float = 1e-4
     grad_clip_norm: float = 1.0

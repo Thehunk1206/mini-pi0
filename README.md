@@ -23,13 +23,13 @@ Click the preview to open the MP4.
 
 ### PegInsertionSide Diagnostics
 
-Peg insertion is the current hard task. The model reaches and contacts the
-hole, but insertion is not yet reliable. The videos below are failure grids
-from the added close hole cameras, which make alignment errors visible.
+PegInsertionSide is the current hard task. The latest contact + hole-camera
+policy reaches 10.0% success over 100 eval episodes, with most remaining
+failures reaching the hole but timing out before stable insertion.
 
-| Left hole camera | Right hole camera |
-| --- | --- |
-| [![PegInsertion left hole camera failure grid](./assets/peginsertion_failure_grid_hole_left_camera_3x3.gif)](./assets/peginsertion_failure_grid_hole_left_camera_3x3.mp4) | [![PegInsertion right hole camera failure grid](./assets/peginsertion_failure_grid_hole_right_camera_3x3.gif)](./assets/peginsertion_failure_grid_hole_right_camera_3x3.mp4) |
+| Base camera success | Left hole camera success | Right hole camera success |
+| --- | --- | --- |
+| [![PegInsertion base camera success grid](./assets/peginsertion_seed4278_success_grid_base_camera_3x3.gif)](./assets/peginsertion_seed4278_success_grid_base_camera_3x3.mp4) | [![PegInsertion left hole camera success grid](./assets/peginsertion_seed4278_success_grid_hole_left_camera_3x3.gif)](./assets/peginsertion_seed4278_success_grid_hole_left_camera_3x3.mp4) | [![PegInsertion right hole camera success grid](./assets/peginsertion_seed4278_success_grid_hole_right_camera_3x3.gif)](./assets/peginsertion_seed4278_success_grid_hole_right_camera_3x3.mp4) |
 
 Click a preview to open the MP4.
 
@@ -69,18 +69,35 @@ examples/configs/
 
 ## Install
 
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -e ".[maniskill3,vision,dev]"
-```
-
-If you use `uv`:
+This project is `uv` first. Use Python 3.11 for the ManiSkill + LeRobot stack.
 
 ```bash
 uv venv --python 3.11 .venv
 . .venv/bin/activate
-uv sync --extra maniskill3 --extra vision --extra dev
+uv pip install -e ".[maniskill3,vision,dev]"
+```
+
+For LeRobot v3 support in the same environment as ManiSkill, install with the
+repo constraints so the simulator stack stays compatible:
+
+```bash
+uv pip install -e ".[maniskill3,lerobot,vision,dev]" \
+  -c constraints-maniskill-lerobot.txt
+```
+
+Pip fallback:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -e ".[maniskill3,lerobot,vision,dev]" \
+  -c constraints-maniskill-lerobot.txt
+```
+
+On shared machines with read-only Hugging Face cache paths, set a writable cache:
+
+```bash
+export HF_HOME=/tmp/minipi_hf_cache
 ```
 
 ## Quickstart
@@ -139,6 +156,43 @@ mini-pi0 convert-maniskill-trajectory \
   --input_hdf5 demos/maniskill/StackCube-v1/motionplanning/trajectory.rgbd.pd_joint_pos.physx_cpu.h5 \
   --output_hdf5 data/robomimic/maniskill/stackcube/mp/rgbd_pd_joint_pos.hdf5 \
   --overwrite
+```
+
+Or convert a replayed ManiSkill trajectory directly into LeRobot v3 format with
+ManiSkill's official converter:
+
+```bash
+python -m mani_skill.trajectory.convert_to_lerobot \
+  --traj-path demos/maniskill/StackCube-v1/motionplanning/trajectory.rgbd.pd_joint_pos.physx_cpu.h5 \
+  --output-dir data/lerobot/stackcube-rgbd-pd-joint-pos \
+  --task-name "Stack cube" \
+  --fps 20 \
+  --image-size 128x128 \
+  --robot-type panda
+```
+
+Existing robomimic HDF5 files can also be ported to LeRobot v3:
+
+```bash
+mini-pi0 convert-robomimic-to-lerobot \
+  --input_hdf5 data/robomimic/maniskill/stackcube/mp/rgbd_pd_joint_pos.hdf5 \
+  --output_dir data/lerobot/stackcube-rgbd-pd-joint-pos \
+  --repo_id local/stackcube-rgbd-pd-joint-pos \
+  --task_name "Stack cube" \
+  --fps 20 \
+  --image_keys agentview_image,robot0_eye_in_hand_image \
+  --overwrite
+```
+
+Train from LeRobot v3 by switching the dataset format:
+
+```bash
+mini-pi0 train \
+  --config examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml \
+  --set data.format=lerobot_v3 \
+  --set data.lerobot_repo_id=local/stackcube-rgbd-pd-joint-pos \
+  --set data.lerobot_root=data/lerobot/stackcube-rgbd-pd-joint-pos \
+  --set data.lerobot_image_keys='["observation.images.agentview_image","observation.images.robot0_eye_in_hand_image"]'
 ```
 
 For full data notes, custom environment collection, and task conversion details,
@@ -210,13 +264,12 @@ python -m pytest -q
 
 ## Results
 
+Full task benchmark tracking lives in [docs/TASK_BENCHMARK.md](docs/TASK_BENCHMARK.md).
+
 ### StackCube-v1
 
 Config:
 `examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml`
-
-Run:
-`runs/maniskill3-stackcube-motionplanning-transformer-vit-hist2-medium/run1/final_eval_best_seed42`
 
 | Metric | Value |
 | --- | ---: |
@@ -224,49 +277,42 @@ Run:
 | CI95 | 92.5% - 98.0% |
 | Episodes | 200 |
 | Mean episode length | 166.2 steps |
-| Mean reward | 586.7 |
 | Mean inference speed | 31.9 ms/chunk |
-| Mean action clipping | 58.4% |
 
 ![StackCube eval metrics](./assets/stackcube_eval_metrics.png)
 
 Artifacts:
 - [success grid](./assets/stackcube_success_grid_3x3.mp4)
 - [eval metrics](./assets/stackcube_eval_metrics.png)
-- Source run artifacts:
-  `runs/maniskill3-stackcube-motionplanning-transformer-vit-hist2-medium/run1/final_eval_best_seed42/artifacts`
 
 ### PegInsertionSide-v1
 
 Config:
 `examples/configs/maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml`
 
-Run:
-`runs/maniskill3-peginsertion-motionplanning-transformer-vit-hist3-medium-holecam-contacts/run1/final_eval_best_seed24`
-
 | Metric | Value |
 | --- | ---: |
-| Success rate | 0.0% |
-| Episodes | 10 |
-| Mean episode length | 460.9 steps |
-| Mean reward | 1245.4 |
-| Mean inference speed | 49.0 ms/chunk |
-| Mean action clipping | 0.12% |
-| Failure modes | 9 timeout after progress, 1 drop/unstable |
+| Success rate | 10.0% |
+| CI95 | 5.0% - 16.0% |
+| Episodes | 100 |
+| Mean episode length | 474.8 steps |
+| Mean inference speed | 43.4 ms/chunk |
+| Failure modes | 90 timeout after progress, 10 success |
 
-![PegInsertion eval metrics](./assets/peginsertion_eval_metrics.png)
+![PegInsertion eval metrics](./assets/peginsertion_seed4278_eval_metrics.png)
 
 Artifacts:
-- [left hole-camera failure grid](./assets/peginsertion_failure_grid_hole_left_camera_3x3.mp4)
-- [right hole-camera failure grid](./assets/peginsertion_failure_grid_hole_right_camera_3x3.mp4)
-- [eval metrics](./assets/peginsertion_eval_metrics.png)
-- Source run artifacts:
-  `runs/maniskill3-peginsertion-motionplanning-transformer-vit-hist3-medium-holecam-contacts/run1/final_eval_best_seed24/artifacts`
+- [base-camera success grid](./assets/peginsertion_seed4278_success_grid_base_camera_3x3.mp4)
+- [left hole-camera success grid](./assets/peginsertion_seed4278_success_grid_hole_left_camera_3x3.mp4)
+- [right hole-camera success grid](./assets/peginsertion_seed4278_success_grid_hole_right_camera_3x3.mp4)
+- [eval metrics](./assets/peginsertion_seed4278_eval_metrics.png)
 
-Current interpretation: the policy can reach the hole region and generate
-contact, but insertion alignment is still the active failure point. The next
-useful debugging step is task-specific phase diagnostics: grasp state, peg-hole
-distance, peg-hole angular error, insertion depth, and contact/jamming signals.
+Current interpretation: the policy now solves a small but real fraction of
+rollouts. Most failures still make progress toward the hole, so the next useful
+step is phase diagnostics: grasp state, peg-hole distance, angular alignment,
+insertion depth, contact force, and jamming signals.
+
+For the task-wise benchmark table, see [docs/TASK_BENCHMARK.md](docs/TASK_BENCHMARK.md).
 
 
 ## TODO
@@ -281,7 +327,7 @@ distance, peg-hole angular error, insertion depth, and contact/jamming signals.
   conditioning, and phase-aware evaluation metrics.
 - [ ] Add domain randomization presets for all ManiSkill tasks once the baseline
   imitation-learning setup is stable.
-- [ ] Add LeRobot dataset support for scalable multi-task training across larger
+- [x] Add LeRobot v3 dataset support for scalable multi-task training across larger
   shared robot datasets.
 - [ ] Add multi-GPU training for larger ViT backbones, more cameras, and larger
   task mixtures.

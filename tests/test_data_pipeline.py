@@ -17,7 +17,7 @@ from mini_pi0.dataset.torch_dataset import ActionChunkDataset
 
 class DataPipelineTests(unittest.TestCase):
     def test_supported_formats(self):
-        self.assertEqual(set(list_supported_dataset_formats()), {"robomimic_hdf5", "lerobot_hf"})
+        self.assertEqual(set(list_supported_dataset_formats()), {"robomimic_hdf5", "lerobot_v3", "lerobot_hf"})
 
     def test_robomimic_hdf5_loading(self):
         with tempfile.TemporaryDirectory() as d:

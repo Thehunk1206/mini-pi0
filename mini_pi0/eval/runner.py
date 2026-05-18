@@ -8,7 +8,7 @@ from typing import Any
 from mini_pi0.config.io import dump_config
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.dataset.obs_processor import ObsProcessor
-from mini_pi0.eval.core import evaluate, evaluate_vectorized_maniskill, record_episode, report, save_rollout_grid
+from mini_pi0.eval.core import _episode_seed, evaluate, evaluate_vectorized_maniskill, record_episode, report, save_rollout_grid
 from mini_pi0.models.registry import load_checkpoint, make_model
 from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.utils.device import resolve_device
@@ -327,13 +327,14 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         rollout_dir = run_dir / "artifacts" / "rollouts"
         rollout_dir.mkdir(parents=True, exist_ok=True)
         for seed in range(min(5, int(cfg.eval.n_episodes))):
+            episode_seed = _episode_seed(cfg, seed)
             record_episode(
                 model=model,
                 processor=processor,
                 cfg=cfg,
                 make_adapter=adapter_maker,
                 path=str(rollout_dir / f"ep_{seed}.mp4"),
-                seed=seed,
+                seed=episode_seed,
             )
 
     print(f"Run artifacts saved under: {run_dir}")

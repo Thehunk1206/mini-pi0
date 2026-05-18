@@ -9,7 +9,10 @@ from mini_pi0.deploy.sim_runner import _resolve_deploy_rollout_controls
 from mini_pi0.eval.core import _resolve_eval_rollout_controls
 from mini_pi0.models.registry import make_model
 from mini_pi0.train.optim import ExponentialMovingAverage
-from mini_pi0.train.runner import _augment_actions, _augment_image_batch, _build_optimizer, _curate_episodes
+from mini_pi0.dataset.stats import ActionStats
+from mini_pi0.train.augmentation import GpuBatchProcessor
+from mini_pi0.train.runner import _augment_actions, _augment_image_batch, _build_dataloaders, _build_optimizer, _curate_episodes
+from mini_pi0.train.samplers import BlockShuffleSampler, dataset_prefers_locality_sampler, locality_order_for_dataset
 
 
 def _make_episode(length: int, action_scale: float, object_delta: float) -> EpisodeData:
@@ -26,6 +29,10 @@ def _make_episode(length: int, action_scale: float, object_delta: float) -> Epis
             }
         )
     return EpisodeData(obs=obs, actions=actions)
+
+
+class _LocalityTensorDataset(torch.utils.data.TensorDataset):
+    prefers_locality_sampler = True
 
 
 class TrainingStabilityControlTests(unittest.TestCase):
@@ -138,6 +145,87 @@ class TrainingStabilityControlTests(unittest.TestCase):
         self.assertEqual(tuple(actions_aug.shape), (4, 8, 7))
         self.assertFalse(torch.allclose(actions_aug, actions))
         self.assertTrue(torch.all(actions_aug.abs() <= 1.0 + 1e-6).item())
+
+    def test_gpu_batch_processor_normalizes_raw_actions_on_device(self):
+        cfg = load_config(overrides=["train.image_aug_enable=false", "train.action_noise_std=0.0"])
+        stats = ActionStats(mean=np.array([1.0, 2.0], dtype=np.float32), std=np.array([2.0, 4.0], dtype=np.float32))
+        processor = GpuBatchProcessor(
+            cfg=cfg,
+            device=torch.device("cpu"),
+            action_stats=stats,
+            normalize_actions=True,
+        )
+        img = torch.full((1, 3, 8, 8), 255, dtype=torch.uint8)
+        prop = torch.ones(1, 3)
+        actions = torch.tensor([[[3.0, 10.0]]])
+
+        img_out, prop_out, actions_out = processor.train_batch(img, prop, actions)
+
+        self.assertEqual(img_out.device.type, "cpu")
+        self.assertTrue(torch.allclose(img_out.max(), torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(prop_out, prop.float()))
+        self.assertTrue(torch.allclose(actions_out, torch.tensor([[[1.0, 2.0]]])))
+
+    def test_dataloader_uses_prefetch_factor_with_workers(self):
+        cfg = load_config(
+            overrides=[
+                "train.batch_size=2",
+                "train.num_workers=2",
+                "train.persistent_workers=true",
+                "train.prefetch_factor=3",
+                "train.dataloader_in_order=false",
+            ]
+        )
+        dataset = torch.utils.data.TensorDataset(torch.arange(8), torch.arange(8), torch.arange(8))
+
+        loader, _, num_workers, persistent, prefetch = _build_dataloaders(
+            dataset,
+            None,
+            cfg,
+            torch.device("cpu"),
+        )
+
+        self.assertEqual(num_workers, 2)
+        self.assertTrue(persistent)
+        self.assertEqual(prefetch, 3)
+        self.assertEqual(loader.prefetch_factor, 3)
+        if hasattr(loader, "in_order"):
+            self.assertFalse(loader.in_order)
+
+    def test_block_shuffle_sampler_yields_all_indices_once(self):
+        sampler = BlockShuffleSampler(range(10), block_size=4, seed=0)
+
+        indices = list(sampler)
+
+        self.assertEqual(sorted(indices), list(range(10)))
+        self.assertEqual(len(indices), 10)
+
+    def test_locality_order_sorts_subset_by_source_index(self):
+        dataset = torch.utils.data.TensorDataset(torch.arange(8))
+        subset = torch.utils.data.Subset(dataset, [5, 2, 7, 1])
+
+        order = locality_order_for_dataset(subset)
+
+        self.assertEqual(order, (3, 1, 0, 2))
+
+    def test_dataloader_auto_uses_block_shuffle_for_locality_dataset(self):
+        cfg = load_config(
+            overrides=[
+                "train.batch_size=2",
+                "train.num_workers=0",
+                "train.sample_order='auto'",
+                "train.block_shuffle_size=4",
+                "train.block_shuffle_within_block=false",
+            ]
+        )
+        dataset = _LocalityTensorDataset(torch.arange(8), torch.arange(8), torch.arange(8))
+
+        loader, _, _, _, _ = _build_dataloaders(dataset, None, cfg, torch.device("cpu"))
+
+        self.assertTrue(dataset_prefers_locality_sampler(dataset))
+        self.assertIsInstance(loader.sampler, BlockShuffleSampler)
+        self.assertEqual(loader.sampler.block_size, 4)
+        self.assertFalse(loader.sampler.shuffle_within_block)
 
     def test_ema_update_aligns_shadow_dtype_after_resume(self):
         model = torch.nn.Linear(2, 2).float()

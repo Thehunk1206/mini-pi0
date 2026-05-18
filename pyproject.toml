@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-lerobot = ["lerobot", "av"]
+lerobot = ["lerobot==0.4.4", "av"]
 vision = ["timm"]
 hardware = ["opencv-python", "roboticstoolbox-python", "feetech-servo-sdk"]
 maniskill3 = ["gymnasium", "mani_skill"]

@@ -1,0 +1,5 @@
+# Known-good ManiSkill 3 + LeRobot v3 dependency baseline.
+lerobot==0.4.4
+mani-skill==3.0.1
+mplib==0.1.1
+packaging<26
