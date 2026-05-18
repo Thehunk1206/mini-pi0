@@ -28,6 +28,10 @@ rollouts/
 !assets/peginsertion_failure_grid_hole_right_camera_3x3.mp4
 !assets/peginsertion_contact_overlay_demo_886_h264.mp4
 !assets/peginsertion_eval_metrics.png
+!assets/peginsertion_seed4278_eval_metrics.png
+!assets/peginsertion_seed4278_success_grid_base_camera_3x3.mp4
+!assets/peginsertion_seed4278_success_grid_hole_left_camera_3x3.mp4
+!assets/peginsertion_seed4278_success_grid_hole_right_camera_3x3.mp4
 
 # Local data (keep directory names, ignore contents)
 data/demos/

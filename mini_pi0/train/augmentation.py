@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from mini_pi0.config.schema import RootConfig
+from mini_pi0.dataset.stats import ActionStats
 
 
 def _random_resized_crop_batch(img: torch.Tensor, scale_min: float) -> torch.Tensor:
@@ -77,3 +78,90 @@ def augment_actions(actions: torch.Tensor, cfg: RootConfig) -> torch.Tensor:
         out = out.clamp(-clip, clip)
     return out
 
+
+class GpuBatchProcessor:
+    """Move batches to a device and run tensor-only preprocessing there."""
+
+    def __init__(
+        self,
+        *,
+        cfg: RootConfig,
+        device: torch.device,
+        action_stats: ActionStats | None,
+        normalize_actions: bool,
+    ) -> None:
+        """Create a GPU-aware batch processor.
+
+        Args:
+            cfg: Root training config.
+            device: Target training device.
+            action_stats: Optional action normalization statistics.
+            normalize_actions: Whether incoming action chunks are raw actions.
+        """
+
+        self.cfg = cfg
+        self.device = device
+        self.normalize_actions = bool(normalize_actions)
+        self.mean: torch.Tensor | None = None
+        self.std: torch.Tensor | None = None
+        if action_stats is not None:
+            self.mean = torch.as_tensor(action_stats.mean, device=device, dtype=torch.float32)
+            self.std = torch.as_tensor(action_stats.std, device=device, dtype=torch.float32)
+
+    def train_batch(
+        self,
+        img: torch.Tensor,
+        prop: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Transfer and preprocess a training batch."""
+
+        img, prop, actions = self._transfer(img, prop, actions)
+        img = self._prepare_images(img)
+        actions = self._prepare_actions(actions)
+        img = augment_image_batch(img, self.cfg)
+        actions = augment_actions(actions, self.cfg)
+        return img, prop.float(), actions
+
+    def eval_batch(
+        self,
+        img: torch.Tensor,
+        prop: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Transfer and preprocess a validation batch without augmentation."""
+
+        img, prop, actions = self._transfer(img, prop, actions)
+        return self._prepare_images(img), prop.float(), self._prepare_actions(actions)
+
+    def _transfer(
+        self,
+        img: torch.Tensor,
+        prop: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Asynchronously transfer tensors when pinned memory is available."""
+
+        non_blocking = self.device.type == "cuda"
+        return (
+            img.to(self.device, non_blocking=non_blocking),
+            prop.to(self.device, non_blocking=non_blocking),
+            actions.to(self.device, non_blocking=non_blocking),
+        )
+
+    def _prepare_images(self, img: torch.Tensor) -> torch.Tensor:
+        """Convert image tensors to contiguous float data on device."""
+
+        if img.dtype == torch.uint8:
+            return img.float().div_(255.0).contiguous()
+        return img.float().contiguous()
+
+    def _prepare_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        """Normalize raw action chunks on device when needed."""
+
+        out = actions.float()
+        if not self.normalize_actions:
+            return out
+        if self.mean is None or self.std is None:
+            raise RuntimeError("Action stats are required to normalize raw action chunks.")
+        return (out - self.mean.view(*([1] * (out.ndim - 1)), -1)) / self.std.view(*([1] * (out.ndim - 1)), -1)

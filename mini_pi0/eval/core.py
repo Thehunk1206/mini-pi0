@@ -256,6 +256,12 @@ def _resolve_grid_cameras(cfg: RootConfig) -> list[str]:
     return cameras
 
 
+def _episode_seed(cfg: RootConfig, episode_index: int) -> int:
+    """Return deterministic eval seed for one episode."""
+
+    return int(getattr(cfg.experiment, "seed", 0)) + int(episode_index)
+
+
 def _new_grid_rollout_store(cameras: list[str]) -> dict[str, list[list[np.ndarray]]]:
     """Create an empty camera-indexed rollout frame store."""
 
@@ -308,11 +314,12 @@ def evaluate(
     failure_rollouts = _new_grid_rollout_store(grid_cameras)
 
     for ep in range(n_episodes):
-        adapter = make_adapter(ep)
-        obs = adapter.reset(seed=ep)
+        seed = _episode_seed(cfg, ep)
+        adapter = make_adapter(seed)
+        obs = adapter.reset(seed=seed)
         processor.reset_history(obs)
 
-        episode_rng = np.random.default_rng(ep)
+        episode_rng = np.random.default_rng(seed)
         cube_xy = tuple(cfg.eval.cube_xy) if cfg.eval.cube_xy is not None else None
         cube_xy_range = tuple(cfg.eval.cube_xy_range) if cfg.eval.cube_xy_range is not None else None
         adapter.set_object_pose(
@@ -489,6 +496,8 @@ def _make_vectorized_maniskill_env(cfg: RootConfig, num_envs: int):
 
     import gymnasium as gym
 
+    from mini_pi0.sim.maniskill3_adapter import default_maniskill_reward_mode, make_maniskill_env_with_reward_fallback
+
     import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
     import mini_pi0.sim.maniskill3_peginsertion_env  # noqa: F401
 
@@ -507,18 +516,20 @@ def _make_vectorized_maniskill_env(cfg: RootConfig, num_envs: int):
     if control_mode.strip().upper() == "BASIC":
         control_mode = "pd_ee_delta_pose"
 
-    return gym.make(
+    return make_maniskill_env_with_reward_fallback(
         task_id,
-        num_envs=int(num_envs),
-        obs_mode=env_kwargs.pop("obs_mode", "rgbd"),
-        reward_mode=env_kwargs.pop("reward_mode", "dense"),
-        control_mode=env_kwargs.pop("control_mode", control_mode),
-        render_mode="none",
-        render_backend=env_kwargs.pop("render_backend", "gpu"),
-        sim_backend=env_kwargs.pop("sim_backend", "auto"),
-        robot_uids=env_kwargs.pop("robot_uids", str(cfg.simulator.robot).lower()),
-        max_episode_steps=env_kwargs.pop("max_episode_steps", int(cfg.simulator.horizon)),
-        **env_kwargs,
+        {
+            "num_envs": int(num_envs),
+            "obs_mode": env_kwargs.pop("obs_mode", "rgbd"),
+            "reward_mode": env_kwargs.pop("reward_mode", default_maniskill_reward_mode(cfg)),
+            "control_mode": env_kwargs.pop("control_mode", control_mode),
+            "render_mode": "none",
+            "render_backend": env_kwargs.pop("render_backend", "gpu"),
+            "sim_backend": env_kwargs.pop("sim_backend", "auto"),
+            "robot_uids": env_kwargs.pop("robot_uids", str(cfg.simulator.robot).lower()),
+            "max_episode_steps": env_kwargs.pop("max_episode_steps", int(cfg.simulator.horizon)),
+            **env_kwargs,
+        },
     )
 
 
@@ -579,7 +590,7 @@ def evaluate_vectorized_maniskill(
     while completed < n_episodes:
         batch_n = min(num_envs, n_episodes - completed)
         env = _make_vectorized_maniskill_env(cfg, batch_n)
-        raw_obs, _ = env.reset(seed=int(cfg.experiment.seed) + completed)
+        raw_obs, _ = env.reset(seed=_episode_seed(cfg, completed))
         obs_batch = canonical_obs_batch_from_raw_env(
             env,
             image_keys=image_keys,

@@ -40,6 +40,23 @@ train:
         self.assertEqual(cfg.eval.num_envs, 8)
         self.assertEqual(cfg.eval.grid_cameras, ["hand_camera"])
 
+    def test_lerobot_v3_fields_are_supported(self):
+        cfg = load_config(
+            overrides=[
+                "data.format='lerobot_v3'",
+                "data.lerobot_repo_id='local/test'",
+                "data.lerobot_root='data/lerobot/test'",
+                "data.lerobot_episodes=[1,2]",
+                "data.lerobot_image_keys=['observation.images.agentview_image']",
+            ]
+        )
+
+        self.assertEqual(cfg.data.format, "lerobot_v3")
+        self.assertEqual(cfg.data.lerobot_repo_id, "local/test")
+        self.assertEqual(cfg.data.lerobot_root, "data/lerobot/test")
+        self.assertEqual(cfg.data.lerobot_episodes, [1, 2])
+        self.assertEqual(cfg.data.lerobot_state_key, "observation.state")
+
     def test_removed_feature_mode_fields_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown config key"):
             load_config(overrides=["model.obs_mode='feature'"])

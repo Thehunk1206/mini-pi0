@@ -9,6 +9,10 @@ from mini_pi0.dataset.maniskill_convert import (
     ManiSkillMultiConversionConfig,
     convert_maniskill_trajectories_to_robomimic,
 )
+from mini_pi0.dataset.robomimic_to_lerobot import (
+    RobomimicToLeRobotConfig,
+    convert_robomimic_to_lerobot,
+)
 from mini_pi0.dataset.maniskill_collect import collect_maniskill_demos
 from mini_pi0.dataset.maniskill_oracle_mixture import collect_maniskill_oracle_mixture
 from mini_pi0.dataset.episodes import list_supported_dataset_formats
@@ -114,7 +118,14 @@ def _apply_train_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "data.robomimic_hdf5", args.robomimic_hdf5)
     _append_override(overrides, "data.robomimic_data_group", args.robomimic_data_group)
     _append_override(overrides, "data.lerobot_repo_id", args.lerobot_repo_id)
+    _append_override(overrides, "data.lerobot_root", args.lerobot_root)
+    _append_override(overrides, "data.lerobot_revision", args.lerobot_revision)
+    if args.lerobot_episodes is not None:
+        _append_override(overrides, "data.lerobot_episodes", _parse_csv_values(args.lerobot_episodes, int))
     _append_override(overrides, "data.lerobot_action_key", args.lerobot_action_key)
+    _append_override(overrides, "data.lerobot_state_key", args.lerobot_state_key)
+    if args.lerobot_image_keys is not None:
+        _append_override(overrides, "data.lerobot_image_keys", _parse_csv_values(args.lerobot_image_keys, str))
     _append_override(overrides, "data.lerobot_episode_index_key", args.lerobot_episode_index_key)
     _append_override(overrides, "data.lerobot_local_files_only", args.lerobot_local_files_only)
     _append_override(overrides, "data.lerobot_video_backend", args.lerobot_video_backend)
@@ -151,6 +162,7 @@ def _apply_train_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "train.model_print_depth", args.model_print_depth)
     _append_override(overrides, "train.num_workers", args.num_workers)
     _append_override(overrides, "train.persistent_workers", args.persistent_workers)
+    _append_override(overrides, "train.prefetch_factor", args.prefetch_factor)
     _append_override(overrides, "train.save_best", args.save_best)
     _append_override(overrides, "train.save_best_min_delta", args.save_best_min_delta)
 
@@ -332,6 +344,114 @@ def _build_parser() -> argparse.ArgumentParser:
     p_convert_ms.add_argument("--only_success", action=argparse.BooleanOptionalAction, default=True)
     p_convert_ms.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
 
+    p_convert_lr = sub.add_parser(
+        "convert-robomimic-to-lerobot",
+        help="Convert robomimic-style HDF5 into a local LeRobot v3 dataset",
+        description=(
+            "Convert an existing robomimic-style HDF5 dataset into a local LeRobot v3 dataset. "
+            "Images are written as LeRobot image/video features, actions are written to `action`, "
+            "and the selected low-dimensional observation keys are concatenated into `observation.state`."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p_convert_lr.add_argument(
+        "--input_hdf5",
+        required=True,
+        help="Source robomimic-style HDF5 file containing data/demo_*/actions and data/demo_*/obs/*.",
+    )
+    p_convert_lr.add_argument(
+        "--output_dir",
+        required=True,
+        help="Destination local LeRobot dataset directory to create.",
+    )
+    p_convert_lr.add_argument(
+        "--repo_id",
+        required=True,
+        help=(
+            "Logical LeRobot dataset id stored in metadata, e.g. local/stackcube-rgbd. "
+            "For local datasets this is an identifier, not the filesystem path."
+        ),
+    )
+    p_convert_lr.add_argument(
+        "--data_group",
+        default="data",
+        help="Top-level HDF5 group containing demo groups such as demo_0, demo_1, ...",
+    )
+    p_convert_lr.add_argument(
+        "--task_name",
+        default="robot manipulation",
+        help="Natural-language task label saved on every LeRobot frame.",
+    )
+    p_convert_lr.add_argument(
+        "--fps",
+        type=int,
+        default=20,
+        help="Dataset control/frame rate. Match this to ManiSkill control_freq for correct temporal windows.",
+    )
+    p_convert_lr.add_argument(
+        "--robot_type",
+        default="panda",
+        help="Robot type metadata stored by LeRobot, e.g. panda.",
+    )
+    p_convert_lr.add_argument(
+        "--image_keys",
+        default="agentview_image",
+        help=(
+            "Comma-separated HDF5 obs image keys to convert into observation.images.<key>, "
+            "e.g. agentview_image,robot0_eye_in_hand_image."
+        ),
+    )
+    p_convert_lr.add_argument(
+        "--state_keys",
+        default="robot0_eef_pos,robot0_eef_quat,robot0_gripper_qpos",
+        help=(
+            "Comma-separated HDF5 obs vector keys concatenated, in order, into LeRobot "
+            "observation.state. Include contact/force keys here when training with physics features."
+        ),
+    )
+    p_convert_lr.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional maximum number of episodes to convert. Useful for smoke tests.",
+    )
+    p_convert_lr.add_argument(
+        "--log_every",
+        type=int,
+        default=25,
+        help="Print a plain progress log every N converted episodes. Set 0 to log only completion.",
+    )
+    p_convert_lr.add_argument(
+        "--show_progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show a tqdm episode progress bar when tqdm is available.",
+    )
+    p_convert_lr.add_argument(
+        "--use_videos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Store image observations as encoded video features. Use --no-use_videos for image files/parquet image data.",
+    )
+    p_convert_lr.add_argument(
+        "--streaming_encoding",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable LeRobot streaming video encoding during conversion when supported by the installed LeRobot version.",
+    )
+    p_convert_lr.add_argument(
+        "--quiet_ffmpeg",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Suppress native ffmpeg/encoder stdout and stderr while each episode video is saved.",
+    )
+    p_convert_lr.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Delete and recreate --output_dir if it already exists.",
+    )
+
     p_train = sub.add_parser("train", help="Train action model")
     _add_common_config_args(p_train)
     p_train.add_argument("--run_name", default=None)
@@ -346,7 +466,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--robomimic_hdf5", default=None)
     p_train.add_argument("--robomimic_data_group", default=None)
     p_train.add_argument("--lerobot_repo_id", default=None)
+    p_train.add_argument("--lerobot_root", default=None)
+    p_train.add_argument("--lerobot_revision", default=None)
+    p_train.add_argument("--lerobot_episodes", default=None, help="Comma-separated episode indices.")
     p_train.add_argument("--lerobot_action_key", default=None)
+    p_train.add_argument("--lerobot_state_key", default=None)
+    p_train.add_argument("--lerobot_image_keys", default=None, help="Comma-separated LeRobot image feature keys.")
     p_train.add_argument("--lerobot_episode_index_key", default=None)
     p_train.add_argument("--lerobot_local_files_only", action=argparse.BooleanOptionalAction, default=None)
     p_train.add_argument(
@@ -383,6 +508,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--model_print_depth", type=int, default=None)
     p_train.add_argument("--num_workers", type=int, default=None)
     p_train.add_argument("--persistent_workers", action=argparse.BooleanOptionalAction, default=None)
+    p_train.add_argument("--prefetch_factor", type=int, default=None)
     p_train.add_argument("--save_best", action=argparse.BooleanOptionalAction, default=None)
     p_train.add_argument("--save_best_min_delta", type=float, default=None)
 
@@ -564,6 +690,30 @@ def main(argv: list[str] | None = None) -> int:
                 overwrite=bool(args.overwrite),
             )
         out = convert_maniskill_trajectories_to_robomimic(cfg)
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "convert-robomimic-to-lerobot":
+        out = convert_robomimic_to_lerobot(
+            RobomimicToLeRobotConfig(
+                input_hdf5=str(args.input_hdf5),
+                output_dir=str(args.output_dir),
+                repo_id=str(args.repo_id),
+                data_group=str(args.data_group),
+                task_name=str(args.task_name),
+                fps=int(args.fps),
+                robot_type=str(args.robot_type),
+                image_keys=tuple(_parse_csv_values(args.image_keys, str)),
+                state_keys=tuple(_parse_csv_values(args.state_keys, str)),
+                limit=args.limit,
+                log_every=int(args.log_every),
+                show_progress=bool(args.show_progress),
+                use_videos=bool(args.use_videos),
+                streaming_encoding=bool(args.streaming_encoding),
+                quiet_ffmpeg=bool(args.quiet_ffmpeg),
+                overwrite=bool(args.overwrite),
+            )
+        )
         print(json.dumps(out, indent=2, sort_keys=True))
         return 0
 
