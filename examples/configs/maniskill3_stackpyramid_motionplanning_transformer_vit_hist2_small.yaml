@@ -1,0 +1,161 @@
+experiment:
+  name: maniskill3-stackpyramid-mp-transformer-vit-hist2-small-pd-ee-delta-pose
+  seed: 32
+  runs_root: runs
+
+simulator:
+  backend: maniskill3
+  task: StackPyramid-v1
+  robot: panda_wristcam
+  controller: pd_ee_delta_pose
+  control_freq: 50
+  horizon: 300
+  reward_shaping: false
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [base_camera, hand_camera]
+  camera_width: 128
+  camera_height: 128
+  env_kwargs:
+    obs_mode: rgbd
+    render_mode: rgb_array
+    control_mode: pd_ee_delta_pose
+    reward_mode: sparse
+
+task:
+  object_name: pyramid
+
+robot:
+  name: panda_wristcam
+  action_dim: 7
+  image_key: agentview_image
+  image_keys: [agentview_image, robot0_eye_in_hand_image]
+  proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+  state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+
+data:
+  format: robomimic_hdf5
+  robomimic_hdf5: data/robomimic/maniskill/stackpyramid/mp/rgbd_pd_ee_delta_pose.hdf5
+  robomimic_data_group: data
+  fallback_image_hw: [128, 128]
+  n_demos: 1000
+  chunk_size: 16
+  filter_min_episode_length: 32
+  filter_drop_nan: true
+
+model:
+  name: mini_pi0_fm
+  action_dim: 7
+  prop_dim: 9
+  chunk_size: 16
+  cond_dim: 16
+  d_model: 256
+  nhead: 4
+  nlayers: 4
+  action_backbone: transformer
+  conditioning_mode: cross_attention
+  action_attention_causal: false
+  obs_horizon: 2
+  vision_backbone: timm
+  vision_model_name: vit_small_patch16_224
+  vision_pretrained: true
+  vision_token_grid_size: 4
+  action_cnn_kernel_size: 5
+  freeze_vision_backbone: false
+  dropout: 0.1
+  noise_beta_alpha: 1.0
+  noise_beta_beta: 1.0
+  noise_s: 0.999
+
+train:
+  epochs: 350
+  batch_size: 256
+  lr: 0.0005
+  lr_backbone: 0.00005
+  lr_expert: 0.0005
+  lr_scheduler: cosine
+  scheduler_t_max: null
+  scheduler_eta_min: 0.000001
+  weight_decay: 0.0001
+  num_workers: 32
+  persistent_workers: true
+  prefetch_factor: 4
+  save_best: true
+  save_best_min_delta: 0.0001
+  grad_clip_norm: 1.0
+  val_ratio: 0.0
+  ema_decay: 0.99
+  checkpoint_use_ema: true
+  val_use_ema: false
+  image_aug_enable: false
+  image_aug_crop_scale: 0.92
+  image_aug_brightness: 0.15
+  image_aug_contrast: 0.15
+  image_aug_saturation: 0.12
+  action_noise_std: 0.0
+  action_noise_clip: 0.0
+  action_smoothness_weight: 0.05
+  action_jerk_weight: 0.01
+  sim_eval_every_epochs: 40
+  sim_eval_n_episodes: 100
+  sim_eval_max_steps: 300
+  sim_eval_record_grid: false
+  save_best_success: true
+  save_best_success_min_rate: 0.0
+  model_print_depth: 2
+  dtype: bf16
+  device: cuda
+
+eval:
+  checkpoint: checkpoints/best.pt
+  weight_source: model
+  action_stats_path: artifacts/action_stats.json
+  dtype: bf16
+  n_episodes: 100
+  execute_steps: 2
+  n_flow_steps: 4
+  flow_solver: euler
+  chunk_overlap_blend: 0.0
+  max_steps: 300
+  strict_parity: true
+  action_clip: true
+  action_smoothing_alpha: 0.0
+  binary_gripper: true
+  binary_gripper_index: 6
+  binary_gripper_threshold: 0.0
+  binary_gripper_low_value: -1.0
+  binary_gripper_high_value: 1.0
+  disable_domain_randomization: true
+  vectorized: true
+  num_envs: 128
+  record: false
+  record_grid: false
+  grid_size: 5
+  grid_fps: 20
+  grid_width: 256
+  grid_height: 256
+  grid_cameras: [base_camera, hand_camera]
+  verbose: true
+  log_every_episodes: 1
+  device: auto
+
+deploy:
+  mode: sim
+  checkpoint: checkpoints/best.pt
+  action_stats_path: artifacts/action_stats.json
+  execute_steps: 2
+  n_flow_steps: 6
+  flow_solver: euler
+  chunk_overlap_blend: 0.0
+  max_steps: 300
+  strict_parity: true
+  action_clip: true
+  action_smoothing_alpha: 0.0
+  binary_gripper: true
+  binary_gripper_index: 6
+  binary_gripper_threshold: 0.0
+  binary_gripper_low_value: -1.0
+  binary_gripper_high_value: 1.0
+  record_path: null
+  device: auto

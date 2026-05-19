@@ -21,6 +21,16 @@ CNN1D, and UNet1D denoisers.
 
 Click the preview to open the MP4.
 
+### StackPyramid Motion Planning
+
+26.0% success over 50 eval episodes with the medium transformer + ViT policy.
+
+| Base camera success | Wrist camera success |
+| --- | --- |
+| [![StackPyramid base camera success grid](./assets/stackpyramid_success_grid_base_camera_3x3.gif)](./assets/stackpyramid_success_grid_base_camera_3x3.mp4) | [![StackPyramid wrist camera success grid](./assets/stackpyramid_success_grid_hand_camera_3x3.gif)](./assets/stackpyramid_success_grid_hand_camera_3x3.mp4) |
+
+Click a preview to open the MP4.
+
 ### PegInsertionSide Diagnostics
 
 PegInsertionSide is the current hard task. The latest contact + hole-camera
@@ -284,6 +294,27 @@ Config:
 Artifacts:
 - [success grid](./assets/stackcube_success_grid_3x3.mp4)
 - [eval metrics](./assets/stackcube_eval_metrics.png)
+
+### StackPyramid-v1
+
+Config:
+`examples/configs/maniskill3_stackpyramid_motionplanning_transformer_vit_hist2_medium.yaml`
+
+| Metric | Value |
+| --- | ---: |
+| Success rate | 26.0% |
+| CI95 | 14.0% - 38.0% |
+| Episodes | 50 |
+| Mean episode length | 444.9 steps |
+| Mean inference speed | 32.6 ms/chunk |
+| Failure modes | 37 no progress, 13 success |
+
+![StackPyramid eval metrics](./assets/stackpyramid_eval_metrics.png)
+
+Artifacts:
+- [base-camera success grid](./assets/stackpyramid_success_grid_base_camera_3x3.mp4)
+- [wrist-camera success grid](./assets/stackpyramid_success_grid_hand_camera_3x3.mp4)
+- [eval metrics](./assets/stackpyramid_eval_metrics.png)
 
 ### PegInsertionSide-v1
 
