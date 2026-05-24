@@ -10,15 +10,16 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 NUM_ENVS="${NUM_ENVS:-16}"
 COUNT="${COUNT:-}"
+TARGET_CONTROL_MODE="${TARGET_CONTROL_MODE:-pd_joint_pos}"
 
 SOURCE_H5="${SOURCE_H5:-demos/maniskill/PegInsertionSide-v1/motionplanning/trajectory.h5}"
 WORK_DIR="${WORK_DIR:-demos/maniskill/PegInsertionSide-v1/motionplanning_holecam}"
-ROBO_OUT="${ROBO_OUT:-data/robomimic/maniskill/peginsertionside/mp/rgbd_pd_ee_delta_pose_holecam_contacts.hdf5}"
+ROBO_OUT="${ROBO_OUT:-data/robomimic/maniskill/peginsertionside/mp/rgbd_${TARGET_CONTROL_MODE}_holecam_contacts.hdf5}"
 
-REPLAY_H5="${WORK_DIR}/trajectory.rgbd.pd_ee_delta_pose.physx_cpu.h5"
-REPLAY_JSON="${WORK_DIR}/trajectory.rgbd.pd_ee_delta_pose.physx_cpu.json"
-CONTACT_H5="${WORK_DIR}/trajectory.rgbd.pd_ee_delta_pose.contacts.physx_cpu.h5"
-CONTACT_JSON="${WORK_DIR}/trajectory.rgbd.pd_ee_delta_pose.contacts.physx_cpu.json"
+REPLAY_H5="${WORK_DIR}/trajectory.rgbd.${TARGET_CONTROL_MODE}.physx_cpu.h5"
+REPLAY_JSON="${WORK_DIR}/trajectory.rgbd.${TARGET_CONTROL_MODE}.physx_cpu.json"
+CONTACT_H5="${WORK_DIR}/trajectory.rgbd.${TARGET_CONTROL_MODE}.contacts.physx_cpu.h5"
+CONTACT_JSON="${WORK_DIR}/trajectory.rgbd.${TARGET_CONTROL_MODE}.contacts.physx_cpu.json"
 
 mkdir -p "${WORK_DIR}"
 mkdir -p "$(dirname "${ROBO_OUT}")"
@@ -36,7 +37,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${PYTHON}" tools/replay_maniskil
   --work-dir "${WORK_DIR}" \
   --traj-path "${SOURCE_H5}" \
   --obs-mode rgbd \
-  --target-control-mode pd_ee_delta_pose \
+  --target-control-mode "${TARGET_CONTROL_MODE}" \
   --save-traj \
   --reward-mode dense \
   --sim-backend physx_cpu \
@@ -49,7 +50,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${PYTHON}" tools/replay_maniskil
   --base-hdf5 "${REPLAY_H5}" \
   --out-hdf5 "${CONTACT_H5}" \
   --obs-mode rgbd \
-  --control-mode pd_ee_delta_pose \
+  --control-mode "${TARGET_CONTROL_MODE}" \
   --sim-backend physx_cpu \
   --reward-mode dense \
   --use-first-env-state \

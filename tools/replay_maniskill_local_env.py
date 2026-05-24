@@ -38,10 +38,11 @@ def main(argv: list[str] | None = None) -> int:
 
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     local_args, replay_argv = _parse_local_args(raw_argv)
-    if local_args.env_id:
+    if local_args.env_id or local_args.robot_uids:
         replay_argv = _stage_replay_inputs(
             replay_argv=replay_argv,
             env_id=local_args.env_id,
+            robot_uids=local_args.robot_uids,
             work_dir=local_args.work_dir,
             copy_h5=local_args.copy_h5,
         )
@@ -52,12 +53,19 @@ def main(argv: list[str] | None = None) -> int:
 def _parse_local_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--env-id", default=None)
+    parser.add_argument("--robot-uids", default=None)
     parser.add_argument("--work-dir", type=Path, default=Path("tmp/maniskill_local_replay"))
     parser.add_argument("--copy-h5", action="store_true")
     return parser.parse_known_args(argv)
 
 
-def _stage_replay_inputs(replay_argv: list[str], env_id: str, work_dir: Path, copy_h5: bool) -> list[str]:
+def _stage_replay_inputs(
+    replay_argv: list[str],
+    env_id: str | None,
+    robot_uids: str | None,
+    work_dir: Path,
+    copy_h5: bool,
+) -> list[str]:
     traj_path = _extract_traj_path(replay_argv)
     source_h5 = Path(traj_path)
     source_json = source_h5.with_suffix(".json")
@@ -70,7 +78,7 @@ def _stage_replay_inputs(replay_argv: list[str], env_id: str, work_dir: Path, co
     staged_h5 = work_dir / source_h5.name
     staged_json = work_dir / source_json.name
     _stage_h5(source=source_h5, destination=staged_h5, copy_h5=copy_h5)
-    _write_env_id_json(source=source_json, destination=staged_json, env_id=env_id)
+    _write_replay_json(source=source_json, destination=staged_json, env_id=env_id, robot_uids=robot_uids)
     return _replace_traj_path(replay_argv, staged_h5)
 
 
@@ -104,12 +112,18 @@ def _stage_h5(source: Path, destination: Path, copy_h5: bool) -> None:
         destination.symlink_to(source.resolve())
 
 
-def _write_env_id_json(source: Path, destination: Path, env_id: str) -> None:
+def _write_replay_json(source: Path, destination: Path, env_id: str | None, robot_uids: str | None) -> None:
     with source.open("r", encoding="utf-8") as f:
         payload = json.load(f)
     if not isinstance(payload, dict) or not isinstance(payload.get("env_info"), dict):
         raise ReplaySetupError(f"Invalid ManiSkill trajectory metadata: {source}")
-    payload["env_info"]["env_id"] = env_id
+    if env_id:
+        payload["env_info"]["env_id"] = env_id
+    if robot_uids:
+        env_kwargs = payload["env_info"].setdefault("env_kwargs", {})
+        if not isinstance(env_kwargs, dict):
+            raise ReplaySetupError(f"Invalid env_kwargs in ManiSkill trajectory metadata: {source}")
+        env_kwargs["robot_uids"] = robot_uids
     with destination.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
 

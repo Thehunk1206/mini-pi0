@@ -3,23 +3,25 @@ set -euo pipefail
 
 # Prepare StackPyramid-v1 motion-planning data for mini-pi0 training:
 # 1. replay ManiSkill motion-planning demos with rgbd observations,
-# 2. convert actions to pd_ee_delta_pose,
+# 2. keep the source controller by default, or optionally convert actions,
 # 3. convert the replayed trajectories to robomimic HDF5.
 #
 # Useful overrides:
 #   COUNT=5 NUM_ENVS=4 bash tools/prepare_stackpyramid_pd_ee_delta_pose.sh
+#   TARGET_CONTROL_MODE=pd_ee_delta_pose bash tools/prepare_stackpyramid_pd_ee_delta_pose.sh
 #   SOURCE_H5=... ROBO_OUT=... bash tools/prepare_stackpyramid_pd_ee_delta_pose.sh
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 NUM_ENVS="${NUM_ENVS:-16}"
 COUNT="${COUNT:-}"
+TARGET_CONTROL_MODE="${TARGET_CONTROL_MODE:-pd_joint_pos}"
 
 SOURCE_H5="${SOURCE_H5:-demos/maniskill/StackPyramid-v1/motionplanning/trajectory.h5}"
-WORK_DIR="${WORK_DIR:-demos/maniskill/StackPyramid-v1/motionplanning_pd_ee_delta_pose}"
-ROBO_OUT="${ROBO_OUT:-data/robomimic/maniskill/stackpyramid/mp/rgbd_pd_ee_delta_pose.hdf5}"
+WORK_DIR="${WORK_DIR:-demos/maniskill/StackPyramid-v1/motionplanning_${TARGET_CONTROL_MODE}}"
+ROBO_OUT="${ROBO_OUT:-data/robomimic/maniskill/stackpyramid/mp/rgbd_${TARGET_CONTROL_MODE}.hdf5}"
 
-REPLAY_PREFIX="${WORK_DIR}/trajectory.rgbd.pd_ee_delta_pose.physx_cpu"
+REPLAY_PREFIX="${WORK_DIR}/trajectory.rgbd.${TARGET_CONTROL_MODE}.physx_cpu"
 REPLAY_H5="${REPLAY_PREFIX}.h5"
 REPLAY_JSON="${REPLAY_PREFIX}.json"
 
@@ -33,19 +35,19 @@ if [[ -n "${COUNT}" ]]; then
   CONVERT_LIMIT_ARGS=(--limit "${COUNT}")
 fi
 
-echo "[1/2] Replaying StackPyramid-v1 with rgbd + pd_ee_delta_pose, physx_cpu, num-envs=${NUM_ENVS}"
+echo "[1/2] Replaying StackPyramid-v1 with rgbd + ${TARGET_CONTROL_MODE}, physx_cpu, num-envs=${NUM_ENVS}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${PYTHON}" tools/replay_maniskill_local_env.py \
   --env-id StackPyramid-v1 \
   --work-dir "${WORK_DIR}" \
   --traj-path "${SOURCE_H5}" \
   --obs-mode rgbd \
-  --target-control-mode pd_ee_delta_pose \
+  --target-control-mode "${TARGET_CONTROL_MODE}" \
   --save-traj \
   --sim-backend physx_cpu \
   --num-envs "${NUM_ENVS}" \
   "${COUNT_ARGS[@]}"
 
-mapfile -t REPLAY_H5S < <(find "${WORK_DIR}" -maxdepth 1 -type f -name "trajectory.rgbd.pd_ee_delta_pose.physx_cpu*.h5" | sort -V)
+mapfile -t REPLAY_H5S < <(find "${WORK_DIR}" -maxdepth 1 -type f -name "trajectory.rgbd.${TARGET_CONTROL_MODE}.physx_cpu*.h5" | sort -V)
 if [[ "${#REPLAY_H5S[@]}" -eq 0 && -f "${REPLAY_H5}" ]]; then
   REPLAY_H5S=("${REPLAY_H5}")
 fi
