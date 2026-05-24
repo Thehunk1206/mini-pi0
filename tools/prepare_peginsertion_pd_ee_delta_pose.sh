@@ -10,6 +10,7 @@ set -euo pipefail
 #
 # Useful overrides:
 #   COUNT=5 NUM_ENVS=4 bash tools/prepare_peginsertion_pd_ee_delta_pose.sh
+#   TARGET_CONTROL_MODE=pd_ee_delta_pose bash tools/prepare_peginsertion_pd_ee_delta_pose.sh
 #   FORCE_REPLAY=1 bash tools/prepare_peginsertion_pd_ee_delta_pose.sh
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -17,12 +18,13 @@ PYTHON="${PYTHON:-.venv/bin/python}"
 NUM_ENVS="${NUM_ENVS:-16}"
 COUNT="${COUNT:-}"
 FORCE_REPLAY="${FORCE_REPLAY:-0}"
+TARGET_CONTROL_MODE="${TARGET_CONTROL_MODE:-pd_joint_pos}"
 
 SOURCE_H5="${SOURCE_H5:-demos/maniskill/PegInsertionSide-v1/motionplanning/trajectory.h5}"
 WORK_DIR="${WORK_DIR:-demos/maniskill/PegInsertionSide-v1/motionplanning}"
-ROBO_OUT="${ROBO_OUT:-data/robomimic/maniskill/peginsertionside/mp/rgbd_pd_ee_delta_pose.hdf5}"
+ROBO_OUT="${ROBO_OUT:-data/robomimic/maniskill/peginsertionside/mp/rgbd_${TARGET_CONTROL_MODE}.hdf5}"
 
-REPLAY_PREFIX="${WORK_DIR}/trajectory.rgbd.pd_ee_delta_pose.physx_cpu"
+REPLAY_PREFIX="${WORK_DIR}/trajectory.rgbd.${TARGET_CONTROL_MODE}.physx_cpu"
 REPLAY_H5="${REPLAY_PREFIX}.h5"
 REPLAY_JSON="${REPLAY_PREFIX}.json"
 
@@ -37,11 +39,11 @@ if [[ -n "${COUNT}" ]]; then
 fi
 
 if [[ "${FORCE_REPLAY}" == "1" || ! -f "${REPLAY_H5}" || ! -f "${REPLAY_JSON}" ]]; then
-  echo "[1/2] Replaying PegInsertionSide-v1 with rgbd + pd_ee_delta_pose, physx_cpu, num-envs=${NUM_ENVS}"
+  echo "[1/2] Replaying PegInsertionSide-v1 with rgbd + ${TARGET_CONTROL_MODE}, physx_cpu, num-envs=${NUM_ENVS}"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${PYTHON}" tools/replay_maniskill_local_env.py \
     --traj-path "${SOURCE_H5}" \
     --obs-mode rgbd \
-    --target-control-mode pd_ee_delta_pose \
+    --target-control-mode "${TARGET_CONTROL_MODE}" \
     --save-traj \
     --reward-mode dense \
     --sim-backend physx_cpu \
@@ -51,9 +53,9 @@ else
   echo "[1/2] Reusing existing replay: ${REPLAY_H5}"
 fi
 
-mapfile -t REPLAY_H5S < <(find "${WORK_DIR}" -maxdepth 1 -type f -name "trajectory.rgbd.pd_ee_delta_pose.physx_cpu*.h5" ! -name "*.contacts.*" | sort -V)
+mapfile -t REPLAY_H5S < <(find "${WORK_DIR}" -maxdepth 1 -type f -name "trajectory.rgbd.${TARGET_CONTROL_MODE}.physx_cpu*.h5" ! -name "*.contacts.*" | sort -V)
 if [[ "${#REPLAY_H5S[@]}" -eq 0 ]]; then
-  echo "No plain pd_ee_delta_pose replay HDF5 files found under ${WORK_DIR}" >&2
+  echo "No plain ${TARGET_CONTROL_MODE} replay HDF5 files found under ${WORK_DIR}" >&2
   exit 1
 fi
 

@@ -8,7 +8,7 @@ simulator:
   task: StackPyramid-v1
   robot: panda_wristcam
   controller: pd_ee_delta_pose
-  control_freq: 50
+  control_freq: 20
   horizon: 300
   reward_shaping: false
   has_renderer: false
@@ -49,7 +49,7 @@ model:
   action_dim: 7
   prop_dim: 9
   chunk_size: 16
-  cond_dim: 16
+  cond_dim: 64
   d_model: 256
   nhead: 4
   nlayers: 4

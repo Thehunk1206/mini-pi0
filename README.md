@@ -316,6 +316,31 @@ Artifacts:
 - [wrist-camera success grid](./assets/stackpyramid_success_grid_hand_camera_3x3.mp4)
 - [eval metrics](./assets/stackpyramid_eval_metrics.png)
 
+### PullCubeTool-v1
+
+Variant:
+`pd_ee_delta_pose` small policy with hist2 base + wrist cameras.
+
+| Metric | Value |
+| --- | ---: |
+| Success rate | 31.0% |
+| CI95 | 23.0% - 41.0% |
+| Episodes | 100 |
+| Mean episode length | 408.4 steps |
+| Mean inference speed | 27.7 ms/chunk |
+| Failure modes | 69 timeout after progress, 31 success |
+
+![PullCubeTool eval metrics](./assets/pullcubetool_pd_ee_seed2000_eval_metrics.png)
+
+| Base camera success | Wrist camera success |
+| --- | --- |
+| [![PullCubeTool base camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.gif)](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.mp4) | [![PullCubeTool wrist camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.gif)](./assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.mp4) |
+
+Artifacts:
+- [base-camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.mp4)
+- [wrist-camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.mp4)
+- [eval metrics](./assets/pullcubetool_pd_ee_seed2000_eval_metrics.png)
+
 ### PegInsertionSide-v1
 
 Config:

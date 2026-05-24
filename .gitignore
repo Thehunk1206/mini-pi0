@@ -35,6 +35,9 @@ rollouts/
 !assets/stackpyramid_eval_metrics.png
 !assets/stackpyramid_success_grid_base_camera_3x3.mp4
 !assets/stackpyramid_success_grid_hand_camera_3x3.mp4
+!assets/pullcubetool_pd_ee_seed2000_eval_metrics.png
+!assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.mp4
+!assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.mp4
 
 # Local data (keep directory names, ignore contents)
 data/demos/
