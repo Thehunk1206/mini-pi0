@@ -566,6 +566,56 @@ class DeployConfig:
 
 
 @dataclass
+class RLConfig:
+    """Reinforcement-learning fine-tuning configuration.
+
+    Attributes:
+        algorithm: RL algorithm key. The initial implementation supports
+            ``ppo`` for warm-starting from a supervised FM checkpoint.
+        checkpoint: Behavior-cloned/FM checkpoint used to initialize the
+            trainable policy and frozen reference policy.
+        action_stats_path: Path to action normalization stats matching the
+            checkpoint policy output.
+        total_updates: Number of PPO update iterations.
+        rollout_steps: Number of simulator steps collected per update.
+        num_envs: Number of vectorized simulator environments requested.
+        minibatch_size: PPO minibatch size.
+        epochs_per_update: Number of optimization epochs per rollout.
+        gamma: Discount factor.
+        gae_lambda: Generalized advantage estimation lambda.
+        clip_ratio: PPO probability-ratio clip threshold.
+        entropy_coef: Entropy regularization coefficient.
+        value_coef: Value loss coefficient.
+        kl_coef: Drift penalty coefficient against the frozen reference policy.
+        max_grad_norm: Gradient clipping norm threshold.
+        lr: Optimizer learning rate.
+        log_std_init: Initial diagonal Gaussian policy log standard deviation.
+        target_kl: Optional early-stop threshold for approximate KL.
+        device: Requested torch device.
+    """
+
+    algorithm: str = "ppo"
+    checkpoint: str = "checkpoints/best.pt"
+    action_stats_path: str = "action_stats.json"
+    total_updates: int = 10
+    rollout_steps: int = 128
+    num_envs: int = 1
+    minibatch_size: int = 64
+    epochs_per_update: int = 4
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_ratio: float = 0.2
+    entropy_coef: float = 0.0
+    value_coef: float = 0.5
+    kl_coef: float = 0.05
+    max_grad_norm: float = 1.0
+    lr: float = 3e-5
+    log_std_init: float = -1.0
+    target_kl: float | None = None
+    device: str = "auto"
+
+
+@dataclass
 class RootConfig:
     """Top-level strongly typed configuration object for all CLI commands.
 
@@ -580,6 +630,7 @@ class RootConfig:
         train: Training loop controls.
         eval: Evaluation loop controls.
         deploy: Deployment loop controls.
+        rl: Reinforcement-learning fine-tuning controls.
     """
 
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
@@ -592,6 +643,7 @@ class RootConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     deploy: DeployConfig = field(default_factory=DeployConfig)
+    rl: RLConfig = field(default_factory=RLConfig)
 
 
 def to_dict(cfg: RootConfig) -> dict[str, Any]:

@@ -1,0 +1,35 @@
+services:
+  isaaclab:
+    build:
+      context: .
+      dockerfile: docker/isaaclab/Dockerfile
+      args:
+        ISAAC_LAB_IMAGE: ${ISAAC_LAB_IMAGE:-nvcr.io/nvidia/isaac-lab:2.3.0}
+    image: ${MINI_PI0_ISAACLAB_IMAGE:-mini-pi0-isaaclab:2.3.0}
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      ACCEPT_EULA: ${ACCEPT_EULA:-}
+      PRIVACY_CONSENT: ${PRIVACY_CONSENT:-}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-all}
+      HF_HOME: /workspace/cache/huggingface
+      MINI_PI0_INSTALL_EDITABLE: ${MINI_PI0_INSTALL_EDITABLE:-1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - .:/workspace/mini-pi0:rw
+      - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/pip:/root/.cache/pip:rw
+      - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/hf:/workspace/cache/huggingface:rw
+      - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/ov:/root/.cache/ov:rw
+      - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/kit:/isaac-sim/kit/cache:rw
+      - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/computecache:/root/.nv/ComputeCache:rw
+      - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/logs:/root/.nvidia-omniverse/logs:rw
+    working_dir: /workspace/mini-pi0

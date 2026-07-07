@@ -55,7 +55,8 @@ Click a preview to open the MP4.
 - Robomimic-style HDF5 loading for converted ManiSkill trajectories.
 - Action diagnostics for comparing flow steps and per-dimension clipping.
 - PegInsertion support with close hole cameras and optional contact features.
-- IsaacLab adapter scaffold kept for future integration work.
+- Optional Dockerized Isaac Lab backend for headless smoke tests and PPO
+  warm-start fine-tuning from `mini_pi0_fm` checkpoints.
 
 ## Repository Layout
 
@@ -68,6 +69,7 @@ mini_pi0/
   models/      # mini_pi0_fm model and registry
   train/       # training loop, optimizer, checkpointing
   eval/        # rollout eval, action diagnostics, grid videos
+  rl/          # PPO warm-start fine-tuning utilities
   deploy/      # simulation deployment loop
   utils/       # runtime/device/parity helpers
 
@@ -139,6 +141,31 @@ python -m mini_pi0.eval.action_diagnostics \
   --action_stats runs/<experiment>/run1/artifacts/action_stats.json \
   --flow_steps 4,6,8
 ```
+
+## Isaac Lab Docker Quickstart
+
+Isaac Sim/Lab is isolated in Docker. This repository does not install Isaac,
+CUDA, or NVIDIA drivers on the host.
+
+```bash
+cp .env.example .env
+docker compose -f compose.isaaclab.yaml build isaaclab
+docker compose -f compose.isaaclab.yaml run --rm isaaclab mini-pi0 backends
+docker compose -f compose.isaaclab.yaml run --rm isaaclab \
+  mini-pi0 isaac-smoke --config examples/configs/isaaclab_franka_lift.yaml
+```
+
+PPO warm-start from a trained FM checkpoint:
+
+```bash
+docker compose -f compose.isaaclab.yaml run --rm isaaclab \
+  mini-pi0 rl-train --config examples/configs/isaaclab_franka_lift_ppo.yaml \
+  --checkpoint runs/<bc-run>/checkpoints/best.pt \
+  --action_stats runs/<bc-run>/artifacts/action_stats.json
+```
+
+See [docs/ISAACLAB_DOCKER.md](docs/ISAACLAB_DOCKER.md) and
+[docs/RL_WARMSTART.md](docs/RL_WARMSTART.md).
 
 ## ManiSkill Data Workflow
 
@@ -387,12 +414,12 @@ For the task-wise benchmark table, see [docs/TASK_BENCHMARK.md](docs/TASK_BENCHM
   shared robot datasets.
 - [ ] Add multi-GPU training for larger ViT backbones, more cameras, and larger
   task mixtures.
-- [ ] Add RL fine-tuning after imitation learning. The immediate target is to warm
+- [x] Add RL fine-tuning after imitation learning. The immediate target is to warm
   start from `mini_pi0_fm` checkpoints, then optimize task success and contact
   robustness with environment rewards while constraining policy drift from the
   demonstration policy.
-- [ ] Expand to more ManiSkill tasks and eventually reuse the same policy stack
-  with the IsaacLab adapter.
+- [x] Add a Dockerized Isaac Lab adapter path for headless smoke tests and PPO
+  warm-start experiments.
 
 ## References
 
