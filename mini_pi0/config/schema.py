@@ -425,6 +425,11 @@ class EvalConfig:
         verbose: Enables live progress logging during eval.
         log_every_episodes: Episode log interval when ``verbose=True``.
         record: Enables per-episode rollout recording.
+        image_ablation: Optional policy-image ablation mode. ``none`` leaves
+            images unchanged; ``blank`` replaces every policy image pixel with
+            ``image_ablation_value`` before action generation.
+        image_ablation_value: Pixel value in ``[0, 1]`` used by
+            ``image_ablation=blank``.
         record_grid: Enables success/failure grid video export.
         grid_cameras: Camera names or image keys used for success/failure grid
             videos. Accepts either one camera name or a list of names. When
@@ -476,6 +481,8 @@ class EvalConfig:
     verbose: bool = True
     log_every_episodes: int = 1
     record: bool = False
+    image_ablation: str = "none"
+    image_ablation_value: float = 0.0
     record_grid: bool = False
     grid_cameras: list[str] | str | None = None
     grid_size: int = 3

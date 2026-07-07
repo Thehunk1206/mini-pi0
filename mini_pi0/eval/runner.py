@@ -238,6 +238,7 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         f"backend={cfg.simulator.backend} task={cfg.simulator.task} robot={cfg.simulator.robot} "
         f"controller={cfg.simulator.controller} obs_mode=image "
         f"image_keys={effective_image_keys(cfg.robot)} "
+        f"image_ablation={getattr(cfg.eval, 'image_ablation', 'none')} "
         f"dtype={describe_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=None)} "
         f"strict_parity={strict}",
         flush=True,

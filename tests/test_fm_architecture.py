@@ -7,7 +7,8 @@ from torch import nn
 
 from mini_pi0.dataset.obs_processor import ObsProcessor
 from mini_pi0.dataset.stats import ActionStats
-from mini_pi0.eval.core import _blend_with_previous_tail
+from mini_pi0.config.schema import RootConfig
+from mini_pi0.eval.core import _apply_eval_image_ablation, _blend_with_previous_tail
 import mini_pi0.models.fm as fm_module
 from mini_pi0.models.fm import MiniPi0FlowMatching
 
@@ -63,6 +64,17 @@ def test_blend_with_previous_tail_uses_configured_prefix() -> None:
 
     assert np.allclose(out[:2], 0.75)
     assert np.allclose(out[2:], 1.0)
+
+
+def test_apply_eval_image_ablation_blanks_policy_images() -> None:
+    cfg = RootConfig()
+    cfg.eval.image_ablation = "blank"
+    cfg.eval.image_ablation_value = 0.25
+    img = torch.rand(2, 3, 8, 8)
+
+    out = _apply_eval_image_ablation(img, cfg)
+
+    assert torch.allclose(out, torch.full_like(img, 0.25))
 
 
 class _ConstantVelocityDenoiser(nn.Module):

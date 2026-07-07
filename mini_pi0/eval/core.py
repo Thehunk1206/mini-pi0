@@ -23,6 +23,29 @@ def _model_forward_context(cfg: RootConfig, device: torch.device):
     return autocast_context(device=device, dtype=dtype)
 
 
+def _apply_eval_image_ablation(img: torch.Tensor, cfg: RootConfig) -> torch.Tensor:
+    """Apply optional eval-only image ablations before policy inference.
+
+    Args:
+        img: Policy image tensor in ``[0, 1]``.
+        cfg: Runtime configuration.
+
+    Returns:
+        Original or ablated image tensor.
+
+    Raises:
+        ValueError: If the configured ablation mode is unsupported.
+    """
+
+    mode = str(getattr(cfg.eval, "image_ablation", "none") or "none").strip().lower()
+    if mode in {"", "none"}:
+        return img
+    if mode == "blank":
+        value = float(max(0.0, min(1.0, getattr(cfg.eval, "image_ablation_value", 0.0))))
+        return torch.full_like(img, value)
+    raise ValueError("eval.image_ablation must be one of: none, blank")
+
+
 def _ensure_uint8(frame: np.ndarray) -> np.ndarray:
     """Convert rendered frame to ``uint8`` RGB-like array.
 
@@ -362,6 +385,7 @@ def evaluate(
             if not action_buffer:
                 execute_steps, n_flow_steps, smooth_alpha_chunk = _resolve_eval_rollout_controls(cfg, steps)
                 img, prop = processor.obs_to_tensors(obs)
+                img = _apply_eval_image_ablation(img, cfg)
                 t0 = time.perf_counter()
                 with torch.no_grad(), _model_forward_context(cfg, img.device):
                     chunk = model.sample(
@@ -627,6 +651,7 @@ def evaluate_vectorized_maniskill(
                     [obs_batch[i] for i in empty_active],
                     env_indices=empty_active,
                 )
+                img = _apply_eval_image_ablation(img, cfg)
                 n_flow_steps = int(max(1, cfg.eval.n_flow_steps))
                 t0 = time.perf_counter()
                 with torch.no_grad(), _model_forward_context(cfg, img.device):
@@ -837,6 +862,7 @@ def record_episode(
     for _ in range(step_budget):
         if not action_buffer:
             img, prop = processor.obs_to_tensors(obs)
+            img = _apply_eval_image_ablation(img, cfg)
             with torch.no_grad(), _model_forward_context(cfg, img.device):
                 chunk = model.sample(
                     img,

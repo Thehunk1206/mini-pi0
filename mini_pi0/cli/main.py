@@ -212,6 +212,8 @@ def _apply_eval_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "eval.failure_reward_threshold", args.failure_reward_threshold)
     _append_override(overrides, "eval.device", args.device)
     _append_override(overrides, "eval.record", args.record)
+    _append_override(overrides, "eval.image_ablation", args.image_ablation)
+    _append_override(overrides, "eval.image_ablation_value", args.image_ablation_value)
     _append_override(overrides, "eval.record_grid", args.record_grid)
     if args.grid_cameras is not None:
         grid_cameras = _parse_csv_values(args.grid_cameras, str)
@@ -540,6 +542,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--failure_reward_threshold", type=float, default=None)
     p_eval.add_argument("--device", default=None)
     p_eval.add_argument("--record", action=argparse.BooleanOptionalAction, default=None)
+    p_eval.add_argument("--image_ablation", choices=["none", "blank"], default=None)
+    p_eval.add_argument("--image_ablation_value", type=float, default=None)
     p_eval.add_argument("--record_grid", action=argparse.BooleanOptionalAction, default=None)
     p_eval.add_argument("--grid_cameras", default=None)
     p_eval.add_argument("--grid_size", type=int, default=None)
