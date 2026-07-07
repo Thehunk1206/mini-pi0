@@ -58,6 +58,15 @@ class _Runtime:
         self.gym = _FakeGym()
         self.task_spec = resolve_isaaclab_task("franka_lift_cube")
 
+    @staticmethod
+    def parse_env_cfg(task_id, *, device, num_envs, use_fabric):
+        return {
+            "task_id": task_id,
+            "device": device,
+            "num_envs": num_envs,
+            "use_fabric": use_fabric,
+        }
+
 
 class IsaacLabAdapterTests(unittest.TestCase):
     def test_adapter_maps_reset_and_step_to_canonical_schema(self):
@@ -77,6 +86,7 @@ class IsaacLabAdapterTests(unittest.TestCase):
         step = adapter.step(np.zeros((7,), dtype=np.float32))
 
         self.assertEqual(runtime.gym.task_id, "Isaac-Lift-Cube-Franka-v0")
+        self.assertEqual(runtime.gym.kwargs["cfg"]["task_id"], "Isaac-Lift-Cube-Franka-v0")
         self.assertEqual(obs["agentview_image"].shape, (8, 8, 3))
         self.assertEqual(obs["robot0_eef_pos"].shape, (3,))
         self.assertEqual(obs["robot0_eef_quat"].shape, (4,))

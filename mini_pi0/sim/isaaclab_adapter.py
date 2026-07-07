@@ -28,6 +28,7 @@ class IsaacLabRuntime:
     """Lazy-loaded Isaac Lab runtime modules."""
 
     gym: Any
+    parse_env_cfg: Any
     task_spec: IsaacLabTaskSpec
 
 
@@ -66,11 +67,12 @@ def _load_runtime(task_name: str, *, headless: bool, enable_cameras: bool) -> Is
     try:
         import gymnasium as gym
         import isaaclab_tasks  # noqa: F401 - registers Isaac Lab Gym tasks.
+        from isaaclab_tasks.utils import parse_env_cfg
     except Exception as exc:
         raise IsaacLabUnavailableError(
             "Failed to import Isaac Lab task registration modules inside the current runtime."
         ) from exc
-    return IsaacLabRuntime(gym=gym, task_spec=resolve_isaaclab_task(task_name))
+    return IsaacLabRuntime(gym=gym, parse_env_cfg=parse_env_cfg, task_spec=resolve_isaaclab_task(task_name))
 
 
 def _launch_app(*, headless: bool, enable_cameras: bool) -> None:
@@ -121,10 +123,19 @@ class IsaacLabAdapter(SimulatorAdapter):
         runtime = _load_runtime(cfg.simulator.task, headless=headless, enable_cameras=enable_cameras)
         self.task_spec = runtime.task_spec
 
+        env_cfg = runtime.parse_env_cfg(
+            self.task_spec.gym_id,
+            device=str(env_kwargs.pop("device", "cuda:0")),
+            num_envs=int(env_kwargs.pop("num_envs", 1)),
+            use_fabric=bool(env_kwargs.pop("use_fabric", True)),
+        )
+        render_mode = env_kwargs.pop("render_mode", "rgb_array" if cfg.simulator.has_offscreen_renderer else None)
+        make_kwargs = {"cfg": env_cfg, **env_kwargs}
+        if render_mode is not None:
+            make_kwargs["render_mode"] = render_mode
         self.env = runtime.gym.make(
             self.task_spec.gym_id,
-            render_mode=env_kwargs.pop("render_mode", "rgb_array" if cfg.simulator.has_offscreen_renderer else None),
-            **env_kwargs,
+            **make_kwargs,
         )
 
     def reset(self, seed: int | None = None) -> dict[str, np.ndarray]:
@@ -196,7 +207,7 @@ class IsaacLabAdapter(SimulatorAdapter):
         if callable(close):
             close()
 
-    def _format_action(self, action: np.ndarray) -> np.ndarray:
+    def _format_action(self, action: np.ndarray) -> Any:
         """Clip and shape one action for the Isaac Lab Gym environment."""
 
         low, high = self.action_spec()
@@ -210,8 +221,18 @@ class IsaacLabAdapter(SimulatorAdapter):
         arr = np.clip(arr, low, high).astype(np.float32)
         shape = getattr(getattr(self.env, "action_space", None), "shape", None)
         if isinstance(shape, tuple) and len(shape) > 1 and shape[0] != arr.size:
-            return arr.reshape((1, -1))
-        return arr
+            arr = arr.reshape((1, -1))
+        return self._to_env_action(arr)
+
+    def _to_env_action(self, action: np.ndarray) -> Any:
+        """Convert a clipped NumPy action to the tensor type expected by Isaac Lab."""
+
+        try:
+            import torch
+        except ModuleNotFoundError:
+            return action
+        device = getattr(getattr(self.env, "unwrapped", self.env), "device", None)
+        return torch.as_tensor(action, dtype=torch.float32, device=device)
 
     def _canonical_obs(self, raw_obs: Any) -> dict[str, np.ndarray]:
         """Map Isaac observations into mini-pi0 canonical observation keys."""
