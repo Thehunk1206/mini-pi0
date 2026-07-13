@@ -218,13 +218,16 @@ interval excludes zero.
 
 ## Current Validation Status
 
-- Host suite: 122 passed.
+- Host suite: 131 passed.
 - Native ManiSkill: two-environment PickCube and PegInsertion reset, step, and
   selective reset passed on the installed GPU runtime.
 - PickCube scratch: two PPO updates with four environments completed and saved
   metrics/checkpoint artifacts.
 - PegInsertion checkpoint: smoke plus one tiny actor/critic update with two
   environments completed.
+- Isaac Lab 2.3.0 Docker: reset/step, nonblank tiled RGB, four-row native
+  ReinFlow smoke, and two scratch updates completed. The latest checkpoint was
+  saved under `runs/isaaclab-franka-lift-reinflow-scratch-reinflow/run2`.
 - These short runs validate engineering paths only. They do not establish a
   success-rate improvement.
 

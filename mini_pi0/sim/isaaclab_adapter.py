@@ -33,12 +33,56 @@ class IsaacLabRuntime:
 
 
 _APP_LAUNCHER: Any | None = None
+_FRONT_CAMERA_NAME = "mini_pi0_front_camera"
 
 
 def isaaclab_available() -> bool:
     """Return whether the Python environment can import Isaac Lab."""
 
     return importlib.util.find_spec("isaaclab") is not None
+
+
+def _configure_front_camera(env_cfg: Any, *, width: int, height: int) -> None:
+    """Attach a fixed tiled RGB camera to an Isaac scene configuration."""
+
+    import isaaclab.sim as sim_utils
+    from isaaclab.sensors import TiledCameraCfg
+
+    camera = TiledCameraCfg(
+        prim_path="{ENV_REGEX_NS}/MiniPi0FrontCamera",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(1.1, 0.0, 0.8),
+            rot=(0.250081, -0.661407, -0.661407, 0.250081),
+            convention="ros",
+        ),
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=1.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.05, 10.0),
+        ),
+        width=width,
+        height=height,
+    )
+    setattr(env_cfg.scene, _FRONT_CAMERA_NAME, camera)
+
+
+def _finite_action_bounds(space: Any, *, fallback_dim: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite bounds, interpreting Isaac's unbounded Box as normalized commands."""
+
+    dim = max(1, int(fallback_dim))
+    if space is None:
+        return -np.ones(dim, dtype=np.float32), np.ones(dim, dtype=np.float32)
+    low = np.asarray(getattr(space, "low", -1.0), dtype=np.float32).reshape(-1)
+    high = np.asarray(getattr(space, "high", 1.0), dtype=np.float32).reshape(-1)
+    if low.size != high.size or low.size == 0:
+        return -np.ones(dim, dtype=np.float32), np.ones(dim, dtype=np.float32)
+    low = np.where(np.isfinite(low), low, -1.0).astype(np.float32)
+    high = np.where(np.isfinite(high), high, 1.0).astype(np.float32)
+    if not np.all(low < high):
+        raise ValueError("Invalid Isaac Lab action bounds after normalization.")
+    return low, high
 
 
 def _load_runtime(task_name: str, *, headless: bool, enable_cameras: bool) -> IsaacLabRuntime:
@@ -129,6 +173,12 @@ class IsaacLabAdapter(SimulatorAdapter):
             num_envs=int(env_kwargs.pop("num_envs", 1)),
             use_fabric=bool(env_kwargs.pop("use_fabric", True)),
         )
+        if enable_cameras and cfg.simulator.use_camera_obs:
+            _configure_front_camera(
+                env_cfg,
+                width=int(cfg.simulator.camera_width),
+                height=int(cfg.simulator.camera_height),
+            )
         render_mode = env_kwargs.pop("render_mode", "rgb_array" if cfg.simulator.has_offscreen_renderer else None)
         make_kwargs = {"cfg": env_cfg, **env_kwargs}
         if render_mode is not None:
@@ -175,16 +225,7 @@ class IsaacLabAdapter(SimulatorAdapter):
         """Return flattened action bounds for one environment."""
 
         space = getattr(self.env, "single_action_space", None) or getattr(self.env, "action_space", None)
-        if space is None:
-            dim = int(max(1, self.cfg.robot.action_dim))
-            return -np.ones((dim,), dtype=np.float32), np.ones((dim,), dtype=np.float32)
-        low = np.asarray(getattr(space, "low", -1.0), dtype=np.float32).reshape(-1)
-        high = np.asarray(getattr(space, "high", 1.0), dtype=np.float32).reshape(-1)
-        if low.size != high.size:
-            dim = int(max(low.size, high.size, self.cfg.robot.action_dim))
-            low = np.resize(low, dim)
-            high = np.resize(high, dim)
-        return low.astype(np.float32), high.astype(np.float32)
+        return _finite_action_bounds(space, fallback_dim=int(self.cfg.robot.action_dim))
 
     def render(self, camera: str = "agentview", width: int = 512, height: int = 512) -> np.ndarray:
         """Render the latest Isaac Lab RGB frame."""
@@ -249,6 +290,7 @@ class IsaacLabAdapter(SimulatorAdapter):
                 dtype=np.uint8,
             )
         state_source = _flatten_named_arrays(raw_obs, env_index=env_index)
+        state_source.update(self._scene_state(env_index))
         out: dict[str, np.ndarray] = {key: frame for key in self._image_keys}
         aliases = self._state_aliases(state_source)
         for key in self._state_keys:
@@ -276,16 +318,77 @@ class IsaacLabAdapter(SimulatorAdapter):
 
         aliases: dict[str, np.ndarray] = {}
         aliases["observation.state.policy"] = policy if policy is not None else np.zeros((1,), dtype=np.float32)
-        aliases["robot0_joint_pos"] = joint_pos if joint_pos is not None else np.zeros((1,), dtype=np.float32)
-        aliases["robot0_joint_vel"] = joint_vel if joint_vel is not None else np.zeros((1,), dtype=np.float32)
-        aliases["robot0_eef_pos"] = eef_pos if eef_pos is not None else _slice_or_zero(policy, 0, 3)
+        aliases["robot0_joint_pos"] = joint_pos if joint_pos is not None else _slice_or_zero(policy, 0, 9)
+        aliases["robot0_joint_vel"] = joint_vel if joint_vel is not None else _slice_or_zero(policy, 9, 18)
+        aliases["robot0_eef_pos"] = eef_pos if eef_pos is not None else np.zeros((3,), dtype=np.float32)
         aliases["robot0_eef_quat"] = eef_quat if eef_quat is not None else _quat_identity()
         aliases["robot0_gripper_qpos"] = gripper if gripper is not None else _slice_or_zero(policy, 7, 9)
-        aliases["observation.state.object"] = obj if obj is not None else _slice_or_zero(policy, 9, 12)
+        aliases["observation.state.object"] = obj if obj is not None else _slice_or_zero(policy, 18, 21)
         aliases["observation.state.task_progress"] = progress if progress is not None else np.zeros((1,), dtype=np.float32)
         aliases["observation.state.success"] = aliases["observation.state.task_progress"]
         aliases.update(state_source)
         return aliases
+
+    def _scene_state(self, env_index: int) -> dict[str, np.ndarray]:
+        """Read semantic robot and task state directly from the Isaac scene."""
+
+        env = getattr(self, "env", None)
+        if env is None:
+            return {}
+        unwrapped = getattr(env, "unwrapped", env)
+        scene = getattr(unwrapped, "scene", None)
+        if scene is None:
+            return {}
+        origin = _env_row(getattr(scene, "env_origins", None), env_index, width=3)
+        if origin is None:
+            origin = np.zeros(3, dtype=np.float32)
+        ee_frame = _scene_entity(scene, "ee_frame")
+        robot = _scene_entity(scene, "robot")
+        obj = _scene_entity(scene, "object")
+        state: dict[str, np.ndarray] = {}
+
+        ee_data = getattr(ee_frame, "data", None)
+        ee_pos_w = _env_row(getattr(ee_data, "target_pos_w", None), env_index, width=3)
+        ee_quat_w = _env_row(getattr(ee_data, "target_quat_w", None), env_index, width=4)
+        if ee_pos_w is not None:
+            state["eef_pos"] = ee_pos_w - origin
+        if ee_quat_w is not None:
+            state["eef_quat"] = ee_quat_w
+
+        robot_data = getattr(robot, "data", None)
+        joint_pos = _env_row(getattr(robot_data, "joint_pos", None), env_index)
+        if joint_pos is not None and joint_pos.size >= 2:
+            state["gripper_pos"] = joint_pos[-2:]
+
+        object_data = getattr(obj, "data", None)
+        object_pos_w = _env_row(getattr(object_data, "root_pos_w", None), env_index, width=3)
+        if object_pos_w is not None:
+            state["object_pos"] = object_pos_w - origin
+            state["task_progress"] = np.array(
+                [self._lift_success(unwrapped, object_pos_w, origin, env_index)],
+                dtype=np.float32,
+            )
+        return state
+
+    @staticmethod
+    def _lift_success(unwrapped: Any, object_pos_w: np.ndarray, origin: np.ndarray, env_index: int) -> float:
+        """Return Franka lift completion from object height and goal distance."""
+
+        manager = getattr(unwrapped, "command_manager", None)
+        get_command = getattr(manager, "get_command", None)
+        robot = _scene_entity(getattr(unwrapped, "scene", None), "robot")
+        robot_pos_w = _env_row(getattr(getattr(robot, "data", None), "root_pos_w", None), env_index, width=3)
+        if not callable(get_command) or robot_pos_w is None:
+            return 0.0
+        try:
+            goal_local = _env_row(get_command("object_pose"), env_index)
+        except (KeyError, RuntimeError):
+            return 0.0
+        if goal_local is None or goal_local.size < 3:
+            return 0.0
+        goal_pos_w = robot_pos_w + goal_local[:3]
+        lifted = float(object_pos_w[2] - origin[2]) > 0.04
+        return float(lifted and np.linalg.norm(object_pos_w - goal_pos_w) < 0.05)
 
     def _image_from_raw(self, raw_obs: Any, env_index: int = 0) -> np.ndarray | None:
         """Extract an RGB frame from nested Isaac observations."""
@@ -299,7 +402,25 @@ class IsaacLabAdapter(SimulatorAdapter):
                 arr = arr[env_index]
             if arr.ndim >= 3:
                 return _as_uint8_rgb(arr)
-        return None
+        return self._image_from_sensor(env_index)
+
+    def _image_from_sensor(self, env_index: int) -> np.ndarray | None:
+        """Read one row from the configured tiled RGB camera."""
+
+        unwrapped = getattr(self.env, "unwrapped", self.env)
+        scene = getattr(unwrapped, "scene", None)
+        sensors = getattr(scene, "sensors", {})
+        sensor = sensors.get(_FRONT_CAMERA_NAME) if hasattr(sensors, "get") else None
+        output = getattr(getattr(sensor, "data", None), "output", {})
+        rgb = output.get("rgb") if hasattr(output, "get") else None
+        if rgb is None:
+            return None
+        array = np.asarray(_to_numpy(rgb))
+        if array.ndim >= 4:
+            if not 0 <= env_index < array.shape[0]:
+                return None
+            array = array[env_index]
+        return _as_uint8_rgb(array) if array.ndim >= 3 else None
 
     def _success_from_info_or_obs(
         self,
@@ -405,6 +526,35 @@ def _first_available(source: dict[str, np.ndarray], names: tuple[str, ...]) -> n
         if name in source:
             return np.asarray(source[name], dtype=np.float32).reshape(-1)
     return None
+
+
+def _scene_entity(scene: Any, name: str) -> Any | None:
+    """Return one named Isaac scene entity without assuming a concrete scene type."""
+
+    if scene is None:
+        return None
+    try:
+        return scene[name]
+    except (KeyError, TypeError):
+        return None
+
+
+def _env_row(value: Any, env_index: int, *, width: int | None = None) -> np.ndarray | None:
+    """Convert one environment row from an Isaac tensor to a flat NumPy array."""
+
+    if value is None:
+        return None
+    array = np.asarray(_to_numpy(value), dtype=np.float32)
+    if array.ndim >= 2:
+        if not 0 <= env_index < array.shape[0]:
+            return None
+        array = array[env_index]
+    flat = array.reshape(-1)
+    if width is not None:
+        if flat.size < width:
+            return None
+        flat = flat[:width]
+    return flat.astype(np.float32, copy=False)
 
 
 def _slice_or_zero(value: np.ndarray | None, start: int, stop: int) -> np.ndarray:

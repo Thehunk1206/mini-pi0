@@ -27,6 +27,7 @@ services:
     volumes:
       - .:/workspace/mini-pi0:rw
       - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/pip:/root/.cache/pip:rw
+      - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/torch:/root/.cache/torch:rw
       - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/hf:/workspace/cache/huggingface:rw
       - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/ov:/root/.cache/ov:rw
       - ${MINI_PI0_CACHE_ROOT:-.cache/isaaclab}/kit:/isaac-sim/kit/cache:rw

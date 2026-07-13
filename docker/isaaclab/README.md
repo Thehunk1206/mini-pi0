@@ -33,5 +33,6 @@ docker compose -f compose.isaaclab.yaml run --rm isaaclab \
   mini-pi0 rl-train --config examples/configs/isaaclab_franka_lift_reinflow_scratch.yaml
 ```
 
-The first run downloads/builds container layers and fills cache volumes. Keep
+The first run downloads/builds container layers and fills cache volumes for
+Torch weights, Python packages, and Isaac/Omniverse data. Keep
 `.cache/isaaclab/` out of git.

@@ -10,7 +10,7 @@ import numpy as np
 
 from mini_pi0.config.schema import RootConfig
 from mini_pi0.sim.batched import BatchedStepOutput, Info, Observation
-from mini_pi0.sim.isaaclab_adapter import IsaacLabAdapter, _to_numpy
+from mini_pi0.sim.isaaclab_adapter import IsaacLabAdapter, _finite_action_bounds, _to_numpy
 
 
 class IsaacLabBatchedAdapter:
@@ -109,13 +109,8 @@ class IsaacLabBatchedAdapter:
         low = np.asarray(space.low, dtype=np.float32)
         high = np.asarray(space.high, dtype=np.float32)
         if low.ndim == 2 and low.shape[0] == self.num_envs:
-            low = low[0]
-            high = high[0]
-        low = low.reshape(-1)
-        high = high.reshape(-1)
-        if low.shape != high.shape or not np.all(low < high):
-            raise ValueError("Invalid Isaac Lab vector action bounds.")
-        return low, high
+            space = _ArraySpace(low[0], high[0])
+        return _finite_action_bounds(space, fallback_dim=int(self.scalar.cfg.robot.action_dim))
 
     def _current_observations(self) -> list[Observation]:
         """Return initialized observations."""
@@ -123,6 +118,14 @@ class IsaacLabBatchedAdapter:
         if any(observation is None for observation in self._observations):
             raise RuntimeError("Reset the Isaac vector adapter before stepping.")
         return [observation for observation in self._observations if observation is not None]
+
+
+class _ArraySpace:
+    """Minimal action-space view for one row of a vector Box."""
+
+    def __init__(self, low: np.ndarray, high: np.ndarray) -> None:
+        self.low = low
+        self.high = high
 
 
 def _info_at(info: object, env_index: int) -> Info:

@@ -104,9 +104,11 @@ def run_rl_smoke(cfg: RootConfig) -> dict[str, Any]:
             actor.load_state_dict(resume_payload["actor_critic"], strict=True)
         elif checkpoint is not None:
             actor.policy.load_state_dict(_checkpoint_model_state(checkpoint), strict=True)
-        adapter = SerialBatchAdapter([make_sim_adapter(smoke_cfg)])
+        adapter = _make_batched_adapter(smoke_cfg)
         try:
-            observations = adapter.reset([int(smoke_cfg.experiment.seed)])
+            num_envs = int(adapter.num_envs)
+            seed = int(smoke_cfg.experiment.seed)
+            observations = adapter.reset([seed + index for index in range(num_envs)])
             low, high = adapter.action_spec()
             processor = _make_obs_processor(smoke_cfg, device=str(device))
             processor.reset_batch_history(observations)
@@ -122,18 +124,24 @@ def run_rl_smoke(cfg: RootConfig) -> dict[str, Any]:
                     high=high,
                     device=device,
                 )
-            step = adapter.step(actions[:, 0], np.ones(1, dtype=bool))
+            step = adapter.step(actions[:, 0], np.ones(num_envs, dtype=bool))
+            image_key = effective_image_keys(smoke_cfg.robot)[0]
+            images = np.stack([np.asarray(obs[image_key]) for obs in observations])
             summary = {
                 "algorithm": _algorithm(smoke_cfg),
                 "backend": adapter.backend_name,
                 "task": smoke_cfg.simulator.task,
                 "init_mode": _init_mode(smoke_cfg),
+                "num_envs": num_envs,
                 "action_dim": int(low.shape[0]),
                 "flow_steps": int(smoke_cfg.rl.flow_steps),
                 "path_shape": list(sample.path.shape),
-                "reward": float(step.rewards[0]),
-                "done": bool(step.terminated[0] or step.truncated[0]),
-                "success": bool(step.successes[0]),
+                "image_mean": float(images.mean()),
+                "image_std": float(images.std()),
+                "image_nonzero_fraction": float(np.count_nonzero(images) / images.size),
+                "reward_mean": float(step.rewards.mean()),
+                "done": bool(np.any(step.terminated | step.truncated)),
+                "success": bool(np.any(step.successes)),
             }
         finally:
             adapter.close()

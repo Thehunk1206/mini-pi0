@@ -38,9 +38,9 @@ at `/workspace/mini-pi0` and installed editable by the entrypoint. Set
 `MINI_PI0_INSTALL_EDITABLE=0` only when the derived image already contains the
 required package version.
 
-Persistent caches live under `.cache/isaaclab/` for pip, Hugging Face,
-Omniverse, Kit, compute kernels, and logs. These directories are ignored by
-Git and avoid repeated shader and package work.
+Persistent caches live under `.cache/isaaclab/` for pip, Torch model weights,
+Hugging Face, Omniverse, Kit, compute kernels, and logs. These directories are
+ignored by Git and avoid repeated shader and package work.
 
 ## Validation Order
 
@@ -64,6 +64,24 @@ docker compose -f compose.isaaclab.yaml run --rm isaaclab \
 The final config performs two small ReinFlow updates with four environments.
 For `num_envs > 1`, one Isaac vector environment and one SimulationApp are
 created. The RL algorithm and buffer contain no Isaac imports.
+
+## Validated Result
+
+The full sequence above passed on 2026-07-13 with the pinned Isaac Lab 2.3.0
+image:
+
+- `backends` reported Isaac Lab ready inside the container.
+- Franka lift reset/step returned an 8D action space and finite native reward.
+- ReinFlow smoke created one four-row Isaac environment with path shape
+  `[4, 5, 16, 8]`.
+- The tiled front camera was nonblank: RGB standard deviation `32.88` and
+  nonzero fraction `0.9999` at reset.
+- Two scratch updates completed and saved
+  `runs/isaaclab-franka-lift-reinflow-scratch-reinflow/run2/checkpoints/latest_rl.pt`.
+
+This validates container, camera, vector rollout, PPO update, and checkpoint
+plumbing. It is not evidence that two scratch updates learn the lift task; no
+episode completed during the short rollout and no success gain is claimed.
 
 ## Checkpoint Fine-Tuning
 
