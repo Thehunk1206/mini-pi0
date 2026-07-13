@@ -1,16 +1,16 @@
+"""On-policy rollout buffers for ReinFlow and the Gaussian PPO baseline."""
+
 from __future__ import annotations
 
-"""Rollout storage for on-policy PPO updates."""
-
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
 import torch
 
 
-@dataclass
+@dataclass(frozen=True)
 class RolloutBatch:
-    """Flattened PPO minibatch."""
+    """Flattened minibatch for the legacy Gaussian baseline."""
 
     images: torch.Tensor
     proprio: torch.Tensor
@@ -23,11 +23,9 @@ class RolloutBatch:
 
 
 class PPORolloutBuffer:
-    """Fixed-size rollout buffer with GAE computation."""
+    """List-backed rollout buffer retained for the Gaussian baseline."""
 
     def __init__(self) -> None:
-        """Create an empty rollout buffer."""
-
         self.images: list[torch.Tensor] = []
         self.proprio: list[torch.Tensor] = []
         self.actions: list[torch.Tensor] = []
@@ -51,16 +49,19 @@ class PPORolloutBuffer:
         value: torch.Tensor,
         ref_log_prob: torch.Tensor,
     ) -> None:
-        """Append one vectorized rollout step."""
+        """Append one vectorized baseline rollout step."""
 
-        self.images.append(image.detach().cpu())
-        self.proprio.append(proprio.detach().cpu())
-        self.actions.append(action.detach().cpu())
-        self.log_probs.append(log_prob.detach().cpu())
-        self.rewards.append(reward.detach().cpu())
-        self.dones.append(done.detach().cpu())
-        self.values.append(value.detach().cpu())
-        self.ref_log_probs.append(ref_log_prob.detach().cpu())
+        for storage, value_t in (
+            (self.images, image),
+            (self.proprio, proprio),
+            (self.actions, action),
+            (self.log_probs, log_prob),
+            (self.rewards, reward),
+            (self.dones, done),
+            (self.values, value),
+            (self.ref_log_probs, ref_log_prob),
+        ):
+            storage.append(value_t.detach().cpu())
 
     def compute_returns_and_advantages(
         self,
@@ -69,7 +70,7 @@ class PPORolloutBuffer:
         gamma: float,
         gae_lambda: float,
     ) -> None:
-        """Compute GAE advantages and discounted returns."""
+        """Compute conventional one-step GAE for the baseline."""
 
         rewards = torch.stack(self.rewards)
         dones = torch.stack(self.dones)
@@ -79,47 +80,196 @@ class PPORolloutBuffer:
         last_gae = torch.zeros_like(last_value_cpu)
         for step in reversed(range(rewards.shape[0])):
             next_value = last_value_cpu if step == rewards.shape[0] - 1 else values[step + 1]
-            nonterminal = 1.0 - dones[step]
-            delta = rewards[step] + float(gamma) * next_value * nonterminal - values[step]
-            last_gae = delta + float(gamma) * float(gae_lambda) * nonterminal * last_gae
+            continuation = 1.0 - dones[step]
+            delta = rewards[step] + float(gamma) * next_value * continuation - values[step]
+            last_gae = delta + float(gamma) * float(gae_lambda) * continuation * last_gae
             advantages[step] = last_gae
-        returns = advantages + values
-        advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
-        self.advantages = advantages
-        self.returns = returns
+        self.returns = advantages + values
+        self.advantages = _normalize_advantages(advantages)
 
     def minibatches(self, minibatch_size: int, device: torch.device) -> Iterator[RolloutBatch]:
-        """Yield shuffled PPO minibatches."""
+        """Yield shuffled baseline minibatches."""
 
         if self.advantages is None or self.returns is None:
-            raise RuntimeError("Call compute_returns_and_advantages before sampling minibatches.")
-        images = _flatten_time_env(torch.stack(self.images))
-        proprio = _flatten_time_env(torch.stack(self.proprio))
-        actions = _flatten_time_env(torch.stack(self.actions))
-        log_probs = _flatten_time_env(torch.stack(self.log_probs))
-        values = _flatten_time_env(torch.stack(self.values))
-        ref_log_probs = _flatten_time_env(torch.stack(self.ref_log_probs))
+            raise RuntimeError("Compute returns before requesting minibatches.")
+        tensors = [
+            _flatten_time_env(torch.stack(values))
+            for values in (
+                self.images,
+                self.proprio,
+                self.actions,
+                self.log_probs,
+                self.values,
+                self.ref_log_probs,
+            )
+        ]
         advantages = _flatten_time_env(self.advantages)
         returns = _flatten_time_env(self.returns)
-
-        n = int(actions.shape[0])
-        order = torch.randperm(n)
-        batch_size = int(max(1, minibatch_size))
-        for start in range(0, n, batch_size):
-            idx = order[start : start + batch_size]
+        for indices in _minibatch_indices(tensors[2].shape[0], minibatch_size):
             yield RolloutBatch(
-                images=images[idx].to(device),
-                proprio=proprio[idx].to(device),
-                actions=actions[idx].to(device),
-                old_log_probs=log_probs[idx].to(device),
-                advantages=advantages[idx].to(device),
-                returns=returns[idx].to(device),
-                old_values=values[idx].to(device),
-                ref_log_probs=ref_log_probs[idx].to(device),
+                images=tensors[0][indices].to(device),
+                proprio=tensors[1][indices].to(device),
+                actions=tensors[2][indices].to(device),
+                old_log_probs=tensors[3][indices].to(device),
+                old_values=tensors[4][indices].to(device),
+                ref_log_probs=tensors[5][indices].to(device),
+                advantages=advantages[indices].to(device),
+                returns=returns[indices].to(device),
             )
 
 
+@dataclass(frozen=True)
+class ReinFlowRolloutBatch:
+    """Flattened macro-transition minibatch for ReinFlow PPO."""
+
+    images: torch.Tensor
+    proprio: torch.Tensor
+    paths: torch.Tensor
+    old_log_probs: torch.Tensor
+    advantages: torch.Tensor
+    returns: torch.Tensor
+    old_values: torch.Tensor
+    durations: torch.Tensor
+
+
+class ReinFlowRolloutBuffer:
+    """Fixed-capacity tensor storage for variable-duration macro transitions."""
+
+    def __init__(self, *, capacity: int, num_envs: int, storage_device: torch.device) -> None:
+        """Create an empty lazily allocated rollout buffer."""
+
+        if capacity < 1 or num_envs < 1:
+            raise ValueError("ReinFlow buffer capacity and num_envs must be positive.")
+        self.capacity = int(capacity)
+        self.num_envs = int(num_envs)
+        self.storage_device = storage_device
+        self.position = 0
+        self._storage: dict[str, torch.Tensor] = {}
+        self.advantages: torch.Tensor | None = None
+        self.returns: torch.Tensor | None = None
+
+    def add(
+        self,
+        *,
+        image: torch.Tensor,
+        proprio: torch.Tensor,
+        path: torch.Tensor,
+        log_prob: torch.Tensor,
+        reward: torch.Tensor,
+        value: torch.Tensor,
+        next_value: torch.Tensor,
+        bootstrap_discount: torch.Tensor,
+        trace_continue: torch.Tensor,
+        duration: torch.Tensor,
+    ) -> None:
+        """Store one vectorized macro transition."""
+
+        if self.position >= self.capacity:
+            raise RuntimeError("ReinFlow rollout buffer is full.")
+        values = {
+            "images": image,
+            "proprio": proprio,
+            "paths": path,
+            "log_probs": log_prob,
+            "rewards": reward,
+            "values": value,
+            "next_values": next_value,
+            "bootstrap_discounts": bootstrap_discount,
+            "trace_continues": trace_continue,
+            "durations": duration,
+        }
+        if not self._storage:
+            self._allocate(values)
+        for name, value_t in values.items():
+            expected = self._storage[name][self.position]
+            if tuple(value_t.shape) != tuple(expected.shape):
+                raise ValueError(f"{name} shape mismatch: expected {tuple(expected.shape)}, got {tuple(value_t.shape)}.")
+            expected.copy_(value_t.detach().to(self.storage_device))
+        self.position += 1
+
+    def compute_returns_and_advantages(self, *, gae_lambda: float) -> None:
+        """Compute variable-discount GAE without crossing episode resets."""
+
+        if self.position == 0:
+            raise RuntimeError("Cannot compute GAE for an empty rollout buffer.")
+        rewards = self._used("rewards")
+        values = self._used("values")
+        next_values = self._used("next_values")
+        discounts = self._used("bootstrap_discounts")
+        trace = self._used("trace_continues")
+        advantages = torch.zeros_like(rewards)
+        last_gae = torch.zeros(self.num_envs, device=self.storage_device)
+        for step in reversed(range(self.position)):
+            delta = rewards[step] + discounts[step] * next_values[step] - values[step]
+            last_gae = delta + discounts[step] * float(gae_lambda) * trace[step] * last_gae
+            advantages[step] = last_gae
+        self.returns = advantages + values
+        self.advantages = _normalize_advantages(advantages)
+
+    def minibatches(self, minibatch_size: int, device: torch.device) -> Iterator[ReinFlowRolloutBatch]:
+        """Yield shuffled flattened minibatches without rebuilding storage."""
+
+        if self.advantages is None or self.returns is None:
+            raise RuntimeError("Compute returns before requesting minibatches.")
+        flattened = {name: _flatten_time_env(self._used(name)) for name in self._storage}
+        advantages = _flatten_time_env(self.advantages)
+        returns = _flatten_time_env(self.returns)
+        count = int(self.position * self.num_envs)
+        for indices in _minibatch_indices(count, minibatch_size):
+            yield ReinFlowRolloutBatch(
+                images=flattened["images"][indices].to(device, non_blocking=True),
+                proprio=flattened["proprio"][indices].to(device, non_blocking=True),
+                paths=flattened["paths"][indices].to(device, non_blocking=True),
+                old_log_probs=flattened["log_probs"][indices].to(device, non_blocking=True),
+                old_values=flattened["values"][indices].to(device, non_blocking=True),
+                durations=flattened["durations"][indices].to(device, non_blocking=True),
+                advantages=advantages[indices].to(device, non_blocking=True),
+                returns=returns[indices].to(device, non_blocking=True),
+            )
+
+    @property
+    def old_values(self) -> torch.Tensor:
+        """Return values recorded during rollout for diagnostics."""
+
+        if "values" not in self._storage:
+            raise RuntimeError("The rollout buffer is empty.")
+        return self._used("values")
+
+    def _allocate(self, values: dict[str, torch.Tensor]) -> None:
+        """Allocate all rollout tensors from the first transition's shapes."""
+
+        for name, value in values.items():
+            if value.shape[0] != self.num_envs:
+                raise ValueError(f"{name} must have leading num_envs={self.num_envs}.")
+            shape = (self.capacity, *value.shape)
+            self._storage[name] = torch.empty(shape, dtype=value.dtype, device=self.storage_device)
+
+    def _used(self, name: str) -> torch.Tensor:
+        """Return the populated prefix of one storage tensor."""
+
+        return self._storage[name][: self.position]
+
+
+FlowPPOBuffer = ReinFlowRolloutBuffer
+FlowRolloutBatch = ReinFlowRolloutBatch
+
+
+def _normalize_advantages(advantages: torch.Tensor) -> torch.Tensor:
+    """Normalize advantages over all rollout decisions and environments."""
+
+    return (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
+
+
 def _flatten_time_env(tensor: torch.Tensor) -> torch.Tensor:
-    """Flatten leading time and environment dimensions."""
+    """Flatten leading rollout-time and environment dimensions."""
 
     return tensor.reshape(tensor.shape[0] * tensor.shape[1], *tensor.shape[2:])
+
+
+def _minibatch_indices(count: int, minibatch_size: int) -> Iterator[torch.Tensor]:
+    """Yield shuffled index slices for one optimization epoch."""
+
+    order = torch.randperm(int(count))
+    size = max(1, int(minibatch_size))
+    for start in range(0, int(count), size):
+        yield order[start : start + size]

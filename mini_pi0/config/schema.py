@@ -584,7 +584,7 @@ class RLConfig:
     epochs_per_update: int = 4
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    clip_ratio: float = 0.2
+    clip_ratio: float = 0.001
     entropy_coef: float = 0.0
     value_coef: float = 0.5
     kl_coef: float = 0.05

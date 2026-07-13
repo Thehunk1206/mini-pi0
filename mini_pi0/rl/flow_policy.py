@@ -337,7 +337,9 @@ class ReinFlowActorCritic(nn.Module):
     def value(self, image: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
         """Return critic values for a batch of observations."""
 
-        return self.critic(self.actor.encode_conditioning(image, proprio))
+        with torch.no_grad():
+            cond = self.actor.encode_conditioning(image, proprio)
+        return self.critic(cond)
 
 
 StochasticFlowPolicy = ReinFlowActorCritic
