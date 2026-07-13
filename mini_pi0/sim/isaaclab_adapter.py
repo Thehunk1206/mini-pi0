@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Isaac Lab simulator adapter.
 
 This module intentionally keeps Isaac imports lazy. Importing mini-pi0 on a
 machine without Isaac Sim/Lab must remain safe; the adapter only requires Isaac
 when it is constructed or smoke-tested.
 """
+
+from __future__ import annotations
 
 import argparse
 import importlib.util
@@ -239,16 +239,16 @@ class IsaacLabAdapter(SimulatorAdapter):
         device = getattr(getattr(self.env, "unwrapped", self.env), "device", None)
         return torch.as_tensor(action, dtype=torch.float32, device=device)
 
-    def _canonical_obs(self, raw_obs: Any) -> dict[str, np.ndarray]:
+    def _canonical_obs(self, raw_obs: Any, env_index: int = 0) -> dict[str, np.ndarray]:
         """Map Isaac observations into mini-pi0 canonical observation keys."""
 
-        frame = self._image_from_raw(raw_obs)
+        frame = self._image_from_raw(raw_obs, env_index=env_index)
         if frame is None:
             frame = np.zeros(
                 (int(self.cfg.simulator.camera_height), int(self.cfg.simulator.camera_width), 3),
                 dtype=np.uint8,
             )
-        state_source = _flatten_named_arrays(raw_obs)
+        state_source = _flatten_named_arrays(raw_obs, env_index=env_index)
         out: dict[str, np.ndarray] = {key: frame for key in self._image_keys}
         aliases = self._state_aliases(state_source)
         for key in self._state_keys:
@@ -287,7 +287,7 @@ class IsaacLabAdapter(SimulatorAdapter):
         aliases.update(state_source)
         return aliases
 
-    def _image_from_raw(self, raw_obs: Any) -> np.ndarray | None:
+    def _image_from_raw(self, raw_obs: Any, env_index: int = 0) -> np.ndarray | None:
         """Extract an RGB frame from nested Isaac observations."""
 
         for key in ("rgb", "image", "camera", "front", "agentview_image"):
@@ -295,6 +295,8 @@ class IsaacLabAdapter(SimulatorAdapter):
             if value is None:
                 continue
             arr = np.asarray(_to_numpy(value))
+            if arr.ndim >= 4 and arr.shape[0] > env_index:
+                arr = arr[env_index]
             if arr.ndim >= 3:
                 return _as_uint8_rgb(arr)
         return None
@@ -376,20 +378,20 @@ def _find_nested(value: Any, target_key: str) -> Any | None:
     return None
 
 
-def _flatten_named_arrays(value: Any, prefix: str = "") -> dict[str, np.ndarray]:
+def _flatten_named_arrays(value: Any, prefix: str = "", env_index: int = 0) -> dict[str, np.ndarray]:
     """Flatten nested mapping arrays into a name-to-array dictionary."""
 
     out: dict[str, np.ndarray] = {}
     if isinstance(value, dict):
         for key, child in value.items():
             name = f"{prefix}.{key}" if prefix else str(key)
-            out.update(_flatten_named_arrays(child, name))
+            out.update(_flatten_named_arrays(child, name, env_index=env_index))
         return out
     arr = np.asarray(_to_numpy(value), dtype=np.float32)
     if arr.size == 0:
         return out
     if arr.ndim >= 2:
-        arr = arr.reshape(arr.shape[0], -1)[0] if arr.shape[0] == 1 else arr.reshape(-1)
+        arr = arr[int(env_index)]
     out[prefix] = arr.reshape(-1).astype(np.float32)
     leaf = prefix.split(".")[-1]
     out.setdefault(leaf, out[prefix])

@@ -801,8 +801,16 @@ def _make_adapters(cfg: RootConfig) -> list[Any]:
 
 
 def _make_batched_adapter(cfg: RootConfig) -> BatchedSimulatorAdapter:
-    """Create the serial compatibility batch used by the generic runner."""
+    """Prefer native vectors while retaining serial adapter compatibility."""
 
+    if str(cfg.simulator.backend).strip().lower() == "maniskill3" and int(cfg.rl.num_envs) > 1:
+        from mini_pi0.sim.maniskill3_batched import ManiSkill3BatchedAdapter
+
+        return ManiSkill3BatchedAdapter(cfg)
+    if str(cfg.simulator.backend).strip().lower() == "isaaclab" and int(cfg.rl.num_envs) > 1:
+        from mini_pi0.sim.isaaclab_batched import IsaacLabBatchedAdapter
+
+        return IsaacLabBatchedAdapter(cfg)
     return SerialBatchAdapter(_make_adapters(cfg))
 
 

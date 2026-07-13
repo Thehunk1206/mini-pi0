@@ -25,6 +25,7 @@ class ContactTarget:
 
     key: str
     aliases: tuple[str, ...]
+    entity: object
 
     def matches(self, body_name: str) -> bool:
         """Return whether a raw contact body belongs to this target."""
@@ -36,6 +37,7 @@ class ContactTarget:
 def collect_contact_features(
     base_env: object,
     *,
+    env_index: int = 0,
     link_names: tuple[str, ...] = DEFAULT_CONTACT_LINKS,
     object_names: tuple[str, ...] = DEFAULT_CONTACT_OBJECTS,
     contact_threshold: float = 1e-3,
@@ -43,8 +45,8 @@ def collect_contact_features(
     """Collect compact contact and joint-force features from one ManiSkill env.
 
     Args:
-        base_env: Unwrapped ManiSkill environment. This implementation targets
-            single-environment CPU simulation.
+        base_env: Unwrapped ManiSkill environment.
+        env_index: Parallel environment row used for batched joint-force data.
         link_names: Robot link names to track.
         object_names: Task actor attributes to track, e.g. ``peg`` and ``box``.
         contact_threshold: Force norm threshold used for binary contact flags.
@@ -54,9 +56,9 @@ def collect_contact_features(
     """
 
     robot = base_env.agent.robot
-    values = _joint_force_features(robot)
+    values = _joint_force_features(robot, env_index=env_index)
     targets = _build_targets(base_env, robot, link_names=link_names, object_names=object_names)
-    raw = _raw_contact_summary(base_env=base_env, targets=targets)
+    raw = _contact_summary(base_env=base_env, targets=targets, env_index=env_index)
     timestep = float(getattr(base_env.scene, "timestep", 1.0))
 
     for target in targets:
@@ -89,9 +91,14 @@ class RawContactSummary:
     pair_counts: dict[str, float]
 
 
-def _joint_force_features(robot: object) -> dict[str, np.ndarray]:
-    robot_qf = _call_first_env_array(robot, "get_qf", fallback_size=9)
-    passive_qf = _call_first_env_array(robot, "compute_passive_force", fallback_size=robot_qf.shape[0])
+def _joint_force_features(robot: object, *, env_index: int) -> dict[str, np.ndarray]:
+    robot_qf = _call_env_array(robot, "get_qf", fallback_size=9, env_index=env_index)
+    passive_qf = _call_env_array(
+        robot,
+        "compute_passive_force",
+        fallback_size=robot_qf.shape[0],
+        env_index=env_index,
+    )
     return {
         "robot_qf": robot_qf,
         "robot_arm_qf": robot_qf[:7],
@@ -117,7 +124,7 @@ def _build_targets(
             continue
         key = _signal_prefix(link_name)
         aliases = {link_name, key, _entity_name(link)}
-        targets.append(ContactTarget(key=key, aliases=tuple(alias for alias in aliases if alias)))
+        targets.append(ContactTarget(key=key, aliases=tuple(alias for alias in aliases if alias), entity=link))
 
     for object_name in object_names:
         actor = getattr(base_env, object_name, None)
@@ -125,8 +132,51 @@ def _build_targets(
             continue
         key = _signal_prefix(object_name)
         aliases = {object_name, key, str(getattr(actor, "name", "")), _entity_name(actor)}
-        targets.append(ContactTarget(key=key, aliases=tuple(alias for alias in aliases if alias)))
+        targets.append(ContactTarget(key=key, aliases=tuple(alias for alias in aliases if alias), entity=actor))
     return tuple(targets)
+
+
+def _contact_summary(
+    base_env: object,
+    targets: tuple[ContactTarget, ...],
+    *,
+    env_index: int,
+) -> RawContactSummary:
+    """Use vector-aware ManiSkill contact queries with a raw CPU fallback."""
+
+    try:
+        return _queried_contact_summary(base_env, targets, env_index=env_index)
+    except (AttributeError, IndexError, RuntimeError, TypeError, ValueError):
+        return _raw_contact_summary(base_env=base_env, targets=targets)
+
+
+def _queried_contact_summary(
+    base_env: object,
+    targets: tuple[ContactTarget, ...],
+    *,
+    env_index: int,
+) -> RawContactSummary:
+    """Collect per-environment forces through ManiSkill's scene API."""
+
+    timestep = float(getattr(base_env.scene, "timestep", 1.0))
+    target_impulses: dict[str, np.ndarray] = {}
+    target_counts: dict[str, float] = {}
+    for target in targets:
+        force = _env_vector(target.entity.get_net_contact_forces(), env_index=env_index)
+        target_impulses[target.key] = force * timestep
+        target_counts[target.key] = float(np.linalg.norm(force) > 0.0)
+
+    pair_impulses: dict[str, np.ndarray] = {}
+    pair_counts: dict[str, float] = {}
+    for left, right in _target_pairs(targets):
+        key = f"{left.key}_{right.key}"
+        force = _env_vector(
+            base_env.scene.get_pairwise_contact_forces(left.entity, right.entity),
+            env_index=env_index,
+        )
+        pair_impulses[key] = force * timestep
+        pair_counts[key] = float(np.linalg.norm(force) > 0.0)
+    return RawContactSummary(target_impulses, target_counts, pair_impulses, pair_counts)
 
 
 def _raw_contact_summary(base_env: object, targets: tuple[ContactTarget, ...]) -> RawContactSummary:
@@ -170,24 +220,33 @@ def _target_pairs(targets: tuple[ContactTarget, ...]) -> tuple[tuple[ContactTarg
     return tuple(pairs)
 
 
-def _call_first_env_array(obj: object, method_name: str, fallback_size: int) -> np.ndarray:
+def _call_env_array(obj: object, method_name: str, fallback_size: int, *, env_index: int) -> np.ndarray:
     method = getattr(obj, method_name, None)
     if method is None:
         return np.zeros((fallback_size,), dtype=np.float32)
     try:
-        return _first_env_array(method())
+        return _env_array(method(), env_index=env_index)
     except Exception:
         return np.zeros((fallback_size,), dtype=np.float32)
 
 
-def _first_env_array(value: object) -> np.ndarray:
+def _env_array(value: object, *, env_index: int) -> np.ndarray:
     if isinstance(value, torch.Tensor):
         array = value.detach().cpu().numpy()
     else:
         array = np.asarray(value)
-    if array.ndim >= 2 and array.shape[0] == 1:
-        array = array[0]
+    if array.ndim >= 2:
+        array = array[int(env_index)]
     return np.asarray(array, dtype=np.float32).reshape(-1)
+
+
+def _env_vector(value: object, *, env_index: int) -> np.ndarray:
+    """Return one three-dimensional row from a batched force tensor."""
+
+    array = value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
+    if array.ndim >= 2:
+        array = array[int(env_index)]
+    return np.asarray(array, dtype=np.float32).reshape(-1)[:3]
 
 
 def _contact_body_name(contact: object, index: int) -> str:
