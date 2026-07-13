@@ -160,11 +160,16 @@ class IsaacLabAdapter(SimulatorAdapter):
         self._last_raw_obs = raw_obs
         norm_info = self._normalize_info(info if isinstance(info, dict) else {})
         obs = self._canonical_obs(raw_obs)
-        done = bool(_scalarize(terminated) or _scalarize(truncated))
         norm_info.setdefault("success", self._success_from_info_or_obs(norm_info, obs))
         self._last_info = norm_info
         self._last_obs = obs
-        return StepOutput(obs=obs, reward=float(_scalarize(reward)), done=done, info=norm_info)
+        return StepOutput(
+            obs=obs,
+            reward=float(_scalarize(reward)),
+            terminated=bool(_scalarize(terminated)),
+            truncated=bool(_scalarize(truncated)),
+            info=norm_info,
+        )
 
     def action_spec(self) -> tuple[np.ndarray, np.ndarray]:
         """Return flattened action bounds for one environment."""

@@ -14,14 +14,22 @@ class StepOutput:
     Attributes:
         obs: Canonical observation dictionary for the next timestep.
         reward: Scalar reward emitted by the simulator.
-        done: Episode termination flag from the simulator.
+        terminated: True terminal flag from the simulator.
+        truncated: Time-limit or external truncation flag.
         info: Backend-specific diagnostic info dictionary.
     """
 
     obs: dict[str, np.ndarray]
     reward: float
-    done: bool
+    terminated: bool
+    truncated: bool
     info: dict[str, Any]
+
+    @property
+    def done(self) -> bool:
+        """Return whether this transition ends the current episode."""
+
+        return bool(self.terminated or self.truncated)
 
 
 class SimulatorAdapter(ABC):

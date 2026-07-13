@@ -387,8 +387,13 @@ class ManiSkill3Adapter(SimulatorAdapter):
         self._last_info = norm_info
         self._last_obs = obs
 
-        done = bool(np.asarray(terminated).item() or np.asarray(truncated).item())
-        return StepOutput(obs=obs, reward=float(np.asarray(reward).item()), done=done, info=norm_info)
+        return StepOutput(
+            obs=obs,
+            reward=float(np.asarray(reward).item()),
+            terminated=bool(np.asarray(terminated).item()),
+            truncated=bool(np.asarray(truncated).item()),
+            info=norm_info,
+        )
 
     def action_spec(self) -> tuple[np.ndarray, np.ndarray]:
         space = self.env.action_space
