@@ -101,7 +101,8 @@ class ReinFlowPPOUpdater:
         epochs = int(self.cfg.rl.critic_warmup_epochs if warmup else self.cfg.rl.epochs_per_update)
         for _epoch in range(epochs):
             for batch in buffer.minibatches(int(self.cfg.rl.minibatch_size), device):
-                values = self.policy.value(batch.images, batch.proprio)
+                with self._autocast(device):
+                    values = self.policy.value(batch.images, batch.proprio)
                 value_loss = 0.5 * (batch.returns - values).square().mean()
                 critic_grad = self._step_critic(float(self.cfg.rl.value_coef) * value_loss)
                 row = {
@@ -130,7 +131,8 @@ class ReinFlowPPOUpdater:
     ) -> dict[str, torch.Tensor]:
         """Compute and apply one clipped ReinFlow actor update."""
 
-        evaluation = self.policy.evaluate_path(batch.images, batch.proprio, batch.paths, bounds=bounds)
+        with self._autocast(batch.images.device):
+            evaluation = self.policy.evaluate_path(batch.images, batch.proprio, batch.paths, bounds=bounds)
         log_ratio = evaluation.log_prob.float() - batch.old_log_probs.float()
         _require_finite("log_ratio", log_ratio)
         ratio = torch.exp(log_ratio.clamp(-20.0, 20.0))
@@ -140,9 +142,10 @@ class ReinFlowPPOUpdater:
         policy_loss = -torch.minimum(unclipped, clipped).mean()
         approx_kl = ((ratio - 1.0) - log_ratio).mean().clamp_min(0.0)
         clip_fraction = ((ratio - 1.0).abs() > clip_ratio).float().mean()
-        w2 = self._reference_w2(batch.images, batch.proprio, batch.paths[:, 0], bounds)
-        transition_kl = self._transition_kl(batch.images, batch.proprio, batch.paths)
-        velocity_anchor = self._velocity_anchor(batch.images, batch.proprio, batch.paths)
+        with self._autocast(batch.images.device):
+            w2 = self._reference_w2(batch.images, batch.proprio, batch.paths[:, 0], bounds)
+            transition_kl = self._transition_kl(batch.images, batch.proprio, batch.paths)
+            velocity_anchor = self._velocity_anchor(batch.images, batch.proprio, batch.paths)
         actor_loss = (
             policy_loss
             - float(self.cfg.rl.entropy_coef) * evaluation.entropy.mean()
@@ -227,6 +230,12 @@ class ReinFlowPPOUpdater:
             ref_cond = self.reference.actor.encode_conditioning(images, proprio)
             ref_velocity = self.reference.actor.velocity_path(ref_cond, paths)
         return (actor_velocity - ref_velocity).square().mean()
+
+    def _autocast(self, device: torch.device):
+        """Use bf16 only for neural forwards on CUDA."""
+
+        enabled = str(self.cfg.rl.dtype).strip().lower() == "bf16" and device.type == "cuda"
+        return torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=enabled)
 
 
 FlowPPOUpdater = ReinFlowPPOUpdater

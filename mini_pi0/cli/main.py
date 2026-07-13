@@ -288,19 +288,32 @@ def _apply_rl_overrides(args: argparse.Namespace) -> list[str]:
     overrides = list(args.overrides or [])
     _append_override(overrides, "experiment.name", args.run_name)
     _append_override(overrides, "experiment.seed", args.seed)
-    _append_override(overrides, "simulator.backend", "isaaclab")
+    _append_override(overrides, "simulator.backend", args.backend)
     _append_override(overrides, "simulator.task", args.task)
     _append_override(overrides, "simulator.robot", args.robot)
     _append_override(overrides, "simulator.controller", args.controller)
+    _append_override(overrides, "rl.algorithm", args.algorithm)
+    _append_override(overrides, "rl.init_mode", args.init_mode)
+    _append_override(overrides, "rl.action_normalization", args.action_normalization)
+    _append_override(overrides, "rl.use_reference_policy", args.use_reference_policy)
     _append_override(overrides, "rl.checkpoint", args.checkpoint)
     _append_override(overrides, "rl.action_stats_path", args.action_stats)
+    _append_override(overrides, "rl.resume_from", args.resume_from)
     _append_override(overrides, "rl.total_updates", args.total_updates)
     _append_override(overrides, "rl.rollout_steps", args.rollout_steps)
+    _append_override(overrides, "rl.rollout_decisions_per_update", args.rollout_decisions_per_update)
     _append_override(overrides, "rl.num_envs", args.num_envs)
     _append_override(overrides, "rl.minibatch_size", args.minibatch_size)
     _append_override(overrides, "rl.epochs_per_update", args.epochs_per_update)
     _append_override(overrides, "rl.lr", args.lr)
     _append_override(overrides, "rl.kl_coef", args.kl_coef)
+    _append_override(overrides, "rl.actor_lr", args.actor_lr)
+    _append_override(overrides, "rl.critic_lr", args.critic_lr)
+    _append_override(overrides, "rl.flow_steps", args.flow_steps)
+    _append_override(overrides, "rl.execution_horizon", args.execution_horizon)
+    _append_override(overrides, "rl.velocity_anchor_coef", args.velocity_anchor_coef)
+    _append_override(overrides, "rl.reference_w2_coef", args.reference_w2_coef)
+    _append_override(overrides, "rl.reference_transition_kl_coef", args.reference_transition_kl_coef)
     _append_override(overrides, "rl.device", args.device)
     return overrides
 
@@ -315,6 +328,38 @@ def _apply_isaac_smoke_overrides(args: argparse.Namespace) -> list[str]:
     _append_override(overrides, "simulator.task", args.task)
     _append_override(overrides, "simulator.robot", args.robot)
     _append_override(overrides, "simulator.controller", args.controller)
+    return overrides
+
+
+def _apply_rl_smoke_overrides(args: argparse.Namespace) -> list[str]:
+    """Translate ``rl-smoke`` CLI args into dotted config overrides."""
+
+    overrides = list(args.overrides or [])
+    _append_override(overrides, "experiment.name", args.run_name)
+    _append_override(overrides, "experiment.seed", args.seed)
+    _append_override(overrides, "simulator.backend", args.backend)
+    _append_override(overrides, "simulator.task", args.task)
+    _append_override(overrides, "simulator.robot", args.robot)
+    _append_override(overrides, "simulator.controller", args.controller)
+    _append_override(overrides, "rl.algorithm", args.algorithm)
+    _append_override(overrides, "rl.init_mode", args.init_mode)
+    _append_override(overrides, "rl.action_normalization", args.action_normalization)
+    _append_override(overrides, "rl.use_reference_policy", args.use_reference_policy)
+    _append_override(overrides, "rl.checkpoint", args.checkpoint)
+    _append_override(overrides, "rl.action_stats_path", args.action_stats)
+    _append_override(overrides, "rl.resume_from", getattr(args, "resume_from", None))
+    _append_override(overrides, "rl.flow_steps", args.flow_steps)
+    _append_override(overrides, "rl.execution_horizon", args.execution_horizon)
+    _append_override(overrides, "rl.device", args.device)
+    return overrides
+
+
+def _apply_rl_eval_overrides(args: argparse.Namespace) -> list[str]:
+    """Translate deterministic ``rl-eval`` arguments into config overrides."""
+
+    overrides = _apply_rl_smoke_overrides(args)
+    _append_override(overrides, "rl.eval_episodes", args.eval_episodes)
+    _append_override(overrides, "rl.eval_seed_start", args.eval_seed_start)
     return overrides
 
 
@@ -631,23 +676,77 @@ def _build_parser() -> argparse.ArgumentParser:
     p_deploy.add_argument("--device", default=None)
     p_deploy.add_argument("--record_path", default=None)
 
-    p_rl = sub.add_parser("rl-train", help="Fine-tune an FM checkpoint with PPO in Isaac Lab")
+    p_rl = sub.add_parser("rl-train", help="Train or fine-tune an FM policy with simulator RL")
     _add_common_config_args(p_rl)
     p_rl.add_argument("--run_name", default=None)
     p_rl.add_argument("--seed", type=int, default=None)
+    p_rl.add_argument("--backend", default=None)
     p_rl.add_argument("--task", default=None)
     p_rl.add_argument("--robot", default=None)
     p_rl.add_argument("--controller", default=None)
+    p_rl.add_argument("--algorithm", choices=["reinflow_ppo", "gaussian_ppo_baseline"], default=None)
+    p_rl.add_argument("--init_mode", choices=["scratch", "checkpoint"], default=None)
+    p_rl.add_argument("--action_normalization", choices=["env_bounds", "dataset_stats"], default=None)
+    p_rl.add_argument("--use_reference_policy", action=argparse.BooleanOptionalAction, default=None)
     p_rl.add_argument("--checkpoint", default=None)
     p_rl.add_argument("--action_stats", default=None)
+    p_rl.add_argument("--resume_from", default=None)
     p_rl.add_argument("--total_updates", type=int, default=None)
     p_rl.add_argument("--rollout_steps", type=int, default=None)
+    p_rl.add_argument("--rollout_decisions_per_update", type=int, default=None)
     p_rl.add_argument("--num_envs", type=int, default=None)
     p_rl.add_argument("--minibatch_size", type=int, default=None)
     p_rl.add_argument("--epochs_per_update", type=int, default=None)
     p_rl.add_argument("--lr", type=float, default=None)
     p_rl.add_argument("--kl_coef", type=float, default=None)
+    p_rl.add_argument("--actor_lr", type=float, default=None)
+    p_rl.add_argument("--critic_lr", type=float, default=None)
+    p_rl.add_argument("--flow_steps", type=int, default=None)
+    p_rl.add_argument("--execution_horizon", type=int, default=None)
+    p_rl.add_argument("--velocity_anchor_coef", type=float, default=None)
+    p_rl.add_argument("--reference_w2_coef", type=float, default=None)
+    p_rl.add_argument("--reference_transition_kl_coef", type=float, default=None)
     p_rl.add_argument("--device", default=None)
+
+    p_rl_smoke = sub.add_parser("rl-smoke", help="Run one backend-agnostic Flow-RL reset/sample/step smoke test")
+    _add_common_config_args(p_rl_smoke)
+    p_rl_smoke.add_argument("--run_name", default=None)
+    p_rl_smoke.add_argument("--seed", type=int, default=None)
+    p_rl_smoke.add_argument("--backend", default=None)
+    p_rl_smoke.add_argument("--task", default=None)
+    p_rl_smoke.add_argument("--robot", default=None)
+    p_rl_smoke.add_argument("--controller", default=None)
+    p_rl_smoke.add_argument("--algorithm", choices=["reinflow_ppo"], default=None)
+    p_rl_smoke.add_argument("--init_mode", choices=["scratch", "checkpoint"], default=None)
+    p_rl_smoke.add_argument("--action_normalization", choices=["env_bounds", "dataset_stats"], default=None)
+    p_rl_smoke.add_argument("--use_reference_policy", action=argparse.BooleanOptionalAction, default=None)
+    p_rl_smoke.add_argument("--checkpoint", default=None)
+    p_rl_smoke.add_argument("--action_stats", default=None)
+    p_rl_smoke.add_argument("--resume_from", default=None)
+    p_rl_smoke.add_argument("--flow_steps", type=int, default=None)
+    p_rl_smoke.add_argument("--execution_horizon", type=int, default=None)
+    p_rl_smoke.add_argument("--device", default=None)
+
+    p_rl_eval = sub.add_parser("rl-eval", help="Evaluate BC or ReinFlow checkpoints with deterministic ODE actions")
+    _add_common_config_args(p_rl_eval)
+    p_rl_eval.add_argument("--run_name", default=None)
+    p_rl_eval.add_argument("--seed", type=int, default=None)
+    p_rl_eval.add_argument("--backend", default=None)
+    p_rl_eval.add_argument("--task", default=None)
+    p_rl_eval.add_argument("--robot", default=None)
+    p_rl_eval.add_argument("--controller", default=None)
+    p_rl_eval.add_argument("--algorithm", choices=["reinflow_ppo"], default=None)
+    p_rl_eval.add_argument("--init_mode", choices=["scratch", "checkpoint"], default=None)
+    p_rl_eval.add_argument("--action_normalization", choices=["env_bounds", "dataset_stats"], default=None)
+    p_rl_eval.add_argument("--use_reference_policy", action=argparse.BooleanOptionalAction, default=None)
+    p_rl_eval.add_argument("--checkpoint", default=None, help="BC/FM checkpoint to evaluate.")
+    p_rl_eval.add_argument("--resume_from", default=None, help="ReinFlow checkpoint to evaluate.")
+    p_rl_eval.add_argument("--action_stats", default=None)
+    p_rl_eval.add_argument("--flow_steps", type=int, default=None)
+    p_rl_eval.add_argument("--execution_horizon", type=int, default=None)
+    p_rl_eval.add_argument("--eval_episodes", type=int, default=None)
+    p_rl_eval.add_argument("--eval_seed_start", type=int, default=None)
+    p_rl_eval.add_argument("--device", default=None)
 
     p_isaac_smoke = sub.add_parser("isaac-smoke", help="Run one Isaac Lab reset/step smoke test")
     _add_common_config_args(p_isaac_smoke)
@@ -826,6 +925,28 @@ def main(argv: list[str] | None = None) -> int:
         out = run_rl_train(cfg)
         print(json.dumps(out, indent=2, sort_keys=True))
         return 0
+
+    if args.command == "rl-smoke":
+        from mini_pi0.rl.runner import run_rl_smoke
+
+        cfg = load_config(args.config, overrides=_apply_rl_smoke_overrides(args))
+        try:
+            run_rl_smoke(cfg)
+            return 0
+        except Exception as exc:
+            print(f"[rl-smoke] {exc}", file=sys.stderr)
+            return 1
+
+    if args.command == "rl-eval":
+        from mini_pi0.rl.runner import run_rl_eval
+
+        cfg = load_config(args.config, overrides=_apply_rl_eval_overrides(args))
+        try:
+            run_rl_eval(cfg)
+            return 0
+        except Exception as exc:
+            print(f"[rl-eval] {exc}", file=sys.stderr)
+            return 1
 
     if args.command == "isaac-smoke":
         from mini_pi0.rl.runner import run_isaac_smoke

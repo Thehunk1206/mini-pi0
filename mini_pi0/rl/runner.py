@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import random
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,52 +80,97 @@ def run_rl_smoke(cfg: RootConfig) -> dict[str, Any]:
     """Run one simulator-agnostic RL reset/sample/step smoke test."""
 
     from mini_pi0.models.registry import load_checkpoint
+    from mini_pi0.rl.checkpointing import load_reinflow_checkpoint, materialize_embedded_action_stats
     from mini_pi0.rl.flow_policy import ReinFlowActorCritic
     from mini_pi0.utils.device import resolve_device
 
     validate_rl_config(cfg, require_files=True)
     if _algorithm(cfg) != "reinflow_ppo":
         raise ValueError("rl-smoke currently supports rl.algorithm='reinflow_ppo'.")
-    ckpt = _load_checkpoint_if_needed(cfg, load_checkpoint)
-    if ckpt is not None:
-        _inject_model_config_from_checkpoint(cfg, ckpt)
-    device = resolve_device(cfg.rl.device)
-    actor = ReinFlowActorCritic(cfg).to(device)
-    if ckpt is not None:
-        actor.policy.load_state_dict(_checkpoint_model_state(ckpt), strict=True)
-    adapter = SerialBatchAdapter([make_sim_adapter(cfg)])
-    try:
-        observations = adapter.reset([int(cfg.experiment.seed)])
-        low, high = adapter.action_spec()
-        processor = _make_obs_processor(cfg, device=str(device))
-        processor.reset_batch_history(observations)
-        img, prop = processor.obs_batch_to_tensors(observations)
-        bounds = _policy_action_bounds(cfg, processor, low, high, device)
-        with torch.no_grad():
-            sample = actor.sample_path(img, prop, bounds=bounds)
-            actions, _clip_mask = _policy_actions_to_env(
-                sample.action_chunk[:, :1],
-                cfg=cfg,
-                processor=processor,
-                low=low,
-                high=high,
-                device=device,
+    smoke_cfg = copy.deepcopy(cfg)
+    resume_payload = load_reinflow_checkpoint(smoke_cfg.rl.resume_from) if smoke_cfg.rl.resume_from else None
+    checkpoint = None if resume_payload is not None else _load_checkpoint_if_needed(smoke_cfg, load_checkpoint)
+    source = resume_payload if resume_payload is not None else checkpoint
+    if source is not None:
+        _inject_model_config_from_checkpoint(smoke_cfg, source)
+    with tempfile.TemporaryDirectory(prefix="mini-pi0-rl-smoke-") as temp_dir:
+        if resume_payload is not None:
+            stats_path = materialize_embedded_action_stats(resume_payload, Path(temp_dir) / "action_stats.json")
+            if stats_path is not None:
+                smoke_cfg.rl.action_stats_path = str(stats_path)
+        device = resolve_device(smoke_cfg.rl.device)
+        actor = ReinFlowActorCritic(smoke_cfg).to(device)
+        if resume_payload is not None:
+            actor.load_state_dict(resume_payload["actor_critic"], strict=True)
+        elif checkpoint is not None:
+            actor.policy.load_state_dict(_checkpoint_model_state(checkpoint), strict=True)
+        adapter = SerialBatchAdapter([make_sim_adapter(smoke_cfg)])
+        try:
+            observations = adapter.reset([int(smoke_cfg.experiment.seed)])
+            low, high = adapter.action_spec()
+            processor = _make_obs_processor(smoke_cfg, device=str(device))
+            processor.reset_batch_history(observations)
+            img, prop = processor.obs_batch_to_tensors(observations)
+            bounds = _policy_action_bounds(smoke_cfg, processor, low, high, device)
+            with torch.no_grad():
+                sample = actor.sample_path(img, prop, bounds=bounds)
+                actions, _clip_mask = _policy_actions_to_env(
+                    sample.action_chunk[:, :1],
+                    cfg=smoke_cfg,
+                    processor=processor,
+                    low=low,
+                    high=high,
+                    device=device,
+                )
+            step = adapter.step(actions[:, 0], np.ones(1, dtype=bool))
+            summary = {
+                "algorithm": _algorithm(smoke_cfg),
+                "backend": adapter.backend_name,
+                "task": smoke_cfg.simulator.task,
+                "init_mode": _init_mode(smoke_cfg),
+                "action_dim": int(low.shape[0]),
+                "flow_steps": int(smoke_cfg.rl.flow_steps),
+                "path_shape": list(sample.path.shape),
+                "reward": float(step.rewards[0]),
+                "done": bool(step.terminated[0] or step.truncated[0]),
+                "success": bool(step.successes[0]),
+            }
+        finally:
+            adapter.close()
+    print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
+    return summary
+
+
+def run_rl_eval(cfg: RootConfig) -> dict[str, Any]:
+    """Evaluate a BC or ReinFlow checkpoint with deterministic ODE actions."""
+
+    from mini_pi0.models.registry import load_checkpoint
+    from mini_pi0.rl.checkpointing import load_reinflow_checkpoint, materialize_embedded_action_stats
+    from mini_pi0.rl.flow_policy import ReinFlowActorCritic
+    from mini_pi0.utils.device import resolve_device
+
+    validate_rl_config(cfg, require_files=True)
+    eval_cfg = copy.deepcopy(cfg)
+    resume_payload = load_reinflow_checkpoint(eval_cfg.rl.resume_from) if eval_cfg.rl.resume_from else None
+    checkpoint = None if resume_payload is not None else _load_checkpoint_if_needed(eval_cfg, load_checkpoint)
+    source = resume_payload if resume_payload is not None else checkpoint
+    if source is not None:
+        _inject_model_config_from_checkpoint(eval_cfg, source)
+    with tempfile.TemporaryDirectory(prefix="mini-pi0-rl-eval-") as temp_dir:
+        if resume_payload is not None:
+            stats_path = materialize_embedded_action_stats(
+                resume_payload,
+                Path(temp_dir) / "action_stats.json",
             )
-        step = adapter.step(actions[:, 0], np.ones(1, dtype=bool))
-        summary = {
-            "algorithm": _algorithm(cfg),
-            "backend": adapter.backend_name,
-            "task": cfg.simulator.task,
-            "init_mode": _init_mode(cfg),
-            "action_dim": int(low.shape[0]),
-            "flow_steps": int(cfg.rl.flow_steps),
-            "path_shape": list(sample.path.shape),
-            "reward": float(step.rewards[0]),
-            "done": bool(step.terminated[0] or step.truncated[0]),
-            "success": bool(step.successes[0]),
-        }
-    finally:
-        adapter.close()
+            if stats_path is not None:
+                eval_cfg.rl.action_stats_path = str(stats_path)
+        device = resolve_device(eval_cfg.rl.device)
+        policy = ReinFlowActorCritic(eval_cfg).to(device)
+        if resume_payload is not None:
+            policy.load_state_dict(resume_payload["actor_critic"], strict=True)
+        elif checkpoint is not None:
+            policy.policy.load_state_dict(_checkpoint_model_state(checkpoint), strict=True)
+        summary = _evaluate_actor(eval_cfg, policy, device)
     print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
     return summary
 
@@ -143,6 +191,11 @@ def _run_reinflow_train(cfg: RootConfig) -> dict[str, Any]:
     """Train or fine-tune a stochastic flow policy with ReinFlow PPO."""
 
     from mini_pi0.models.registry import load_checkpoint
+    from mini_pi0.rl.checkpointing import (
+        load_reinflow_checkpoint,
+        materialize_embedded_action_stats,
+        restore_reinflow_checkpoint,
+    )
     from mini_pi0.rl.flow_policy import ReinFlowActorCritic
     from mini_pi0.rl.flow_ppo import ReinFlowPPOUpdater
     from mini_pi0.train.data import seed_everything
@@ -151,10 +204,20 @@ def _run_reinflow_train(cfg: RootConfig) -> dict[str, Any]:
 
     validate_rl_config(cfg, require_files=True)
     seed_everything(int(cfg.experiment.seed))
-    ckpt = _load_checkpoint_if_needed(cfg, load_checkpoint)
+    resume_payload = load_reinflow_checkpoint(cfg.rl.resume_from) if cfg.rl.resume_from else None
+    ckpt = None if resume_payload is not None else _load_checkpoint_if_needed(cfg, load_checkpoint)
+    if resume_payload is not None:
+        _inject_model_config_from_checkpoint(cfg, resume_payload)
     if ckpt is not None:
         _inject_model_config_from_checkpoint(cfg, ckpt)
     run_dir = create_run_dir(cfg.experiment.runs_root, f"{cfg.experiment.name}-reinflow")
+    if resume_payload is not None:
+        stats_path = materialize_embedded_action_stats(
+            resume_payload,
+            run_dir / "artifacts" / "action_stats.json",
+        )
+        if stats_path is not None:
+            cfg.rl.action_stats_path = str(stats_path)
     dump_config(run_dir / "config_resolved.yaml", cfg)
 
     device = resolve_device(cfg.rl.device)
@@ -164,6 +227,16 @@ def _run_reinflow_train(cfg: RootConfig) -> dict[str, Any]:
         actor.policy.load_state_dict(model_state, strict=True)
     reference = copy.deepcopy(actor).to(device) if bool(cfg.rl.use_reference_policy) else None
     updater = ReinFlowPPOUpdater(policy=actor, reference=reference, cfg=cfg)
+    start_update = 0
+    primitive_steps = 0
+    best_eval_success = float("-inf")
+    latest_metrics: dict[str, object] = {}
+    if resume_payload is not None:
+        restored = restore_reinflow_checkpoint(resume_payload, policy=actor, updater=updater)
+        start_update = restored.next_update
+        primitive_steps = restored.primitive_steps
+        best_eval_success = restored.best_eval_success
+        latest_metrics = restored.latest_metrics
 
     adapter = _make_batched_adapter(cfg)
     try:
@@ -174,6 +247,10 @@ def _run_reinflow_train(cfg: RootConfig) -> dict[str, Any]:
             updater=updater,
             adapter=adapter,
             device=device,
+            start_update=start_update,
+            primitive_steps=primitive_steps,
+            best_eval_success=best_eval_success,
+            latest_metrics=latest_metrics,
         )
     finally:
         adapter.close()
@@ -232,10 +309,15 @@ def _run_reinflow_loop(
     updater: Any,
     adapter: BatchedSimulatorAdapter,
     device: torch.device,
+    start_update: int = 0,
+    primitive_steps: int = 0,
+    best_eval_success: float = float("-inf"),
+    latest_metrics: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Collect macro transitions and optimize joint denoising-path likelihoods."""
 
     from mini_pi0.rl.buffers import ReinFlowRolloutBuffer
+    from mini_pi0.rl.checkpointing import save_reinflow_checkpoint
     from mini_pi0.rl.rewards import make_reward_strategy
     from mini_pi0.utils.runs import append_jsonl
 
@@ -254,6 +336,7 @@ def _run_reinflow_loop(
         episode_lengths=np.zeros(adapter.num_envs, dtype=np.int64),
         episode_successes=np.zeros(adapter.num_envs, dtype=bool),
         next_reset_seed=int(cfg.experiment.seed) + adapter.num_envs,
+        primitive_steps=int(primitive_steps),
     )
     reward_strategy = make_reward_strategy(
         cfg.rl.reward_strategy,
@@ -263,10 +346,16 @@ def _run_reinflow_loop(
     )
     policy_bounds = _policy_action_bounds(cfg, processor, low, high, device)
     storage_device = _rollout_storage_device(cfg, device)
-    best_reward = float("-inf")
-    latest_summary: dict[str, Any] = {}
+    latest_summary: dict[str, Any] = dict(latest_metrics or {})
+    environment_manifest: dict[str, object] = {
+        "backend": adapter.backend_name,
+        "task": str(cfg.simulator.task),
+        "num_envs": adapter.num_envs,
+        "action_low": low.tolist(),
+        "action_high": high.tolist(),
+    }
 
-    for update_index in range(int(cfg.rl.total_updates)):
+    for update_index in range(int(start_update), int(cfg.rl.total_updates)):
         actor.actor.kernel.noise.set_training_progress(_update_progress(update_index, int(cfg.rl.total_updates)))
         buffer = ReinFlowRolloutBuffer(
             capacity=int(cfg.rl.rollout_decisions_per_update),
@@ -358,12 +447,44 @@ def _run_reinflow_loop(
             "noise_std_upper_bound": float(actor.actor.kernel.noise.current_std_max.item()),
             **vars(stats),
         }
+        eval_interval = int(cfg.rl.eval_every_updates)
+        if eval_interval > 0 and (update_index + 1) % eval_interval == 0:
+            with _preserve_rng_state(device):
+                evaluation = _evaluate_actor(cfg, actor, device)
+            row.update(
+                {
+                    "eval_success_rate": evaluation["success_rate"],
+                    "eval_return_mean": evaluation["return_mean"],
+                    "eval_episode_length_mean": evaluation["episode_length_mean"],
+                }
+            )
+            eval_success = float(evaluation["success_rate"])
+            if eval_success > best_eval_success:
+                best_eval_success = eval_success
+                save_reinflow_checkpoint(
+                    run_dir / "checkpoints" / "best_rl.pt",
+                    cfg=cfg,
+                    policy=actor,
+                    updater=updater,
+                    next_update=update_index + 1,
+                    primitive_steps=state.primitive_steps,
+                    best_eval_success=best_eval_success,
+                    metrics=row,
+                    environment_manifest=environment_manifest,
+                )
         append_jsonl(run_dir / "metrics" / "rl_metrics.jsonl", row)
         latest_summary = row
-        if reward_mean > best_reward:
-            best_reward = reward_mean
-            _save_rl_checkpoint(run_dir / "checkpoints" / "best_rl.pt", cfg=cfg, actor=actor, updater=updater, row=row)
-        _save_rl_checkpoint(run_dir / "checkpoints" / "latest_rl.pt", cfg=cfg, actor=actor, updater=updater, row=row)
+        save_reinflow_checkpoint(
+            run_dir / "checkpoints" / "latest_rl.pt",
+            cfg=cfg,
+            policy=actor,
+            updater=updater,
+            next_update=update_index + 1,
+            primitive_steps=state.primitive_steps,
+            best_eval_success=best_eval_success,
+            metrics=row,
+            environment_manifest=environment_manifest,
+        )
         print(
             f"[reinflow] update={update_index + 1:04d}/{cfg.rl.total_updates:04d} "
             f"reward={reward_mean:.3f} success={success_rate:.3f} "
@@ -372,7 +493,77 @@ def _run_reinflow_loop(
             flush=True,
         )
 
-    return _write_summary(run_dir, best_reward, latest_summary)
+    return _write_summary(
+        run_dir,
+        best_eval_success,
+        latest_summary,
+        metric_name="best_eval_success",
+    )
+
+
+def _evaluate_actor(cfg: RootConfig, actor: Any, device: torch.device) -> dict[str, Any]:
+    """Run fixed-seed deterministic ODE evaluation episodes."""
+
+    from mini_pi0.rl.rewards import NativeReward
+
+    eval_cfg = copy.deepcopy(cfg)
+    eval_cfg.rl.num_envs = 1
+    adapter = _make_batched_adapter(eval_cfg)
+    returns: list[float] = []
+    lengths: list[int] = []
+    successes: list[bool] = []
+    try:
+        low, high = adapter.action_spec()
+        _validate_action_dimensions(eval_cfg, low, high)
+        processor = _make_obs_processor(eval_cfg, device=str(device))
+        bounds = _policy_action_bounds(eval_cfg, processor, low, high, device)
+        for episode_index in range(int(eval_cfg.rl.eval_episodes)):
+            seed = int(eval_cfg.rl.eval_seed_start) + episode_index
+            torch.manual_seed(seed)
+            if device.type == "cuda":
+                torch.cuda.manual_seed(seed)
+            observations = adapter.reset([seed])
+            processor.reset_batch_history(observations)
+            images, proprio = processor.obs_batch_to_tensors(observations)
+            episode_return = 0.0
+            episode_length = 0
+            episode_success = False
+            while episode_length < int(eval_cfg.simulator.horizon):
+                actor.actor.likelihood_mode()
+                with torch.no_grad(), _autocast(eval_cfg, device):
+                    action_chunk = actor.deterministic_sample(images, proprio, bounds=bounds)
+                macro = _execute_macro_action(
+                    cfg=eval_cfg,
+                    adapter=adapter,
+                    action_chunk=action_chunk,
+                    observations=observations,
+                    processor=processor,
+                    reward_strategy=NativeReward(),
+                    low=low,
+                    high=high,
+                    device=device,
+                )
+                observations = macro.observations
+                episode_return += float(macro.episode_rewards[0])
+                episode_length += int(macro.durations[0])
+                episode_success = bool(episode_success or macro.successes[0])
+                if bool(macro.terminated[0] or macro.truncated[0]):
+                    break
+                images, proprio = processor.obs_batch_to_tensors(observations)
+            returns.append(episode_return)
+            lengths.append(episode_length)
+            successes.append(episode_success)
+    finally:
+        adapter.close()
+    return {
+        "episodes": len(returns),
+        "success_rate": float(np.mean(successes)) if successes else 0.0,
+        "return_mean": float(np.mean(returns)) if returns else 0.0,
+        "episode_length_mean": float(np.mean(lengths)) if lengths else 0.0,
+        "returns": returns,
+        "lengths": lengths,
+        "successes": successes,
+    }
 
 
 def _execute_macro_action(
@@ -746,6 +937,24 @@ def _autocast(cfg: RootConfig, device: torch.device):
     return torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=enabled)
 
 
+@contextmanager
+def _preserve_rng_state(device: torch.device):
+    """Keep periodic evaluation from changing the training random stream."""
+
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    cuda_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state(cuda_state, device)
+
+
 def _update_progress(update_index: int, total_updates: int) -> float:
     """Return normalized training progress including both endpoints."""
 
@@ -757,7 +966,7 @@ def _update_progress(update_index: int, total_updates: int) -> float:
 def _load_checkpoint_if_needed(cfg: RootConfig, loader: Any) -> dict[str, Any] | None:
     """Load checkpoint payload when required by config."""
 
-    if _init_mode(cfg) != "checkpoint" and not bool(cfg.rl.use_reference_policy):
+    if cfg.rl.resume_from or (_init_mode(cfg) != "checkpoint" and not bool(cfg.rl.use_reference_policy)):
         return None
     ckpt = loader(cfg.rl.checkpoint, map_location="cpu")
     if not isinstance(ckpt, dict):
@@ -772,6 +981,9 @@ def _inject_model_config_from_checkpoint(cfg: RootConfig, ckpt: dict[str, Any]) 
     if isinstance(model_name, str) and model_name:
         cfg.model.name = model_name
     model_cfg = ckpt.get("model_config")
+    resolved = ckpt.get("resolved_config")
+    if model_cfg is None and isinstance(resolved, dict):
+        model_cfg = resolved.get("model")
     if isinstance(model_cfg, dict):
         for key, value in model_cfg.items():
             if hasattr(cfg.model, key):
@@ -832,14 +1044,21 @@ def _save_rl_checkpoint(
     )
 
 
-def _write_summary(run_dir: Path, best_reward: float, latest_summary: dict[str, Any]) -> dict[str, Any]:
+def _write_summary(
+    run_dir: Path,
+    best_metric: float,
+    latest_summary: dict[str, Any],
+    *,
+    metric_name: str = "best_reward_mean",
+) -> dict[str, Any]:
     """Write and return the final RL run summary."""
 
+    best_path = run_dir / "checkpoints" / "best_rl.pt"
     summary = {
         "run_dir": str(run_dir),
-        "best_reward_mean": float(best_reward),
+        metric_name: float(best_metric),
         "latest": latest_summary,
-        "best_checkpoint": str(run_dir / "checkpoints" / "best_rl.pt"),
+        "best_checkpoint": str(best_path) if best_path.is_file() else None,
         "latest_checkpoint": str(run_dir / "checkpoints" / "latest_rl.pt"),
     }
     with (run_dir / "metrics" / "rl_summary.json").open("w", encoding="utf-8") as handle:

@@ -21,6 +21,7 @@ from mini_pi0.rl.flow_ppo import ReinFlowPPOUpdateStats
 from mini_pi0.rl.rewards import NativeReward
 from mini_pi0.rl.runner import (
     _execute_macro_action,
+    _evaluate_actor,
     _make_obs_processor,
     _run_reinflow_loop,
     run_rl_smoke,
@@ -135,6 +136,10 @@ class _FakeRolloutActor:
         del proprio
         return torch.zeros(image.shape[0])
 
+    def deterministic_sample(self, image: torch.Tensor, proprio: torch.Tensor, *, bounds=None) -> torch.Tensor:
+        del proprio, bounds
+        return torch.zeros(image.shape[0], self.cfg.model.chunk_size, self.cfg.model.action_dim)
+
 
 class _FakeUpdater:
     def update(self, *args, **kwargs) -> ReinFlowPPOUpdateStats:
@@ -237,7 +242,7 @@ def test_episode_state_spans_updates_and_reset_seeds_are_unique(tmp_path: Path) 
     scalar_adapter = _FakeAdapter(cfg, terminate_after=2)
     adapter = SerialBatchAdapter([scalar_adapter])
 
-    with patch("mini_pi0.rl.runner._save_rl_checkpoint"):
+    with patch("mini_pi0.rl.checkpointing.save_reinflow_checkpoint"):
         summary = _run_reinflow_loop(
             cfg=cfg,
             run_dir=tmp_path,
@@ -260,6 +265,21 @@ def test_serial_batch_rejects_inconsistent_action_bounds() -> None:
 
     with pytest.raises(ValueError, match="bounds differ"):
         SerialBatchAdapter([first, second])
+
+
+def test_deterministic_evaluation_uses_fixed_episode_seeds() -> None:
+    cfg = _config()
+    cfg.rl.eval_episodes = 2
+    cfg.rl.eval_seed_start = 100
+    cfg.simulator.horizon = 3
+    fake = _FakeAdapter(cfg, terminate_after=2)
+
+    with patch("mini_pi0.rl.runner._make_batched_adapter", return_value=SerialBatchAdapter([fake])):
+        summary = _evaluate_actor(cfg, _FakeRolloutActor(cfg), torch.device("cpu"))
+
+    assert summary["return_mean"] == pytest.approx(2.0)
+    assert summary["episode_length_mean"] == pytest.approx(2.0)
+    assert fake.reset_seeds == [100, 101]
 
 
 def test_algorithm_modules_do_not_import_simulator_backends() -> None:
