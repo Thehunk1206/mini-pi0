@@ -79,6 +79,21 @@ by ManiSkill eval/deploy: `agentview_image`, `robot0_eef_pos`,
 `robot0_eef_quat`, `robot0_gripper_qpos`, `observation.state.object`, and
 `observation.state.task_progress`.
 
+ReinFlow uses a native vector adapter when `rl.num_envs > 1`, creating one
+Isaac environment and one SimulationApp. Scalar adapters remain available
+through `SerialBatchAdapter`. See [ISAACLAB_DOCKER.md](ISAACLAB_DOCKER.md) for
+the required validation order.
+
+## RL Vectorization
+
+The RL runner consumes only the `BatchedSimulatorAdapter` contract. ManiSkill
+uses one native GPU vector environment for `num_envs > 1`; Isaac Lab uses one
+native vector environment inside Docker. Other and future simulators can reuse
+`SerialBatchAdapter` until they provide a native implementation.
+
+The batch contract preserves termination and truncation separately, supports
+selective reset, and validates shared finite action bounds before rollout.
+
 ## Custom Environments
 
 Custom ManiSkill tasks should be normal registered ManiSkill environments. The

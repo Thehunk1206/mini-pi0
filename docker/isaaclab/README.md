@@ -23,11 +23,14 @@ docker compose -f compose.isaaclab.yaml run --rm isaaclab \
   mini-pi0 isaac-smoke --config examples/configs/isaaclab_franka_lift.yaml
 ```
 
-## PPO Warm Start
+## ReinFlow Scratch Smoke
 
 ```bash
 docker compose -f compose.isaaclab.yaml run --rm isaaclab \
-  mini-pi0 rl-train --config examples/configs/isaaclab_franka_lift_ppo.yaml
+  mini-pi0 rl-smoke --config examples/configs/isaaclab_franka_lift_reinflow_scratch.yaml
+
+docker compose -f compose.isaaclab.yaml run --rm isaaclab \
+  mini-pi0 rl-train --config examples/configs/isaaclab_franka_lift_reinflow_scratch.yaml
 ```
 
 The first run downloads/builds container layers and fills cache volumes. Keep

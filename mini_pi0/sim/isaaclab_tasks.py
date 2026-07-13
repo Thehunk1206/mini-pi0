@@ -50,7 +50,7 @@ _TASK_SPECS: dict[str, IsaacLabTaskSpec] = {
         action_dim=8,
         state_keys=_DEFAULT_STATE_KEYS,
         image_keys=_DEFAULT_IMAGE_KEYS,
-        notes="Primary Isaac Lab smoke task for adapter and PPO warm-start validation.",
+        notes="Primary Isaac Lab smoke task for adapter and Flow-RL validation.",
     ),
     "franka_stack_cube": IsaacLabTaskSpec(
         key="franka_stack_cube",

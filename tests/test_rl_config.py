@@ -11,6 +11,16 @@ from mini_pi0.config.io import load_config
 from mini_pi0.rl.config import validate_rl_config
 
 
+_REINFLOW_CONFIGS = (
+    "isaaclab_franka_lift_reinflow_finetune.yaml",
+    "isaaclab_franka_lift_reinflow_scratch.yaml",
+    "maniskill3_peginsertion_reinflow_finetune.yaml",
+    "maniskill3_peginsertion_reinflow_potential.yaml",
+    "maniskill3_pickcube_reinflow_finetune.yaml",
+    "maniskill3_pickcube_reinflow_scratch.yaml",
+)
+
+
 def test_reinflow_scratch_does_not_require_artifacts() -> None:
     cfg = load_config(
         overrides=[
@@ -107,3 +117,11 @@ def test_resume_is_exclusive_with_warm_start_checkpoint(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="mutually exclusive"):
         validate_rl_config(cfg, require_files=False)
+
+
+@pytest.mark.parametrize("filename", _REINFLOW_CONFIGS)
+def test_reinflow_example_config_is_valid(filename: str) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = load_config(repo_root / "examples" / "configs" / filename)
+
+    validate_rl_config(cfg, require_files=False)

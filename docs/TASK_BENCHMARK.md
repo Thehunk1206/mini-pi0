@@ -18,3 +18,11 @@ visible highlights.
 - Report simulator success from ManiSkill native `info["success"]` when available.
 - Record the controller and observation cameras with every result.
 - Prefer at least 100 episodes for hard tasks and 200 episodes for stable headline results.
+
+## ReinFlow Status
+
+PickCube scratch and PegInsertion checkpoint fine-tuning have passed short
+engineering updates with native vector environments. They are not benchmark
+results and are excluded from the table above. PegInsertion RL will be added
+only after three training seeds and paired deterministic evaluation on episode
+seeds `10000-10099`.

@@ -1,0 +1,136 @@
+experiment:
+  name: maniskill3-peginsertion-reinflow-finetune
+  seed: 0
+  runs_root: runs
+
+simulator:
+  backend: maniskill3
+  task: MiniPi0PegInsertionSide-v1
+  robot: panda_wristcam
+  controller: pd_ee_delta_pose
+  control_freq: 40
+  horizon: 1000
+  reward_shaping: true
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [base_camera, hand_camera, hole_left_camera, hole_right_camera]
+  camera_width: 224
+  camera_height: 224
+  env_kwargs:
+    obs_mode: rgbd
+    render_mode: rgb_array
+    control_mode: pd_ee_delta_pose
+    sensor_width: 224
+    sensor_height: 224
+    sim_backend: physx_cuda
+
+task:
+  object_name: peg
+
+robot:
+  name: panda_wristcam
+  action_dim: 7
+  image_key: agentview_image
+  image_keys: [agentview_image, robot0_eye_in_hand_image, hole_left_image, hole_right_image]
+  proprio_keys:
+    - robot0_eef_pos
+    - robot0_eef_quat
+    - robot0_gripper_qpos
+    - robot_arm_passive_qf
+    - leftfinger_force_norm
+    - rightfinger_force_norm
+    - pair_leftfinger_peg_force_norm
+    - pair_rightfinger_peg_force_norm
+    - pair_peg_box_force_norm
+    - pair_leftfinger_peg_contact
+    - pair_rightfinger_peg_contact
+    - pair_peg_box_contact
+  state_keys:
+    - robot0_eef_pos
+    - robot0_eef_quat
+    - robot0_gripper_qpos
+    - robot_arm_passive_qf
+    - leftfinger_force_norm
+    - rightfinger_force_norm
+    - pair_leftfinger_peg_force_norm
+    - pair_rightfinger_peg_force_norm
+    - pair_peg_box_force_norm
+    - pair_leftfinger_peg_contact
+    - pair_rightfinger_peg_contact
+    - pair_peg_box_contact
+
+model:
+  name: mini_pi0_fm
+  action_dim: 7
+  prop_dim: 24
+  chunk_size: 8
+  cond_dim: 256
+  d_model: 512
+  nhead: 8
+  nlayers: 6
+  action_backbone: transformer
+  conditioning_mode: cross_attention
+  action_attention_causal: false
+  obs_horizon: 3
+  vision_backbone: timm
+  vision_model_name: vit_small_patch16_224
+  vision_pretrained: true
+  vision_token_grid_size: 4
+  freeze_vision_backbone: false
+  dropout: 0.1
+  noise_beta_alpha: 1.0
+  noise_beta_beta: 1.0
+  noise_s: 0.999
+
+rl:
+  algorithm: reinflow_ppo
+  init_mode: checkpoint
+  action_normalization: dataset_stats
+  checkpoint: runs/maniskill3-peginsertion-motionplanning-transformer-vit-hist3-medium-holecam-contacts/run2/checkpoints/best.pt
+  action_stats_path: runs/maniskill3-peginsertion-motionplanning-transformer-vit-hist3-medium-holecam-contacts/run2/artifacts/action_stats.json
+  resume_from: null
+  use_reference_policy: true
+  total_updates: 100
+  rollout_decisions_per_update: 128
+  num_envs: 16
+  minibatch_size: 256
+  epochs_per_update: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_ratio: 0.001
+  entropy_coef: 0.0
+  entropy_per_symbol: true
+  value_coef: 0.5
+  max_grad_norm: 1.0
+  actor_lr: 0.0000035
+  critic_lr: 0.0003
+  actor_weight_decay: 0.0
+  critic_weight_decay: 0.0
+  lr_scheduler: constant
+  target_kl: 0.01
+  flow_steps: 6
+  flow_solver: euler
+  execution_horizon: 4
+  noise_mode: learned_diagonal
+  noise_std_min: 0.04
+  noise_std_init: 0.07
+  noise_std_max: 0.10
+  noise_std_final_max: 0.08
+  noise_schedule_hold_fraction: 0.5
+  clip_denoised_actions: true
+  reference_w2_coef: 0.0
+  reference_transition_kl_coef: 0.0
+  velocity_anchor_coef: 0.0
+  critic_warmup_updates: 5
+  critic_warmup_epochs: 1
+  critic_output_bias_init: 0.0
+  terminate_on_success: true
+  eval_every_updates: 10
+  eval_episodes: 100
+  eval_seed_start: 10000
+  reward_strategy: native
+  freeze_vision_during_rl: true
+  dtype: bf16
+  rollout_storage_device: auto
+  device: cuda

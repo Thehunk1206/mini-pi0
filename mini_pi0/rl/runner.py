@@ -1064,7 +1064,7 @@ def _write_summary(
     best_path = run_dir / "checkpoints" / "best_rl.pt"
     summary = {
         "run_dir": str(run_dir),
-        metric_name: float(best_metric),
+        metric_name: float(best_metric) if np.isfinite(best_metric) else None,
         "latest": latest_summary,
         "best_checkpoint": str(best_path) if best_path.is_file() else None,
         "latest_checkpoint": str(run_dir / "checkpoints" / "latest_rl.pt"),

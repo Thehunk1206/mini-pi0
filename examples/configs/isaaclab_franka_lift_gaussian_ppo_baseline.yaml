@@ -1,5 +1,6 @@
+# Surrogate ablation only. This is not ReinFlow path-space optimization.
 experiment:
-  name: isaaclab-franka-lift-ppo
+  name: isaaclab-franka-lift-gaussian-ppo-baseline
   seed: 0
   runs_root: runs
 
@@ -29,18 +30,8 @@ robot:
   action_dim: 8
   image_key: agentview_image
   image_keys: [agentview_image]
-  proprio_keys:
-    - robot0_eef_pos
-    - robot0_eef_quat
-    - robot0_gripper_qpos
-    - observation.state.object
-    - observation.state.task_progress
-  state_keys:
-    - robot0_eef_pos
-    - robot0_eef_quat
-    - robot0_gripper_qpos
-    - observation.state.object
-    - observation.state.task_progress
+  proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, observation.state.object, observation.state.task_progress]
+  state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, observation.state.object, observation.state.task_progress]
 
 model:
   name: mini_pi0_fm
@@ -51,14 +42,12 @@ model:
   d_model: 256
   nhead: 4
   nlayers: 4
-  action_backbone: transformer
-  conditioning_mode: cross_attention
-  obs_horizon: 1
-  vision_backbone: resnet18
-  freeze_vision_backbone: true
 
 rl:
-  algorithm: ppo
+  algorithm: gaussian_ppo_baseline
+  init_mode: checkpoint
+  action_normalization: dataset_stats
+  use_reference_policy: true
   checkpoint: runs/isaaclab-franka-lift-bc/run1/checkpoints/best.pt
   action_stats_path: runs/isaaclab-franka-lift-bc/run1/artifacts/action_stats.json
   total_updates: 10
@@ -69,7 +58,6 @@ rl:
   gamma: 0.99
   gae_lambda: 0.95
   clip_ratio: 0.2
-  entropy_coef: 0.0
   value_coef: 0.5
   kl_coef: 0.05
   max_grad_norm: 1.0

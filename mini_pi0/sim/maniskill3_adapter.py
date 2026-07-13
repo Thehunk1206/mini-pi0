@@ -84,7 +84,8 @@ class ManiSkill3Adapter(SimulatorAdapter):
 
         render_mode = "rgb_array" if bool(cfg.simulator.has_offscreen_renderer) else "none"
         env_kwargs.pop("render_mode", None)
-        render_backend = env_kwargs.pop("render_backend", "cpu")
+        default_render_backend = "gpu" if bool(cfg.simulator.has_offscreen_renderer) else "none"
+        render_backend = env_kwargs.pop("render_backend", default_render_backend)
         env_kwargs.pop("scripted_control_mode", None)
 
         control_mode = str(cfg.simulator.controller)
@@ -453,9 +454,9 @@ class ManiSkill3Adapter(SimulatorAdapter):
 
         return StepOutput(
             obs=obs,
-            reward=float(np.asarray(reward).item()),
-            terminated=bool(np.asarray(terminated).item()),
-            truncated=bool(np.asarray(truncated).item()),
+            reward=float(np.asarray(self._to_numpy(reward)).reshape(-1)[0]),
+            terminated=bool(np.asarray(self._to_numpy(terminated)).reshape(-1)[0]),
+            truncated=bool(np.asarray(self._to_numpy(truncated)).reshape(-1)[0]),
             info=norm_info,
         )
 

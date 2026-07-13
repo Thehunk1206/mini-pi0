@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-torch = pytest.importorskip("torch")
+import torch
 from torch.distributions import Normal
 
 from mini_pi0.rl.kernels import CensoredDiagonalNormal

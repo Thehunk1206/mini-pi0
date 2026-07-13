@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """PPO objective components for FM warm-start fine-tuning."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

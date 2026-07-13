@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-torch = pytest.importorskip("torch")
+import torch
 from torch import nn
 
 from mini_pi0.config.io import load_config

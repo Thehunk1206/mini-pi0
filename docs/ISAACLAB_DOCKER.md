@@ -1,90 +1,124 @@
 # Isaac Lab Docker Runtime
 
-This repo runs Isaac Sim/Lab through Docker instead of installing Isaac on the
-host. The host still provides the NVIDIA driver and NVIDIA container runtime,
-but `mini-pi0` does not install or modify drivers, CUDA, Isaac Sim, or Isaac
-Lab outside the container.
+Isaac Sim and Isaac Lab run only inside the NVIDIA container. The repository
+does not install or modify host Isaac packages, CUDA, NVIDIA drivers, or kernel
+modules. Docker uses the host driver through NVIDIA Container Toolkit.
 
 ## Requirements
 
-- Docker with the NVIDIA runtime.
+- Docker Compose with NVIDIA GPU support.
 - Access to `nvcr.io/nvidia/isaac-lab`.
-- EULA and privacy consent passed as runtime environment variables.
-- A host NVIDIA driver compatible with the selected Isaac Lab container.
+- A host driver compatible with the selected image.
+- Explicit EULA and privacy consent in `.env`.
 
-The default image is pinned in `.env.example`:
+The default base image is pinned in `.env.example`:
 
 ```text
 ISAAC_LAB_IMAGE=nvcr.io/nvidia/isaac-lab:2.3.0
 ```
 
-If the host driver is incompatible, Docker/Isaac will fail at container runtime;
-the repo does not attempt any host-side fix.
-
-## Build
+Create `.env` and set the consent values before running:
 
 ```bash
 cp .env.example .env
+# Edit .env: ACCEPT_EULA=Y and PRIVACY_CONSENT=Y
+```
+
+If the driver and image are incompatible, the container command fails. The
+project does not attempt a host-side driver or CUDA fix.
+
+## Build and Caches
+
+```bash
 docker compose -f compose.isaaclab.yaml build isaaclab
 ```
 
-The Dockerfile is intentionally thin. It starts from the official Isaac Lab
-image and installs this repository editable at container startup:
+The image extends NVIDIA's official Isaac Lab image. The repository is mounted
+at `/workspace/mini-pi0` and installed editable by the entrypoint. Set
+`MINI_PI0_INSTALL_EDITABLE=0` only when the derived image already contains the
+required package version.
 
-```text
-python -m pip install -e ".[vision]"
-```
+Persistent caches live under `.cache/isaaclab/` for pip, Hugging Face,
+Omniverse, Kit, compute kernels, and logs. These directories are ignored by
+Git and avoid repeated shader and package work.
 
-Set `MINI_PI0_INSTALL_EDITABLE=0` only if the image already contains the desired
-repo install.
+## Validation Order
 
-## Cache Volumes
-
-`compose.isaaclab.yaml` bind-mounts cache paths under `.cache/isaaclab/`:
-
-- `pip`
-- `hf`
-- `ov`
-- `kit`
-- `computecache`
-- `logs`
-
-These paths are ignored by git. Keeping them persistent avoids repeated
-downloads and shader/cache rebuilds.
-
-## Smoke Test
+Run the commands in this order:
 
 ```bash
 docker compose -f compose.isaaclab.yaml run --rm isaaclab mini-pi0 backends
 
 docker compose -f compose.isaaclab.yaml run --rm isaaclab \
   mini-pi0 isaac-smoke --config examples/configs/isaaclab_franka_lift.yaml
+
+docker compose -f compose.isaaclab.yaml run --rm isaaclab \
+  mini-pi0 rl-smoke \
+  --config examples/configs/isaaclab_franka_lift_reinflow_scratch.yaml
+
+docker compose -f compose.isaaclab.yaml run --rm isaaclab \
+  mini-pi0 rl-train \
+  --config examples/configs/isaaclab_franka_lift_reinflow_scratch.yaml
 ```
 
-`isaac-smoke` launches Isaac Lab headlessly, resolves the configured task, runs
-one reset, applies one zero action, and reports observation keys, action
-dimension, reward, done, and success.
+The final config performs two small ReinFlow updates with four environments.
+For `num_envs > 1`, one Isaac vector environment and one SimulationApp are
+created. The RL algorithm and buffer contain no Isaac imports.
 
-## Headless PPO Fine-Tuning
+## Checkpoint Fine-Tuning
+
+The optional fine-tuning config requires an Isaac-domain FM checkpoint and the
+action statistics produced by that same run:
 
 ```bash
 docker compose -f compose.isaaclab.yaml run --rm isaaclab \
-  mini-pi0 rl-train --config examples/configs/isaaclab_franka_lift_ppo.yaml \
-  --checkpoint runs/<bc-run>/checkpoints/best.pt \
-  --action_stats runs/<bc-run>/artifacts/action_stats.json
+  mini-pi0 rl-train \
+  --config examples/configs/isaaclab_franka_lift_reinflow_finetune.yaml \
+  --checkpoint runs/<isaac-bc-run>/checkpoints/best.pt \
+  --action_stats runs/<isaac-bc-run>/artifacts/action_stats.json
 ```
 
-The command writes:
+Do not use a ManiSkill checkpoint unless its observation schema, controller,
+action dimension, camera setup, and action normalization are intentionally
+matched to the Isaac task.
 
-- `runs/<experiment>-rl/runN/config_resolved.yaml`
-- `runs/<experiment>-rl/runN/metrics/rl_metrics.jsonl`
-- `runs/<experiment>-rl/runN/metrics/rl_summary.json`
-- `runs/<experiment>-rl/runN/checkpoints/latest_rl.pt`
-- `runs/<experiment>-rl/runN/checkpoints/best_rl.pt`
+## Deterministic Evaluation
 
-## Notes
+```bash
+docker compose -f compose.isaaclab.yaml run --rm isaaclab \
+  mini-pi0 rl-eval \
+  --config examples/configs/isaaclab_franka_lift_reinflow_scratch.yaml \
+  --resume_from runs/<reinflow-run>/checkpoints/latest_rl.pt \
+  --eval_episodes 20
+```
 
-- The first supported task key is `franka_lift_cube`.
-- Broader task keys are registered in `mini_pi0/sim/isaaclab_tasks.py`.
-- GUI/WebRTC is intentionally out of scope for the first Docker path.
-- Isaac-dependent tests should run inside Docker; host tests mock or skip Isaac.
+Evaluation discards learned transition noise and integrates the FM velocity
+field with deterministic Euler steps. Episode seeds are fixed by
+`rl.eval_seed_start`.
+
+## Outputs
+
+Training writes:
+
+- `config_resolved.yaml`
+- `metrics/rl_metrics.jsonl`
+- `metrics/rl_summary.json`
+- `checkpoints/latest_rl.pt`
+- `checkpoints/best_rl.pt` only after a periodic deterministic evaluation
+  improves success rate
+
+The checkpoint embeds action statistics, model/reference/critic state,
+optimizer and scheduler state, RNG state, Git commit, dependency versions, and
+the simulator manifest.
+
+## Supported Task Mapping
+
+| mini-pi0 key | Isaac Lab task |
+|---|---|
+| `franka_lift_cube` | `Isaac-Lift-Cube-Franka-v0` |
+| `franka_stack_cube` | `Isaac-Stack-Cube-Franka-v0` |
+| `franka_pick_place` | `Isaac-PickPlace-Franka-v0` when present in the image |
+| `franka_peg_insertion` | `Isaac-Peg-Insertion-Franka-v0` when present in the image |
+
+Lift is the required first gate. Other aliases depend on task availability in
+the pinned Isaac Lab image.

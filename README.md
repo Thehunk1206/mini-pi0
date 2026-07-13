@@ -54,9 +54,11 @@ Click a preview to open the MP4.
   - observation history and chunked action prediction
 - Robomimic-style HDF5 loading for converted ManiSkill trajectories.
 - Action diagnostics for comparing flow steps and per-dimension clipping.
-- PegInsertion support with close hole cameras and optional contact features.
-- Optional Dockerized Isaac Lab backend for headless smoke tests and PPO
-  warm-start fine-tuning from `mini_pi0_fm` checkpoints.
+- PegInsertion support with close hole cameras, vector-aware contact features,
+  and insertion/jam diagnostics.
+- ReinFlow path-space PPO with scratch and checkpoint modes, macro-action GAE,
+  deterministic evaluation, and resumable checkpoints.
+- Optional Dockerized Isaac Lab backend with native vector environments.
 
 ## Repository Layout
 
@@ -69,7 +71,7 @@ mini_pi0/
   models/      # mini_pi0_fm model and registry
   train/       # training loop, optimizer, checkpointing
   eval/        # rollout eval, action diagnostics, grid videos
-  rl/          # PPO warm-start fine-tuning utilities
+  rl/          # ReinFlow PPO and Gaussian surrogate baseline
   deploy/      # simulation deployment loop
   utils/       # runtime/device/parity helpers
 
@@ -155,17 +157,22 @@ docker compose -f compose.isaaclab.yaml run --rm isaaclab \
   mini-pi0 isaac-smoke --config examples/configs/isaaclab_franka_lift.yaml
 ```
 
-PPO warm-start from a trained FM checkpoint:
+ReinFlow scratch smoke and two-update ManiSkill gate:
+
+```bash
+mini-pi0 rl-smoke --config examples/configs/maniskill3_pickcube_reinflow_scratch.yaml
+mini-pi0 rl-train --config examples/configs/maniskill3_pickcube_reinflow_scratch.yaml
+```
+
+ReinFlow scratch training with four native Isaac environments:
 
 ```bash
 docker compose -f compose.isaaclab.yaml run --rm isaaclab \
-  mini-pi0 rl-train --config examples/configs/isaaclab_franka_lift_ppo.yaml \
-  --checkpoint runs/<bc-run>/checkpoints/best.pt \
-  --action_stats runs/<bc-run>/artifacts/action_stats.json
+  mini-pi0 rl-train --config examples/configs/isaaclab_franka_lift_reinflow_scratch.yaml
 ```
 
 See [docs/ISAACLAB_DOCKER.md](docs/ISAACLAB_DOCKER.md) and
-[docs/RL_WARMSTART.md](docs/RL_WARMSTART.md).
+[docs/REINFLOW_RL.md](docs/REINFLOW_RL.md).
 
 ## ManiSkill Data Workflow
 
@@ -247,6 +254,8 @@ the hole and benefits from contact diagnostics. This branch includes:
 - Contact extraction into HDF5 under `obs/*` keys.
 - A contact-aware config:
   `examples/configs/maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml`.
+- A checkpoint ReinFlow config using the existing run2 policy:
+  `examples/configs/maniskill3_peginsertion_reinflow_finetune.yaml`.
 
 Prepare the hole-camera contact dataset:
 
@@ -262,6 +271,12 @@ mini-pi0 train \
 ```
 
 Read the task-specific notes in [docs/PEG_INSERTION.md](docs/PEG_INSERTION.md).
+
+Smoke-test the existing FM checkpoint before RL fine-tuning:
+
+```bash
+mini-pi0 rl-smoke --config examples/configs/maniskill3_peginsertion_reinflow_finetune.yaml
+```
 
 ## Config Notes
 
@@ -403,7 +418,7 @@ For the task-wise benchmark table, see [docs/TASK_BENCHMARK.md](docs/TASK_BENCHM
 - [x] Train a stable FM transformer + ViT policy on StackCube motion-planning data.
 - [x] Add PegInsertionSide close hole cameras and contact-feature conversion.
 - [x] Save multi-camera eval grids with `eval.grid_cameras`.
-- [ ] Add task-specific failure diagnostics for insertion and contact-rich tasks:
+- [x] Add task-specific failure diagnostics for insertion and contact-rich tasks:
   grasp state, peg-hole distance, angular alignment, insertion depth, contact
   force, and jamming detection.
 - [ ] Improve PegInsertionSide with better camera placement, richer contact
@@ -414,15 +429,15 @@ For the task-wise benchmark table, see [docs/TASK_BENCHMARK.md](docs/TASK_BENCHM
   shared robot datasets.
 - [ ] Add multi-GPU training for larger ViT backbones, more cameras, and larger
   task mixtures.
-- [x] Add RL fine-tuning after imitation learning. The immediate target is to warm
-  start from `mini_pi0_fm` checkpoints, then optimize task success and contact
-  robustness with environment rewards while constraining policy drift from the
-  demonstration policy.
-- [x] Add a Dockerized Isaac Lab adapter path for headless smoke tests and PPO
-  warm-start experiments.
+- [x] Add ReinFlow path-space PPO fine-tuning after imitation learning with a
+  frozen FM reference, optional W2/transition-KL drift controls, and scratch
+  mode as an experimental baseline.
+- [x] Add a Dockerized Isaac Lab adapter path for headless native-vector
+  ReinFlow experiments.
 
 ## References
 
 - [ManiSkill / haosulab](https://github.com/haosulab/ManiSkill/tree/main)
 - [π0: A Vision-Language-Action Flow Model for General Robot Control](https://www.pi.website/download/pi0.pdf)
 - [Diffusion Policy](https://diffusion-policy.cs.columbia.edu/#paper)
+- [ReinFlow](https://arxiv.org/abs/2505.22094)
