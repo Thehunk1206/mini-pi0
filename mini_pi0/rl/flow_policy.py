@@ -103,6 +103,7 @@ class ReinFlowActor(nn.Module):
         log_prob = torch.zeros(batch, device=cond.device, dtype=torch.float32)
         entropy = torch.zeros_like(log_prob)
         time_grid = self._time_grid(cond)
+        transition_bounds = self._transition_bounds(bounds)
         for step in range(self.flow_steps):
             tau = time_grid[step].expand(batch)
             distribution = self.kernel.distribution(
@@ -111,12 +112,13 @@ class ReinFlowActor(nn.Module):
                 time_grid[step + 1] - time_grid[step],
                 cond,
                 self.policy.action_transformer,
-                bounds,
+                transition_bounds,
             )
             x = distribution.sample().to(dtype=cond.dtype)
             path.append(x)
             log_prob = log_prob + distribution.log_prob(x).sum(dim=(-1, -2))
             entropy = entropy + distribution.entropy().sum(dim=(-1, -2))
+        log_prob = self._normalize_path_log_prob(log_prob)
         entropy = self._normalize_entropy(entropy)
         return torch.stack(path, dim=1), log_prob, entropy, initial
 
@@ -134,6 +136,7 @@ class ReinFlowActor(nn.Module):
         log_prob = torch.zeros(batch, device=path.device, dtype=torch.float32)
         entropy = torch.zeros_like(log_prob)
         time_grid = self._time_grid(path)
+        transition_bounds = self._transition_bounds(bounds)
         for step in range(self.flow_steps):
             tau = time_grid[step].expand(batch)
             distribution = self.kernel.distribution(
@@ -142,11 +145,11 @@ class ReinFlowActor(nn.Module):
                 time_grid[step + 1] - time_grid[step],
                 cond,
                 self.policy.action_transformer,
-                bounds,
+                transition_bounds,
             )
             log_prob = log_prob + distribution.log_prob(path[:, step + 1]).sum(dim=(-1, -2))
             entropy = entropy + distribution.entropy().sum(dim=(-1, -2))
-        return log_prob, self._normalize_entropy(entropy)
+        return self._normalize_path_log_prob(log_prob), self._normalize_entropy(entropy)
 
     def deterministic_from_conditioning(
         self,
@@ -165,13 +168,18 @@ class ReinFlowActor(nn.Module):
             device=cond.device,
             dtype=cond.dtype,
         )
-        time_grid = self._time_grid(cond)
+        time_grid = self._time_grid(x)
         for step in range(self.flow_steps):
             tau = time_grid[step].expand(batch)
             x = x + (time_grid[step + 1] - time_grid[step]) * self.policy.action_transformer(x, tau, cond)
             if bounds is not None and bool(self.cfg.rl.clip_denoised_actions):
                 x = torch.maximum(torch.minimum(x, bounds[1]), bounds[0])
         return x
+
+    def _transition_bounds(self, bounds: ActionBounds) -> ActionBounds:
+        """Return censoring bounds only when intermediate clipping is enabled."""
+
+        return bounds if bool(self.cfg.rl.clip_denoised_actions) else None
 
     def transition_parameters(
         self,
@@ -208,6 +216,11 @@ class ReinFlowActor(nn.Module):
         if not bool(self.cfg.rl.entropy_per_symbol):
             return entropy
         return entropy / float(self.flow_steps * self.chunk_size * self.action_dim)
+
+    def _normalize_path_log_prob(self, log_prob: torch.Tensor) -> torch.Tensor:
+        """Match ReinFlow's reference PPO scale across path dimensions."""
+
+        return log_prob / float(self.flow_steps * self.chunk_size * self.action_dim)
 
     def _time_grid(self, tensor: torch.Tensor) -> torch.Tensor:
         """Return the actor's uniform flow integration grid."""

@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from mini_pi0.config.io import load_config
+from mini_pi0.models.fm import MiniPi0FlowMatching
 from mini_pi0.rl.flow_policy import ReinFlowActorCritic
 
 
@@ -91,6 +92,31 @@ def test_evaluate_path_recomputes_sampled_logprob() -> None:
     assert torch.allclose(output.log_prob, evaluated.log_prob, atol=1e-5)
 
 
+def test_path_logprob_is_normalized_over_flow_and_action_symbols() -> None:
+    cfg = _cfg()
+    policy = _policy(cfg)
+    image = torch.zeros(2, 3, 8, 8)
+    proprio = torch.randn(2, cfg.model.prop_dim)
+
+    output = policy.sample_path(image, proprio)
+    cond = policy.actor.encode_conditioning(image, proprio)
+    time_grid = torch.linspace(0.0, 1.0, cfg.rl.flow_steps + 1)
+    raw_log_prob = torch.zeros(2)
+    for step in range(cfg.rl.flow_steps):
+        distribution = policy.actor.kernel.distribution(
+            output.path[:, step],
+            time_grid[step].expand(2),
+            time_grid[step + 1] - time_grid[step],
+            cond,
+            policy.policy.action_transformer,
+            None,
+        )
+        raw_log_prob += distribution.log_prob(output.path[:, step + 1]).sum(dim=(-1, -2))
+    symbol_count = cfg.rl.flow_steps * cfg.model.chunk_size * cfg.model.action_dim
+
+    assert torch.allclose(output.log_prob, raw_log_prob / symbol_count, atol=1e-6)
+
+
 def test_deterministic_sample_matches_manual_euler() -> None:
     cfg = _cfg("rl.clip_denoised_actions=False")
     policy = _policy(cfg)
@@ -106,6 +132,58 @@ def test_deterministic_sample_matches_manual_euler() -> None:
         expected = expected + 0.5 * policy.policy.action_transformer(expected, tau, cond)
 
     assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_reinflow_deterministic_sample_matches_base_fm_sampler() -> None:
+    cfg = _cfg("rl.clip_denoised_actions=False")
+    base = MiniPi0FlowMatching(
+        action_dim=cfg.model.action_dim,
+        prop_dim=cfg.model.prop_dim,
+        chunk_size=cfg.model.chunk_size,
+        cond_dim=cfg.model.cond_dim,
+        d_model=cfg.model.d_model,
+        nhead=2,
+        nlayers=1,
+        conditioning_mode="cross_attention",
+        vision_pretrained=False,
+        dropout=0.1,
+    )
+    policy = ReinFlowActorCritic(cfg, policy=base)
+    image = torch.rand(1, 3, 32, 32)
+    proprio = torch.rand(1, cfg.model.prop_dim)
+    initial_noise = torch.randn(1, cfg.model.chunk_size, cfg.model.action_dim)
+
+    expected = base.sample(
+        image,
+        proprio,
+        n_steps=cfg.rl.flow_steps,
+        solver="euler",
+        initial_noise=initial_noise,
+    )
+    actual = policy.deterministic_sample(
+        image,
+        proprio,
+        initial_noise=initial_noise,
+    )
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_disabled_intermediate_clipping_ignores_transition_bounds() -> None:
+    cfg = _cfg("rl.clip_denoised_actions=False")
+    policy = _policy(cfg)
+    image = torch.zeros(1, 3, 8, 8)
+    proprio = torch.randn(1, cfg.model.prop_dim)
+    initial = torch.zeros(1, cfg.model.chunk_size, cfg.model.action_dim)
+    narrow_bounds = (torch.full((2,), -0.01), torch.full((2,), 0.01))
+
+    torch.manual_seed(7)
+    bounded = policy.sample_path(image, proprio, bounds=narrow_bounds, initial_noise=initial)
+    torch.manual_seed(7)
+    unbounded = policy.sample_path(image, proprio, initial_noise=initial)
+
+    assert torch.equal(bounded.path, unbounded.path)
+    assert torch.equal(bounded.log_prob, unbounded.log_prob)
 
 
 def test_real_transformer_dropout_does_not_change_stored_path_logprob() -> None:

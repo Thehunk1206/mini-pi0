@@ -14,6 +14,7 @@ from mini_pi0.sim.contact_features import collect_contact_features
 # Register custom env on import.
 import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
 import mini_pi0.sim.maniskill3_peginsertion_env  # noqa: F401
+import mini_pi0.sim.maniskill3_pullcube_env  # noqa: F401
 
 
 def default_maniskill_reward_mode(cfg: RootConfig) -> str:
@@ -74,6 +75,11 @@ class ManiSkill3Adapter(SimulatorAdapter):
         ]
 
         env_kwargs = dict(cfg.simulator.env_kwargs or {})
+        domain_randomization = env_kwargs.get("domain_randomization")
+        if isinstance(domain_randomization, dict) and "seed" not in domain_randomization:
+            domain_randomization = dict(domain_randomization)
+            domain_randomization["seed"] = int(cfg.experiment.seed)
+            env_kwargs["domain_randomization"] = domain_randomization
         task_id = str(cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
         if task_id.strip().lower() in {"custom", "mini_pi0_multiobject", "lift"}:
             task_id = "MiniPi0MultiObjectTray-v1"
@@ -327,39 +333,62 @@ class ManiSkill3Adapter(SimulatorAdapter):
     def _peg_diagnostics(self, env_index: int, *, update_jam: bool = False) -> dict[str, np.ndarray]:
         """Return contact-aware PegInsertion progress diagnostics."""
 
+        diagnostics = self._peg_diagnostics_batch(update_jam=update_jam)
+        return diagnostics[env_index] if 0 <= env_index < len(diagnostics) else {}
+
+    def _peg_diagnostics_batch(self, *, update_jam: bool = False) -> list[dict[str, np.ndarray]]:
+        """Compute PegInsertion diagnostics once for every vector environment."""
+
         env = self.unwrapped
+        num_envs = int(getattr(env, "num_envs", 1))
         if not all(hasattr(env, name) for name in ("peg", "box", "peg_head_pose", "box_hole_pose")):
-            return {}
+            return [{} for _ in range(num_envs)]
         try:
-            relative = self._to_numpy((env.box_hole_pose.inv() * env.peg_head_pose).p)[env_index]
-            alignment_error = float(np.linalg.norm(relative[1:]))
-            insertion_depth = max(0.0, float(relative[0]) + 0.015)
-            peg_axis = self._to_numpy(env.peg.pose.to_transformation_matrix())[env_index, :3, 0]
-            hole_axis = self._to_numpy(env.box_hole_pose.to_transformation_matrix())[env_index, :3, 0]
-            cosine = float(np.clip(np.dot(peg_axis, hole_axis), -1.0, 1.0))
-            axis_error = float(np.arccos(cosine))
-            grasped = float(self._to_numpy(env.agent.is_grasping(env.peg))[env_index])
-            force = self._to_numpy(env.scene.get_pairwise_contact_forces(env.peg, env.box))[env_index]
-            contact_force = float(np.linalg.norm(force))
-            half_sizes = self._to_numpy(env.peg_half_sizes)[env_index]
-            hole_depth = max(1e-6, float(2.0 * half_sizes[0]))
+            relative = (env.box_hole_pose.inv() * env.peg_head_pose).p.reshape(num_envs, 3)
+            peg_axis = env.peg.pose.to_transformation_matrix()[:, :3, 0]
+            hole_axis = env.box_hole_pose.to_transformation_matrix()[:, :3, 0]
+            grasped = env.agent.is_grasping(env.peg).reshape(num_envs, 1).to(relative.dtype)
+            force = env.scene.get_pairwise_contact_forces(env.peg, env.box).reshape(num_envs, 3)
+            half_sizes = env.peg_half_sizes.reshape(num_envs, -1)
+            features = torch.cat((relative, peg_axis, hole_axis, grasped, force, half_sizes), dim=1)
+            values = self._to_numpy(features)
+
+            relative_np = values[:, 0:3]
+            peg_axis_np = values[:, 3:6]
+            hole_axis_np = values[:, 6:9]
+            grasped_np = values[:, 9]
+            force_np = values[:, 10:13]
+            half_sizes_np = values[:, 13:]
+            alignment_error = np.linalg.norm(relative_np[:, 1:], axis=1)
+            insertion_depth = np.maximum(0.0, relative_np[:, 0] + 0.015)
+            cosine = np.clip(np.sum(peg_axis_np * hole_axis_np, axis=1), -1.0, 1.0)
+            axis_error = np.arccos(cosine)
+            contact_force = np.linalg.norm(force_np, axis=1)
+            hole_depth = np.maximum(1e-6, 2.0 * half_sizes_np[:, 0])
             if update_jam:
-                advancing = insertion_depth > float(self._previous_insertion_depth[env_index]) + 1e-4
-                jammed = contact_force > 1.0 and not advancing
-                self._jam_steps[env_index] = self._jam_steps[env_index] + 1 if jammed else 0
-                self._previous_insertion_depth[env_index] = insertion_depth
-            jam_duration = float(self._jam_steps[env_index]) / max(1.0, float(self.cfg.simulator.control_freq))
-            return {
-                "observation.state.peg_grasped": np.array([grasped], dtype=np.float32),
-                "observation.state.peg_hole_alignment_error": np.array([alignment_error], dtype=np.float32),
-                "observation.state.peg_axis_error": np.array([axis_error], dtype=np.float32),
-                "observation.state.insertion_depth": np.array([insertion_depth], dtype=np.float32),
-                "observation.state.hole_depth": np.array([hole_depth], dtype=np.float32),
-                "observation.state.peg_box_contact_force": np.array([contact_force], dtype=np.float32),
-                "observation.state.jam_duration": np.array([jam_duration], dtype=np.float32),
-            }
+                advancing = insertion_depth > self._previous_insertion_depth[:num_envs] + 1e-4
+                jammed = (contact_force > 1.0) & ~advancing
+                self._jam_steps[:num_envs] = np.where(jammed, self._jam_steps[:num_envs] + 1, 0)
+                self._previous_insertion_depth[:num_envs] = insertion_depth
+            jam_duration = self._jam_steps[:num_envs] / max(1.0, float(self.cfg.simulator.control_freq))
+            return [
+                {
+                    "observation.state.peg_grasped": np.array([grasped_np[index]], dtype=np.float32),
+                    "observation.state.peg_hole_alignment_error": np.array(
+                        [alignment_error[index]], dtype=np.float32
+                    ),
+                    "observation.state.peg_axis_error": np.array([axis_error[index]], dtype=np.float32),
+                    "observation.state.insertion_depth": np.array([insertion_depth[index]], dtype=np.float32),
+                    "observation.state.hole_depth": np.array([hole_depth[index]], dtype=np.float32),
+                    "observation.state.peg_box_contact_force": np.array(
+                        [contact_force[index]], dtype=np.float32
+                    ),
+                    "observation.state.jam_duration": np.array([jam_duration[index]], dtype=np.float32),
+                }
+                for index in range(num_envs)
+            ]
         except (AttributeError, IndexError, RuntimeError, TypeError, ValueError):
-            return {}
+            return [{} for _ in range(num_envs)]
 
     def _reset_peg_diagnostics(self, indices: list[int]) -> None:
         """Clear stateful jam diagnostics for reset environments."""

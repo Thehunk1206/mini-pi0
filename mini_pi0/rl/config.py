@@ -81,6 +81,16 @@ def _validate_common_scalars(cfg: RootConfig) -> None:
     for name, value in positive_ints.items():
         if int(value) < 1:
             raise ReinFlowConfigError(f"{name} must be >= 1.")
+    if cfg.rl.eval_num_envs is not None and int(cfg.rl.eval_num_envs) < 1:
+        raise ReinFlowConfigError("rl.eval_num_envs must be >= 1 when set.")
+    if cfg.rl.eval_sim_backend is not None and _key(cfg.rl.eval_sim_backend) not in {
+        "auto",
+        "physx_cpu",
+        "physx_cuda",
+    }:
+        raise ReinFlowConfigError(
+            "rl.eval_sim_backend must be 'auto', 'physx_cpu', or 'physx_cuda'."
+        )
     _validate_fraction("rl.gamma", float(cfg.rl.gamma), allow_one=True)
     _validate_fraction("rl.gae_lambda", float(cfg.rl.gae_lambda), allow_one=True)
     _validate_fraction("rl.clip_ratio", float(cfg.rl.clip_ratio), allow_one=False)
@@ -106,6 +116,7 @@ def _validate_reinflow(cfg: RootConfig) -> None:
             raise ReinFlowConfigError(f"{name} must be >= 1.")
     if int(cfg.rl.execution_horizon) > int(cfg.model.chunk_size):
         raise ReinFlowConfigError("rl.execution_horizon cannot exceed model.chunk_size.")
+    _validate_binary_gripper(cfg)
     if _key(cfg.rl.flow_solver) != "euler":
         raise ReinFlowConfigError("reinflow_ppo currently requires rl.flow_solver='euler'.")
     if _key(cfg.rl.noise_mode) != "learned_diagonal":
@@ -145,6 +156,31 @@ def _validate_reinflow(cfg: RootConfig) -> None:
         raise ReinFlowConfigError("Scratch ReinFlow must not use a checkpoint reference policy.")
     if has_reference_loss and not bool(cfg.rl.use_reference_policy):
         raise ReinFlowConfigError("Reference regularization requires rl.use_reference_policy=true.")
+
+
+def _validate_binary_gripper(cfg: RootConfig) -> None:
+    """Validate optional binary gripper action postprocessing."""
+
+    if not bool(cfg.rl.binary_gripper):
+        return
+    action_dim = int(cfg.model.action_dim)
+    index = int(cfg.rl.binary_gripper_index)
+    index = index + action_dim if index < 0 else index
+    if index < 0 or index >= action_dim:
+        raise ReinFlowConfigError(
+            f"rl.binary_gripper_index must address one of {action_dim} action dimensions."
+        )
+    values = (
+        float(cfg.rl.binary_gripper_threshold),
+        float(cfg.rl.binary_gripper_low_value),
+        float(cfg.rl.binary_gripper_high_value),
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ReinFlowConfigError("Binary gripper threshold and command values must be finite.")
+    if values[1] >= values[2]:
+        raise ReinFlowConfigError(
+            "rl.binary_gripper_low_value must be smaller than rl.binary_gripper_high_value."
+        )
 
 
 def _validate_noise(cfg: RootConfig) -> None:

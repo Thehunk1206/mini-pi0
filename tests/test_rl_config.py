@@ -15,9 +15,12 @@ _REINFLOW_CONFIGS = (
     "isaaclab_franka_lift_reinflow_finetune.yaml",
     "isaaclab_franka_lift_reinflow_scratch.yaml",
     "maniskill3_peginsertion_reinflow_finetune.yaml",
+    "maniskill3_peginsertion_reinflow_finetune_2cam.yaml",
     "maniskill3_peginsertion_reinflow_potential.yaml",
     "maniskill3_pickcube_reinflow_finetune.yaml",
     "maniskill3_pickcube_reinflow_scratch.yaml",
+    "maniskill3_pullcubetool_reinflow_finetune_pd_joint_pos.yaml",
+    "maniskill3_pullcubetool_reinflow_finetune_pd_ee_delta_pose.yaml",
 )
 
 
@@ -116,6 +119,30 @@ def test_resume_is_exclusive_with_warm_start_checkpoint(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_rl_config(cfg, require_files=False)
+
+
+def test_binary_gripper_rejects_invalid_action_index() -> None:
+    cfg = load_config(
+        overrides=[
+            "model.action_dim=7",
+            "rl.binary_gripper=True",
+            "rl.binary_gripper_index=7",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="binary_gripper_index"):
+        validate_rl_config(cfg, require_files=False)
+
+
+@pytest.mark.parametrize(
+    "override",
+    ["rl.eval_num_envs=0", "rl.eval_sim_backend='invalid'"],
+)
+def test_invalid_evaluation_runtime_override_is_rejected(override: str) -> None:
+    cfg = load_config(overrides=[override])
+
+    with pytest.raises(ValueError, match="eval_"):
         validate_rl_config(cfg, require_files=False)
 
 

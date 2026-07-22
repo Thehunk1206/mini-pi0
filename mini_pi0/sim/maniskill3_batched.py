@@ -79,10 +79,7 @@ class ManiSkill3BatchedAdapter:
             torch.as_tensor(clipped, dtype=torch.float32, device=device)
         )
         self.scalar._last_raw_obs = raw_obs  # noqa: SLF001
-        diagnostics = [
-            self.scalar._peg_diagnostics(index, update_jam=True)  # noqa: SLF001
-            for index in range(self.num_envs)
-        ]
+        diagnostics = self.scalar._peg_diagnostics_batch(update_jam=True)  # noqa: SLF001
         canonical = self._canonical_batch(diagnostics)
         previous = self._current_observations()
         observations = [canonical[index] if active_mask[index] else previous[index] for index in range(self.num_envs)]

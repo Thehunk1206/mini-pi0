@@ -57,7 +57,7 @@ Click a preview to open the MP4.
 - PegInsertion support with close hole cameras, vector-aware contact features,
   and insertion/jam diagnostics.
 - ReinFlow path-space PPO with scratch and checkpoint modes, macro-action GAE,
-  deterministic evaluation, and resumable checkpoints.
+  reproducible per-episode FM evaluation noise, and resumable checkpoints.
 - Optional Dockerized Isaac Lab backend with native vector environments.
 
 ## Repository Layout
@@ -163,6 +163,9 @@ ReinFlow scratch smoke and two-update ManiSkill gate:
 mini-pi0 rl-smoke --config examples/configs/maniskill3_pickcube_reinflow_scratch.yaml
 mini-pi0 rl-train --config examples/configs/maniskill3_pickcube_reinflow_scratch.yaml
 ```
+
+Interactive RL training shows live rollout, likelihood-rebase, and PPO
+minibatch progress. Set `rl.progress_bar: false` for plain batch logs.
 
 ReinFlow scratch training with four native Isaac environments:
 
@@ -382,6 +385,18 @@ Artifacts:
 - [base-camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.mp4)
 - [wrist-camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.mp4)
 - [eval metrics](./assets/pullcubetool_pd_ee_seed2000_eval_metrics.png)
+
+CUDA-vectorized ReinFlow fine-tuning with strong PullCube domain randomization:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 mini-pi0 rl-train \
+  --config examples/configs/maniskill3_pullcubetool_reinflow_finetune_pd_ee_delta_pose.yaml
+```
+
+The config trains one native `physx_cuda` scene containing 16 environments.
+Periodic checkpoint evaluation uses 16 nominal `physx_cuda` environments, so
+domain-randomized rollouts do not bias best-checkpoint selection while the
+target CUDA dynamics remain unchanged.
 
 ### PegInsertionSide-v1
 

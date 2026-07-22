@@ -27,11 +27,23 @@ The stored path has shape:
 [batch, flow_steps + 1, chunk_size, action_dim]
 ```
 
-The joint path log-likelihood is:
+The raw joint path log-likelihood is:
 
 ```text
 log pi(path | o) = sum_k sum_h sum_a log p(x_(k+1,h,a) | x_k, o)
 ```
+
+Following the official ReinFlow implementation, PPO uses a dimension-normalized
+version of this full-path quantity:
+
+```text
+log pi_PPO(path | o) = log pi(path | o) / (flow_steps * chunk_size * action_dim)
+```
+
+This is the geometric-mean likelihood scale used by the reference optimizer.
+It keeps clipping and KL hyperparameters comparable when the denoising horizon,
+action chunk, or robot action dimension changes. Every path transition still
+contributes to the actor gradient.
 
 `p(x_0)` is omitted because the standard-normal base distribution has no
 trainable policy parameters. PPO therefore optimizes a likelihood that is
@@ -78,6 +90,13 @@ while retaining gradients during actor updates. Frozen vision backbones also
 remain in evaluation mode. Re-evaluating a stored path before an optimizer step
 must reproduce its old log-probability.
 
+CUDA bf16 matrix kernels can round the same network differently when rollout
+and PPO batch sizes differ. Before any actor step, the updater therefore
+recomputes the frozen rollout policy's log-probabilities once at the PPO
+minibatch shape. `rollout_log_prob_correction_max` records this numerical
+rebase. The first optimization minibatch must then have maximum absolute
+log-ratio at most `1e-5`; otherwise training fails before changing the actor.
+
 ## Macro Actions and GAE
 
 One policy decision samples a complete action chunk and executes at most
@@ -113,7 +132,8 @@ L_policy = -mean(min(r_t A_t, clip(r_t, 1-eps, 1+eps) A_t))
 
 The visual-policy default is `eps = 0.001`. Log-ratios are clamped only before
 exponentiation for numerical safety. NaN or Inf in optimization tensors raises
-an error immediately.
+an error immediately. If a minibatch is already above `target_kl`, its actor
+optimizer step is skipped and actor optimization stops for that update.
 
 The complete actor loss is:
 
@@ -168,6 +188,24 @@ atomically store actor, noise network, critic, frozen reference, optimizers,
 schedulers, counters, resolved config, action statistics, RNG states, Git
 commit, versions, environment manifest, and metrics.
 
+## Training Progress
+
+Interactive terminals show colored progress bars inside every update:
+
+- `rollout` advances once per vectorized macro decision and reports primitive
+  steps, throughput, mean macro reward, completed episodes, and success.
+- `rebase` shows frozen-policy likelihood recomputation before actor updates.
+- `optimize` advances once per critic/PPO minibatch and reports current policy
+  loss, value loss, KL, and applied actor steps.
+
+After each update, the same metrics are printed in a fixed-width table grouped
+into run, rollout, and optimizer blocks. Every table line is at most 79
+characters to avoid terminal wrapping. `metrics/rl_metrics.jsonl` remains the
+stable machine-readable record. Progress bars are automatically suppressed when
+output is redirected or captured. Set `rl.progress_bar: false` to disable them
+explicitly; standard terminal colors can also be disabled with the `NO_COLOR`
+environment variable.
+
 ## Commands
 
 ManiSkill smoke and scratch update:
@@ -184,12 +222,50 @@ mini-pi0 rl-smoke --config examples/configs/maniskill3_peginsertion_reinflow_fin
 mini-pi0 rl-train --config examples/configs/maniskill3_peginsertion_reinflow_finetune.yaml
 ```
 
+PullCube checkpoint fine-tuning with native CUDA vectors and strong domain
+randomization:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 mini-pi0 rl-smoke \
+  --config examples/configs/maniskill3_pullcubetool_reinflow_finetune_pd_ee_delta_pose.yaml
+CUDA_VISIBLE_DEVICES=1 mini-pi0 rl-train \
+  --config examples/configs/maniskill3_pullcubetool_reinflow_finetune_pd_ee_delta_pose.yaml
+```
+
+`MiniPi0PullCubeToolDR-v1` resamples robot joint noise, tool pose, and cube pose
+at every reset. CUDA rigid-body properties cannot change after GPU simulation
+initialization, so cube/tool mass, friction, restitution, and appearance are
+sampled once per vector sub-scene. The 16 sub-scenes therefore expose the actor
+to 16 simultaneous dynamics variants throughout training. Periodic evaluation
+uses 16 nominal CUDA sub-scenes with randomization disabled. Treat scalar
+`physx_cpu` evaluation as a separate cross-backend robustness test rather than
+the metric used to select CUDA fine-tuning checkpoints.
+
 Resume and deterministic evaluation:
 
 ```bash
-mini-pi0 rl-train --config <matching-config.yaml> --resume_from runs/<run>/checkpoints/latest_rl.pt
-mini-pi0 rl-eval --config <matching-config.yaml> --resume_from runs/<run>/checkpoints/latest_rl.pt
+mini-pi0 rl-train --config <matching-config.yaml> \
+  --resume_from runs/<run>/checkpoints/latest_rl.pt --set rl.checkpoint=null
+mini-pi0 rl-eval --config <matching-config.yaml> \
+  --resume_from runs/<run>/checkpoints/latest_rl.pt --set rl.checkpoint=null
 ```
+
+Deterministic evaluation uses `rl.eval_num_envs` when set, otherwise it uses up
+to `rl.num_envs` native vector environments, and evaluates exactly
+`rl.eval_episodes` episodes. Each episode has an
+independent CPU-seeded FM base-noise stream derived from
+`rl.eval_seed_start`. The standard `eval` command and `rl-eval` use the same
+noise contract, so a BC checkpoint produces the same policy actions when its
+observations match. `rl.eval_sim_backend` can select a different evaluation
+backend, and `rl.eval_disable_domain_randomization: true` evaluates the nominal
+task while preserving randomized training rollouts.
+
+Simulator dynamics are a separate part of evaluation parity. Keep
+`simulator.env_kwargs.sim_backend`, controller, control frequency, horizon,
+camera setup, and action post-processing identical to the source BC benchmark.
+Native vector and scalar simulation can still diverge even when policy noise is
+identical. The `rl-eval` preflight line reports checkpoint type, selected weight
+source, simulator backend, flow steps, execution horizon, and base-noise mode.
 
 Isaac Lab commands are documented in
 [ISAACLAB_DOCKER.md](ISAACLAB_DOCKER.md).
@@ -218,7 +294,7 @@ interval excludes zero.
 
 ## Current Validation Status
 
-- Host suite: 131 passed.
+- Host suite: 160 passed.
 - Native ManiSkill: two-environment PickCube and PegInsertion reset, step, and
   selective reset passed on the installed GPU runtime.
 - PickCube scratch: two PPO updates with four environments completed and saved
@@ -235,6 +311,9 @@ interval excludes zero.
 
 - Mismatched action statistics invalidate checkpoint fine-tuning.
 - Large path ratios can saturate the narrow visual-policy clipping range.
+- A large `rollout_log_prob_correction_max` is expected with different bf16
+  batch shapes, but the first post-rebase PPO ratio must still pass the `1e-5`
+  invariant.
 - Too much transition noise destabilizes contact behavior; too little prevents
   useful exploration.
 - A critic trained from too little rollout data can dominate early updates.

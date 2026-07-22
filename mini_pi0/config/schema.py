@@ -603,6 +603,11 @@ class RLConfig:
     flow_steps: int = 4
     flow_solver: str = "euler"
     execution_horizon: int = 1
+    binary_gripper: bool = False
+    binary_gripper_index: int = -1
+    binary_gripper_threshold: float = 0.0
+    binary_gripper_low_value: float = -1.0
+    binary_gripper_high_value: float = 1.0
     noise_mode: str = "learned_diagonal"
     noise_std_min: float = 0.05
     noise_std_max: float = 0.12
@@ -620,6 +625,10 @@ class RLConfig:
     eval_every_updates: int = 0
     eval_episodes: int = 20
     eval_seed_start: int = 10000
+    eval_num_envs: int | None = None
+    eval_sim_backend: str | None = None
+    eval_disable_domain_randomization: bool = True
+    progress_bar: bool = True
     reward_strategy: str = "native"
     peg_potential_grasp_weight: float = 1.0
     peg_potential_alignment_weight: float = 2.0

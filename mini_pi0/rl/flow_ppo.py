@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
@@ -13,6 +14,8 @@ from mini_pi0.rl.buffers import ReinFlowRolloutBatch, ReinFlowRolloutBuffer
 from mini_pi0.rl.exceptions import ReinFlowNumericalError
 from mini_pi0.rl.flow_policy import ActionBounds, ReinFlowActorCritic
 from mini_pi0.rl.kernels import diagonal_gaussian_kl
+
+_OLD_POLICY_LOG_RATIO_TOLERANCE = 1e-5
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,25 @@ class ReinFlowPPOUpdateStats:
     critic_grad_norm: float
     explained_variance: float
     actor_updated: bool
+    rollout_log_prob_correction_max: float = 0.0
+    actor_optimizer_steps: int = 0
+
+
+@dataclass(frozen=True)
+class ReinFlowPPOProgress:
+    """Progress from one likelihood or optimizer minibatch."""
+
+    stage: Literal["rebase", "optimize"]
+    completed: int
+    total: int
+    value_loss: float = 0.0
+    policy_loss: float | None = None
+    approx_kl: float | None = None
+    log_prob_correction: float = 0.0
+    actor_steps: int = 0
+
+
+ReinFlowPPOProgressCallback = Callable[[ReinFlowPPOProgress], None]
 
 
 class ReinFlowPPOUpdater:
@@ -90,6 +112,7 @@ class ReinFlowPPOUpdater:
         device: torch.device,
         update_index: int,
         bounds: ActionBounds,
+        progress: ReinFlowPPOProgressCallback | None = None,
     ) -> ReinFlowPPOUpdateStats:
         """Run critic warm-up or a complete ReinFlow PPO update."""
 
@@ -97,8 +120,18 @@ class ReinFlowPPOUpdater:
         totals = _empty_totals()
         critic_batches = 0
         actor_batches = 0
+        actor_steps = 0
         actor_enabled = not warmup
+        log_prob_correction = 0.0
+        if actor_enabled:
+            log_prob_correction = self._canonicalize_old_log_probs(
+                buffer,
+                device=device,
+                bounds=bounds,
+                progress=progress,
+            )
         epochs = int(self.cfg.rl.critic_warmup_epochs if warmup else self.cfg.rl.epochs_per_update)
+        total_batches = epochs * buffer.minibatch_count(int(self.cfg.rl.minibatch_size))
         for _epoch in range(epochs):
             for batch in buffer.minibatches(int(self.cfg.rl.minibatch_size), device):
                 with self._autocast(device):
@@ -110,31 +143,105 @@ class ReinFlowPPOUpdater:
                     "critic_grad_norm": critic_grad,
                 }
                 if actor_enabled:
-                    actor_row = self._step_actor(batch, bounds)
+                    actor_row, step_applied = self._step_actor(
+                        batch,
+                        bounds,
+                        require_old_policy_match=actor_batches == 0,
+                    )
                     row.update(actor_row)
                     actor_batches += 1
+                    actor_steps += int(step_applied)
                     target_kl = self.cfg.rl.target_kl
                     if target_kl is not None and actor_row["approx_kl"].item() > float(target_kl):
                         actor_enabled = False
                 _accumulate(totals, row)
                 critic_batches += 1
-        if actor_batches > 0:
+                if progress is not None:
+                    progress(
+                        ReinFlowPPOProgress(
+                            stage="optimize",
+                            completed=critic_batches,
+                            total=total_batches,
+                            value_loss=float(value_loss.detach().cpu()),
+                            policy_loss=_optional_metric(row, "policy_loss"),
+                            approx_kl=_optional_metric(row, "approx_kl"),
+                            actor_steps=actor_steps,
+                        )
+                    )
+        if actor_steps > 0:
             self.actor_scheduler.step()
         self.critic_scheduler.step()
         explained = _explained_variance(buffer)
-        return _stats_from_totals(totals, actor_batches, critic_batches, explained)
+        return _stats_from_totals(
+            totals,
+            actor_batches,
+            critic_batches,
+            actor_steps,
+            explained,
+            log_prob_correction,
+        )
+
+    def _canonicalize_old_log_probs(
+        self,
+        buffer: ReinFlowRolloutBuffer,
+        *,
+        device: torch.device,
+        bounds: ActionBounds,
+        progress: ReinFlowPPOProgressCallback | None,
+    ) -> float:
+        """Recompute the frozen rollout policy at the PPO minibatch shape.
+
+        CUDA BF16 matrix kernels can produce different rounding for rollout and
+        optimization batch sizes. A full flow path sums hundreds of likelihood
+        terms, so the old policy is evaluated once at the optimization shape
+        before any actor parameter changes.
+        """
+
+        maximum = 0.0
+        self.policy.actor.likelihood_mode()
+        total = buffer.minibatch_count(int(self.cfg.rl.minibatch_size))
+        for completed, batch in enumerate(
+            buffer.likelihood_batches(int(self.cfg.rl.minibatch_size), device),
+            start=1,
+        ):
+            with torch.no_grad(), self._autocast(device):
+                evaluation = self.policy.evaluate_path(
+                    batch.images,
+                    batch.proprio,
+                    batch.paths,
+                    bounds=bounds,
+                )
+            corrected = evaluation.log_prob.float()
+            _require_finite("canonical old log_prob", corrected)
+            delta = (corrected - batch.old_log_probs.float()).abs().max()
+            maximum = max(maximum, float(delta.detach().cpu()))
+            buffer.replace_log_probs(batch.start, batch.stop, corrected)
+            if progress is not None:
+                progress(
+                    ReinFlowPPOProgress(
+                        stage="rebase",
+                        completed=completed,
+                        total=total,
+                        log_prob_correction=maximum,
+                    )
+                )
+        return maximum
 
     def _step_actor(
         self,
         batch: ReinFlowRolloutBatch,
         bounds: ActionBounds,
-    ) -> dict[str, torch.Tensor]:
+        *,
+        require_old_policy_match: bool,
+    ) -> tuple[dict[str, torch.Tensor], bool]:
         """Compute and apply one clipped ReinFlow actor update."""
 
         with self._autocast(batch.images.device):
             evaluation = self.policy.evaluate_path(batch.images, batch.proprio, batch.paths, bounds=bounds)
         log_ratio = evaluation.log_prob.float() - batch.old_log_probs.float()
         _require_finite("log_ratio", log_ratio)
+        if require_old_policy_match:
+            _require_matching_old_policy(log_ratio)
         ratio = torch.exp(log_ratio.clamp(-20.0, 20.0))
         clip_ratio = float(self.cfg.rl.clip_ratio)
         unclipped = ratio * batch.advantages
@@ -154,11 +261,7 @@ class ReinFlowPPOUpdater:
             + float(self.cfg.rl.velocity_anchor_coef) * velocity_anchor
         )
         _require_finite("actor_loss", actor_loss)
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        actor_loss.backward()
-        grad_norm = _clip_grad(self.policy.actor.parameters(), float(self.cfg.rl.max_grad_norm))
-        self.actor_optimizer.step()
-        return {
+        row = {
             "policy_loss": policy_loss.detach(),
             "entropy": evaluation.entropy.mean().detach(),
             "approx_kl": approx_kl.detach(),
@@ -168,8 +271,17 @@ class ReinFlowPPOUpdater:
             "reference_w2": w2.detach(),
             "transition_kl": transition_kl.detach(),
             "velocity_anchor": velocity_anchor.detach(),
-            "actor_grad_norm": grad_norm,
         }
+        target_kl = self.cfg.rl.target_kl
+        if target_kl is not None and float(approx_kl.detach()) > float(target_kl):
+            row["actor_grad_norm"] = actor_loss.new_zeros(())
+            return row, False
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        grad_norm = _clip_grad(self.policy.actor.parameters(), float(self.cfg.rl.max_grad_norm))
+        self.actor_optimizer.step()
+        row["actor_grad_norm"] = grad_norm
+        return row, True
 
     def _step_critic(self, value_loss: torch.Tensor) -> torch.Tensor:
         """Apply one critic-only optimization step."""
@@ -286,6 +398,18 @@ def _require_finite(name: str, tensor: torch.Tensor) -> None:
         raise ReinFlowNumericalError(f"Non-finite tensor encountered in {name}.")
 
 
+def _require_matching_old_policy(log_ratio: torch.Tensor) -> None:
+    """Fail before the first actor step when old-policy likelihoods disagree."""
+
+    maximum = float(log_ratio.detach().abs().max().cpu())
+    if maximum > _OLD_POLICY_LOG_RATIO_TOLERANCE:
+        raise ReinFlowNumericalError(
+            "Old-policy path likelihood mismatch before the first PPO actor step: "
+            f"max |log_ratio|={maximum:.3e}, expected <= {_OLD_POLICY_LOG_RATIO_TOLERANCE:.1e}. "
+            "No actor update was applied."
+        )
+
+
 def _empty_totals() -> dict[str, float]:
     """Create scalar accumulators for all update diagnostics."""
 
@@ -318,11 +442,20 @@ def _accumulate(totals: dict[str, float], row: dict[str, torch.Tensor]) -> None:
             totals[name] += scalar
 
 
+def _optional_metric(row: dict[str, torch.Tensor], name: str) -> float | None:
+    """Return one optional minibatch metric as a Python float."""
+
+    value = row.get(name)
+    return None if value is None else float(value.detach().cpu())
+
+
 def _stats_from_totals(
     totals: dict[str, float],
     actor_batches: int,
     critic_batches: int,
+    actor_steps: int,
     explained_variance: float,
+    rollout_log_prob_correction_max: float,
 ) -> ReinFlowPPOUpdateStats:
     """Convert accumulators into a typed update summary."""
 
@@ -344,7 +477,9 @@ def _stats_from_totals(
         actor_grad_norm=totals["actor_grad_norm"] / actor_denominator,
         critic_grad_norm=totals["critic_grad_norm"] / critic_denominator,
         explained_variance=explained_variance,
-        actor_updated=actor_batches > 0,
+        actor_updated=actor_steps > 0,
+        rollout_log_prob_correction_max=float(rollout_log_prob_correction_max),
+        actor_optimizer_steps=int(actor_steps),
     )
 
 

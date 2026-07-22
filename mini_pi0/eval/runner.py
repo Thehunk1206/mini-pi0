@@ -239,7 +239,7 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         f"controller={cfg.simulator.controller} obs_mode=image "
         f"image_keys={effective_image_keys(cfg.robot)} "
         f"dtype={describe_runtime_dtype(runtime_dtype=cfg.eval.dtype, model_dtype=None)} "
-        f"strict_parity={strict}",
+        f"strict_parity={strict} base_noise=per_episode_cpu_seeded",
         flush=True,
     )
 
@@ -249,6 +249,7 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         json.dump(
             {
                 "checkpoint": str(cfg.eval.checkpoint),
+                "flow_base_noise": "per_episode_cpu_seeded",
                 "strict_parity": strict,
                 "parity": parity,
                 "requested_to_runtime_diff": config_diff(requested_cfg, runtime_cfg),

@@ -5,6 +5,7 @@ from __future__ import annotations
 # ruff: noqa: E402 - keep the optional torch dependency skippable at collection.
 
 import copy
+from dataclasses import replace
 
 import pytest
 
@@ -15,7 +16,7 @@ from mini_pi0.config.io import load_config
 from mini_pi0.rl.buffers import ReinFlowRolloutBuffer
 from mini_pi0.rl.exceptions import ReinFlowNumericalError
 from mini_pi0.rl.flow_policy import ReinFlowActorCritic
-from mini_pi0.rl.flow_ppo import ReinFlowPPOUpdater
+from mini_pi0.rl.flow_ppo import ReinFlowPPOProgress, ReinFlowPPOUpdater, _require_matching_old_policy
 
 
 class _TinyActionTransformer(nn.Module):
@@ -58,8 +59,10 @@ def _config(*, critic_warmup_updates: int = 0):
             "rl.noise_std_init=0.07",
             "rl.noise_std_max=0.10",
             "rl.freeze_vision_during_rl=False",
+            "rl.num_envs=2",
             "rl.minibatch_size=4",
             "rl.epochs_per_update=1",
+            "rl.target_kl=0.01",
             "rl.reference_w2_coef=0.1",
             "rl.reference_transition_kl_coef=0.1",
             f"rl.critic_warmup_updates={critic_warmup_updates}",
@@ -161,6 +164,69 @@ def test_reinflow_update_changes_actor_and_keeps_reference_frozen() -> None:
     assert stats.reference_w2 == pytest.approx(0.0, abs=1e-7)
     assert stats.transition_kl == pytest.approx(0.0, abs=1e-7)
     assert stats.approx_kl >= 0.0
+    assert stats.rollout_log_prob_correction_max == pytest.approx(0.0, abs=1e-7)
+
+
+def test_reinflow_update_rebases_rollout_log_probs_before_actor_step() -> None:
+    cfg = _config()
+    policy = _policy(cfg)
+    updater = ReinFlowPPOUpdater(policy=policy, reference=copy.deepcopy(policy), cfg=cfg)
+    buffer = _filled_buffer(policy, rewards=[torch.tensor([1.0, 0.2]), torch.tensor([0.1, 1.4])])
+    buffer._storage["log_probs"].add_(2.0)  # noqa: SLF001 - emulate batch-shape precision drift.
+
+    stats = updater.update(buffer, device=torch.device("cpu"), update_index=0, bounds=None)
+
+    assert stats.rollout_log_prob_correction_max == pytest.approx(2.0, abs=1e-6)
+    assert stats.approx_kl == pytest.approx(0.0, abs=1e-7)
+    assert stats.clip_fraction == pytest.approx(0.0, abs=1e-7)
+    assert stats.ratio_min == pytest.approx(1.0, abs=1e-7)
+    assert stats.ratio_max == pytest.approx(1.0, abs=1e-7)
+
+
+def test_reinflow_update_reports_rebase_and_optimizer_minibatches() -> None:
+    cfg = _config()
+    policy = _policy(cfg)
+    updater = ReinFlowPPOUpdater(policy=policy, reference=copy.deepcopy(policy), cfg=cfg)
+    buffer = _filled_buffer(policy, rewards=[torch.tensor([1.0, 0.2]), torch.tensor([0.1, 1.4])])
+    events: list[ReinFlowPPOProgress] = []
+
+    updater.update(
+        buffer,
+        device=torch.device("cpu"),
+        update_index=0,
+        bounds=None,
+        progress=events.append,
+    )
+
+    assert [event.stage for event in events] == ["rebase", "optimize"]
+    assert all(event.completed == event.total == 1 for event in events)
+    assert events[-1].value_loss > 0.0
+    assert events[-1].policy_loss is not None
+
+
+def test_old_policy_invariant_rejects_preupdate_likelihood_drift() -> None:
+    with pytest.raises(ReinFlowNumericalError, match="No actor update was applied"):
+        _require_matching_old_policy(torch.tensor([0.0, 2e-5]))
+
+
+def test_actor_step_is_skipped_when_current_policy_exceeds_target_kl() -> None:
+    cfg = _config()
+    policy = _policy(cfg)
+    updater = ReinFlowPPOUpdater(policy=policy, reference=copy.deepcopy(policy), cfg=cfg)
+    buffer = _filled_buffer(policy, rewards=[torch.tensor([1.0, 0.2]), torch.tensor([0.1, 1.4])])
+    batch = next(buffer.minibatches(4, torch.device("cpu")))
+    shifted = replace(batch, old_log_probs=batch.old_log_probs + 1.0)
+    actor_before = [parameter.detach().clone() for parameter in policy.actor.parameters()]
+
+    metrics, step_applied = updater._step_actor(  # noqa: SLF001 - verify KL guard behavior.
+        shifted,
+        bounds=None,
+        require_old_policy_match=False,
+    )
+
+    assert not step_applied
+    assert metrics["approx_kl"] > cfg.rl.target_kl
+    assert not _parameters_changed(actor_before, policy.actor)
 
 
 def test_critic_warmup_does_not_change_actor() -> None:

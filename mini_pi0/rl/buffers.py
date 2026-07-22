@@ -132,6 +132,18 @@ class ReinFlowRolloutBatch:
     durations: torch.Tensor
 
 
+@dataclass(frozen=True)
+class ReinFlowLikelihoodBatch:
+    """Sequential rollout slice used to canonicalize old-policy likelihoods."""
+
+    start: int
+    stop: int
+    images: torch.Tensor
+    proprio: torch.Tensor
+    paths: torch.Tensor
+    old_log_probs: torch.Tensor
+
+
 class ReinFlowRolloutBuffer:
     """Fixed-capacity tensor storage for variable-duration macro transitions."""
 
@@ -226,6 +238,50 @@ class ReinFlowRolloutBuffer:
                 advantages=advantages[indices].to(device, non_blocking=True),
                 returns=returns[indices].to(device, non_blocking=True),
             )
+
+    def likelihood_batches(
+        self,
+        minibatch_size: int,
+        device: torch.device,
+    ) -> Iterator[ReinFlowLikelihoodBatch]:
+        """Yield deterministic slices for old-policy likelihood recomputation."""
+
+        required = {"images", "proprio", "paths", "log_probs"}
+        if not required.issubset(self._storage):
+            raise RuntimeError("The rollout buffer does not contain policy likelihood data.")
+        flattened = {name: _flatten_time_env(self._used(name)) for name in required}
+        count = int(self.position * self.num_envs)
+        size = max(1, int(minibatch_size))
+        for start in range(0, count, size):
+            stop = min(start + size, count)
+            yield ReinFlowLikelihoodBatch(
+                start=start,
+                stop=stop,
+                images=flattened["images"][start:stop].to(device, non_blocking=True),
+                proprio=flattened["proprio"][start:stop].to(device, non_blocking=True),
+                paths=flattened["paths"][start:stop].to(device, non_blocking=True),
+                old_log_probs=flattened["log_probs"][start:stop].to(device, non_blocking=True),
+            )
+
+    def replace_log_probs(self, start: int, stop: int, values: torch.Tensor) -> None:
+        """Replace one flattened old-policy likelihood slice in place."""
+
+        target = _flatten_time_env(self._used("log_probs"))[int(start) : int(stop)]
+        if tuple(target.shape) != tuple(values.shape):
+            raise ValueError(f"log_probs shape mismatch: expected {tuple(target.shape)}, got {tuple(values.shape)}.")
+        target.copy_(values.detach().to(self.storage_device))
+
+    @property
+    def sample_count(self) -> int:
+        """Return the number of flattened macro transitions currently stored."""
+
+        return int(self.position * self.num_envs)
+
+    def minibatch_count(self, minibatch_size: int) -> int:
+        """Return the number of minibatches required for one complete pass."""
+
+        size = max(1, int(minibatch_size))
+        return (self.sample_count + size - 1) // size
 
     @property
     def old_values(self) -> torch.Tensor:

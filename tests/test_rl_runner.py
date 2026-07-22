@@ -23,6 +23,7 @@ from mini_pi0.rl.runner import (
     _execute_macro_action,
     _evaluate_actor,
     _make_obs_processor,
+    _policy_actions_to_env,
     _run_reinflow_loop,
     run_rl_smoke,
 )
@@ -111,6 +112,7 @@ class _FakeNoise:
 class _FakeRolloutActor:
     def __init__(self, cfg) -> None:
         self.cfg = cfg
+        self.deterministic_batch_sizes: list[int] = []
         self.actor = SimpleNamespace(
             kernel=SimpleNamespace(noise=_FakeNoise()),
             likelihood_mode=lambda: None,
@@ -136,8 +138,16 @@ class _FakeRolloutActor:
         del proprio
         return torch.zeros(image.shape[0])
 
-    def deterministic_sample(self, image: torch.Tensor, proprio: torch.Tensor, *, bounds=None) -> torch.Tensor:
-        del proprio, bounds
+    def deterministic_sample(
+        self,
+        image: torch.Tensor,
+        proprio: torch.Tensor,
+        *,
+        bounds=None,
+        initial_noise: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del proprio, bounds, initial_noise
+        self.deterministic_batch_sizes.append(int(image.shape[0]))
         return torch.zeros(image.shape[0], self.cfg.model.chunk_size, self.cfg.model.action_dim)
 
 
@@ -235,6 +245,25 @@ def test_macro_action_stops_each_environment_at_its_episode_boundary() -> None:
     assert second.step_calls == 3
 
 
+def test_policy_actions_apply_binary_gripper_after_denormalization() -> None:
+    cfg = _config()
+    cfg.rl.binary_gripper = True
+    cfg.rl.binary_gripper_index = 1
+    actions = torch.tensor([[[-2.0, -0.2], [2.0, 0.2]]])
+
+    converted, clipped = _policy_actions_to_env(
+        actions,
+        cfg=cfg,
+        processor=None,
+        low=-np.ones(2, dtype=np.float32),
+        high=np.ones(2, dtype=np.float32),
+        device=torch.device("cpu"),
+    )
+
+    assert converted[0, :, 1].tolist() == [-1.0, 1.0]
+    assert not clipped.any()
+
+
 def test_episode_state_spans_updates_and_reset_seeds_are_unique(tmp_path: Path) -> None:
     cfg = _config()
     cfg.rl.total_updates = 2
@@ -254,7 +283,46 @@ def test_episode_state_spans_updates_and_reset_seeds_are_unique(tmp_path: Path) 
 
     assert summary["latest"]["completed_episodes"] == 1
     assert summary["latest"]["reward_mean"] == pytest.approx(2.0)
+    assert summary["latest"]["rollout_macro_reward_mean"] == pytest.approx(1.0)
+    assert summary["latest"]["rollout_native_reward_per_primitive_step"] == pytest.approx(1.0)
+    assert summary["latest"]["macro_duration_mean"] == pytest.approx(1.0)
+    assert summary["latest"]["phase"] == "ppo"
     assert scalar_adapter.reset_seeds == [0, 1]
+
+
+def test_update_logging_distinguishes_incomplete_episode_from_zero_reward(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = _config()
+    cfg.rl.total_updates = 1
+    cfg.rl.rollout_decisions_per_update = 1
+    adapter = SerialBatchAdapter([_FakeAdapter(cfg, terminate_after=2)])
+
+    with patch("mini_pi0.rl.checkpointing.save_reinflow_checkpoint"):
+        summary = _run_reinflow_loop(
+            cfg=cfg,
+            run_dir=tmp_path,
+            actor=_FakeRolloutActor(cfg),
+            updater=_FakeUpdater(),
+            adapter=adapter,
+            device=torch.device("cpu"),
+        )
+
+    latest = summary["latest"]
+    output = capsys.readouterr().out
+    assert latest["completed_episodes"] == 0
+    assert latest["completed_episode_return_mean"] is None
+    assert latest["rollout_macro_reward_mean"] == pytest.approx(1.0)
+    assert "ReinFlow update 0001/0001" in output
+    assert "Phase" in output and "ppo" in output
+    assert "Actor" in output and "ON" in output
+    assert "Macro reward" in output and "1.000" in output
+    assert "Episode return" in output and "n/a" in output
+    assert "Completed episodes" in output and "0" in output
+    table_lines = [line for line in output.splitlines() if line.startswith(("+", "|"))]
+    assert table_lines
+    assert max(map(len, table_lines)) == 79
 
 
 def test_serial_batch_rejects_inconsistent_action_bounds() -> None:
@@ -280,6 +348,58 @@ def test_deterministic_evaluation_uses_fixed_episode_seeds() -> None:
     assert summary["return_mean"] == pytest.approx(2.0)
     assert summary["episode_length_mean"] == pytest.approx(2.0)
     assert fake.reset_seeds == [100, 101]
+
+
+def test_deterministic_evaluation_runs_vector_envs_and_exact_episode_count() -> None:
+    cfg = _config()
+    cfg.rl.eval_episodes = 5
+    cfg.rl.eval_seed_start = 100
+    cfg.rl.num_envs = 2
+    cfg.simulator.horizon = 3
+    first = _FakeAdapter(cfg, terminate_after=1)
+    second = _FakeAdapter(cfg, terminate_after=2)
+    actor = _FakeRolloutActor(cfg)
+
+    with patch(
+        "mini_pi0.rl.runner._make_batched_adapter",
+        return_value=SerialBatchAdapter([first, second]),
+    ):
+        summary = _evaluate_actor(cfg, actor, torch.device("cpu"))
+
+    assert summary["episodes"] == 5
+    assert summary["num_envs"] == 2
+    assert summary["returns"] == pytest.approx([1.0, 2.0, 1.0, 1.0, 2.0])
+    assert summary["lengths"] == [1, 2, 1, 1, 2]
+    assert first.reset_seeds == [100, 102, 103]
+    assert second.reset_seeds == [101, 104]
+    assert set(actor.deterministic_batch_sizes) == {2}
+
+
+def test_deterministic_evaluation_uses_nominal_simulator_overrides() -> None:
+    cfg = _config()
+    cfg.rl.eval_episodes = 1
+    cfg.rl.num_envs = 16
+    cfg.rl.eval_num_envs = 1
+    cfg.rl.eval_sim_backend = "physx_cpu"
+    cfg.rl.eval_disable_domain_randomization = True
+    cfg.simulator.env_kwargs = {
+        "sim_backend": "physx_cuda",
+        "domain_randomization": {"enabled": True, "profile": "strong"},
+    }
+    fake = _FakeAdapter(cfg, terminate_after=1)
+    captured = []
+
+    def make_adapter(eval_cfg):
+        captured.append(eval_cfg)
+        return SerialBatchAdapter([fake])
+
+    with patch("mini_pi0.rl.runner._make_batched_adapter", side_effect=make_adapter):
+        _evaluate_actor(cfg, _FakeRolloutActor(cfg), torch.device("cpu"))
+
+    eval_cfg = captured[0]
+    assert eval_cfg.rl.num_envs == 1
+    assert eval_cfg.simulator.env_kwargs["sim_backend"] == "physx_cpu"
+    assert not eval_cfg.simulator.env_kwargs["domain_randomization"]["enabled"]
 
 
 def test_algorithm_modules_do_not_import_simulator_backends() -> None:

@@ -6,6 +6,7 @@ import copy
 import json
 import random
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,9 @@ import torch
 
 from mini_pi0.config.io import dump_config
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
+from mini_pi0.eval.flow_noise import sample_flow_initial_noise, seeded_flow_generator
 from mini_pi0.rl.config import validate_rl_config
+from mini_pi0.rl.progress import ReinFlowProgressDisplay, terminal_color
 from mini_pi0.sim.batched import BatchedSimulatorAdapter, Observation, SerialBatchAdapter
 from mini_pi0.sim.registry import make_sim_adapter
 
@@ -178,7 +181,35 @@ def run_rl_eval(cfg: RootConfig) -> dict[str, Any]:
             policy.load_state_dict(resume_payload["actor_critic"], strict=True)
         elif checkpoint is not None:
             policy.policy.load_state_dict(_checkpoint_model_state(checkpoint), strict=True)
+        checkpoint_kind = "reinflow" if resume_payload is not None else "bc_fm"
+        checkpoint_path = str(eval_cfg.rl.resume_from or eval_cfg.rl.checkpoint)
+        model_weight_source = (
+            "actor_critic"
+            if resume_payload is not None
+            else str((checkpoint or {}).get("model_weight_source", "model"))
+        )
+        sim_backend = str(eval_cfg.simulator.env_kwargs.get("sim_backend", "auto"))
+        print(
+            "[reinflow-eval] preflight "
+            f"checkpoint_kind={checkpoint_kind} checkpoint={checkpoint_path} "
+            f"weight_source={model_weight_source} "
+            f"sim_backend={sim_backend} flow_steps={int(eval_cfg.rl.flow_steps)} "
+            f"execution_horizon={int(eval_cfg.rl.execution_horizon)} "
+            "base_noise=per_episode_cpu_seeded",
+            flush=True,
+        )
         summary = _evaluate_actor(eval_cfg, policy, device)
+        summary.update(
+            {
+                "checkpoint": checkpoint_path,
+                "checkpoint_kind": checkpoint_kind,
+                "model_weight_source": model_weight_source,
+                "sim_backend": sim_backend,
+                "flow_steps": int(eval_cfg.rl.flow_steps),
+                "execution_horizon": int(eval_cfg.rl.execution_horizon),
+                "base_noise": "per_episode_cpu_seeded",
+            }
+        )
     print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
     return summary
 
@@ -364,6 +395,13 @@ def _run_reinflow_loop(
     }
 
     for update_index in range(int(start_update), int(cfg.rl.total_updates)):
+        update_started_at = time.perf_counter()
+        progress_display = ReinFlowProgressDisplay(
+            update=update_index + 1,
+            total_updates=int(cfg.rl.total_updates),
+            rollout_decisions=int(cfg.rl.rollout_decisions_per_update),
+            enabled=bool(cfg.rl.progress_bar),
+        )
         actor.actor.kernel.noise.set_training_progress(_update_progress(update_index, int(cfg.rl.total_updates)))
         buffer = ReinFlowRolloutBuffer(
             capacity=int(cfg.rl.rollout_decisions_per_update),
@@ -375,6 +413,12 @@ def _run_reinflow_loop(
         completed_successes: list[bool] = []
         clipped_actions = 0
         action_count = 0
+        update_primitive_steps = 0
+        macro_transition_count = 0
+        macro_duration_sum = 0
+        macro_reward_sum = 0.0
+        native_reward_sum = 0.0
+        rollout_success_events = 0
 
         for _decision in range(int(cfg.rl.rollout_decisions_per_update)):
             actor.actor.likelihood_mode()
@@ -419,7 +463,14 @@ def _run_reinflow_loop(
             state.episode_returns += macro.episode_rewards
             state.episode_lengths += macro.durations.cpu().numpy()
             state.episode_successes |= macro.successes
-            state.primitive_steps += int(macro.durations.sum().item())
+            primitive_steps_this_macro = int(macro.durations.sum().item())
+            state.primitive_steps += primitive_steps_this_macro
+            update_primitive_steps += primitive_steps_this_macro
+            macro_transition_count += int(macro.durations.numel())
+            macro_duration_sum += primitive_steps_this_macro
+            macro_reward_sum += float(macro.training_rewards.sum().item())
+            native_reward_sum += float(macro.episode_rewards.sum())
+            rollout_success_events += int(np.count_nonzero(macro.successes))
             clipped_actions += macro.clipped_actions
             action_count += macro.action_count
             completed = np.flatnonzero((macro.terminated | macro.truncated).cpu().numpy())
@@ -432,29 +483,60 @@ def _run_reinflow_loop(
                 state.episode_successes[env_index] = False
             _reset_completed_environments(state, adapter, processor, completed)
 
+            live_success = float(np.mean(completed_successes)) if completed_successes else None
+            progress_display.advance_rollout(
+                primitive_steps=update_primitive_steps,
+                macro_reward=macro_reward_sum / max(1, macro_transition_count),
+                completed_episodes=len(completed_returns),
+                success_rate=live_success,
+            )
+
+        progress_display.finish_rollout()
         buffer.compute_returns_and_advantages(gae_lambda=float(cfg.rl.gae_lambda))
         stats = updater.update(
             buffer,
             device=device,
             update_index=update_index,
             bounds=policy_bounds,
+            progress=progress_display.advance_ppo,
         )
-        reward_mean = float(np.mean(completed_returns)) if completed_returns else 0.0
-        success_rate = float(np.mean(completed_successes)) if completed_successes else 0.0
+        progress_display.close()
+        update_wall_time = max(time.perf_counter() - update_started_at, 1e-9)
+        completed_return_mean = float(np.mean(completed_returns)) if completed_returns else None
+        completed_length_mean = float(np.mean(completed_lengths)) if completed_lengths else None
+        completed_success_rate = float(np.mean(completed_successes)) if completed_successes else None
+        reward_mean = completed_return_mean if completed_return_mean is not None else 0.0
+        success_rate = completed_success_rate if completed_success_rate is not None else 0.0
         row = {
             "update": update_index + 1,
             "primitive_steps": state.primitive_steps,
+            "update_primitive_steps": update_primitive_steps,
+            "update_wall_time_sec": update_wall_time,
+            "primitive_steps_per_second": update_primitive_steps / update_wall_time,
+            "phase": "critic_warmup"
+            if update_index < int(cfg.rl.critic_warmup_updates)
+            else "ppo",
             "algorithm": _algorithm(cfg),
             "init_mode": _init_mode(cfg),
             "backend": adapter.backend_name,
             "reward_mean": reward_mean,
-            "episode_length_mean": float(np.mean(completed_lengths)) if completed_lengths else 0.0,
+            "episode_length_mean": completed_length_mean if completed_length_mean is not None else 0.0,
             "success_rate": success_rate,
             "completed_episodes": len(completed_returns),
+            "completed_episode_return_mean": completed_return_mean,
+            "completed_episode_length_mean": completed_length_mean,
+            "completed_episode_success_rate": completed_success_rate,
+            "partial_episode_return_mean": float(state.episode_returns.mean()),
+            "partial_episode_length_mean": float(state.episode_lengths.mean()),
+            "rollout_macro_reward_mean": macro_reward_sum / max(1, macro_transition_count),
+            "rollout_native_reward_per_primitive_step": native_reward_sum / max(1, macro_duration_sum),
+            "macro_duration_mean": macro_duration_sum / max(1, macro_transition_count),
+            "rollout_success_events": rollout_success_events,
             "action_clip_fraction": clipped_actions / max(1, action_count),
             "noise_std_upper_bound": float(actor.actor.kernel.noise.current_std_max.item()),
             **vars(stats),
         }
+        _print_reinflow_update(cfg, row)
         eval_interval = int(cfg.rl.eval_every_updates)
         if eval_interval > 0 and (update_index + 1) % eval_interval == 0:
             with _preserve_rng_state(device):
@@ -493,14 +575,6 @@ def _run_reinflow_loop(
             metrics=row,
             environment_manifest=environment_manifest,
         )
-        print(
-            f"[reinflow] update={update_index + 1:04d}/{cfg.rl.total_updates:04d} "
-            f"reward={reward_mean:.3f} success={success_rate:.3f} "
-            f"policy={stats.policy_loss:.4f} value={stats.value_loss:.4f} "
-            f"kl={stats.approx_kl:.5f}",
-            flush=True,
-        )
-
     return _write_summary(
         run_dir,
         best_eval_success,
@@ -510,68 +584,304 @@ def _run_reinflow_loop(
 
 
 def _evaluate_actor(cfg: RootConfig, actor: Any, device: torch.device) -> dict[str, Any]:
-    """Run fixed-seed deterministic ODE evaluation episodes."""
+    """Run fixed-seed deterministic ODE evaluation in parallel environments."""
 
     from mini_pi0.rl.rewards import NativeReward
 
     eval_cfg = copy.deepcopy(cfg)
-    eval_cfg.rl.num_envs = 1
+    total_episodes = int(eval_cfg.rl.eval_episodes)
+    requested_envs = eval_cfg.rl.eval_num_envs or eval_cfg.rl.num_envs
+    eval_cfg.rl.num_envs = min(int(requested_envs), total_episodes)
+    eval_cfg.simulator.env_kwargs = dict(eval_cfg.simulator.env_kwargs or {})
+    if eval_cfg.rl.eval_sim_backend is not None:
+        eval_cfg.simulator.env_kwargs["sim_backend"] = eval_cfg.rl.eval_sim_backend
+    domain_randomization = eval_cfg.simulator.env_kwargs.get("domain_randomization")
+    if eval_cfg.rl.eval_disable_domain_randomization and isinstance(domain_randomization, dict):
+        domain_randomization = dict(domain_randomization)
+        domain_randomization["enabled"] = False
+        eval_cfg.simulator.env_kwargs["domain_randomization"] = domain_randomization
     adapter = _make_batched_adapter(eval_cfg)
-    returns: list[float] = []
-    lengths: list[int] = []
-    successes: list[bool] = []
+    num_envs = int(adapter.num_envs)
+    first_seed = int(eval_cfg.rl.eval_seed_start)
+    last_seed = first_seed + total_episodes - 1
+    progress_interval = max(1, total_episodes // 10)
+    completed_returns: list[float] = []
+    completed_lengths: list[int] = []
+    completed_successes: list[bool] = []
+    returns = np.zeros(total_episodes, dtype=np.float64)
+    lengths = np.zeros(total_episodes, dtype=np.int64)
+    successes = np.zeros(total_episodes, dtype=bool)
+    print(
+        f"[reinflow-eval] start episodes={total_episodes} vector_envs={num_envs} "
+        f"seeds={first_seed}-{last_seed}",
+        flush=True,
+    )
     try:
         low, high = adapter.action_spec()
         _validate_action_dimensions(eval_cfg, low, high)
         processor = _make_obs_processor(eval_cfg, device=str(device))
         bounds = _policy_action_bounds(eval_cfg, processor, low, high, device)
-        for episode_index in range(int(eval_cfg.rl.eval_episodes)):
-            seed = int(eval_cfg.rl.eval_seed_start) + episode_index
-            torch.manual_seed(seed)
-            if device.type == "cuda":
-                torch.cuda.manual_seed(seed)
-            observations = adapter.reset([seed])
-            processor.reset_batch_history(observations)
-            images, proprio = processor.obs_batch_to_tensors(observations)
-            episode_return = 0.0
-            episode_length = 0
-            episode_success = False
-            while episode_length < int(eval_cfg.simulator.horizon):
-                actor.actor.likelihood_mode()
-                with torch.no_grad(), _autocast(eval_cfg, device):
-                    action_chunk = actor.deterministic_sample(images, proprio, bounds=bounds)
-                macro = _execute_macro_action(
-                    cfg=eval_cfg,
-                    adapter=adapter,
-                    action_chunk=action_chunk,
-                    observations=observations,
-                    processor=processor,
-                    reward_strategy=NativeReward(),
-                    low=low,
-                    high=high,
-                    device=device,
+        decisions_per_episode = max(
+            1,
+            int(np.ceil(int(eval_cfg.simulator.horizon) / int(eval_cfg.rl.execution_horizon))),
+        )
+        heartbeat_interval = max(1, decisions_per_episode // 10)
+        evaluation_decisions = 0
+        episode_ids = np.arange(num_envs, dtype=np.int64)
+        active = np.ones(num_envs, dtype=bool)
+        episode_returns = np.zeros(num_envs, dtype=np.float64)
+        episode_lengths = np.zeros(num_envs, dtype=np.int64)
+        episode_successes = np.zeros(num_envs, dtype=bool)
+        generators = [seeded_flow_generator(first_seed + index) for index in range(num_envs)]
+        next_episode_id = num_envs
+
+        observations = adapter.reset([first_seed + index for index in range(num_envs)])
+        processor.reset_batch_history(observations)
+        images, proprio = processor.obs_batch_to_tensors(observations)
+
+        while len(completed_returns) < total_episodes:
+            evaluation_decisions += 1
+            initial_noise = sample_flow_initial_noise(
+                generators,
+                active,
+                chunk_size=int(eval_cfg.model.chunk_size),
+                action_dim=int(eval_cfg.model.action_dim),
+                device=device,
+            )
+            actor.actor.likelihood_mode()
+            with torch.no_grad(), _autocast(eval_cfg, device):
+                action_chunk = actor.deterministic_sample(
+                    images,
+                    proprio,
+                    bounds=bounds,
+                    initial_noise=initial_noise,
                 )
-                observations = macro.observations
-                episode_return += float(macro.episode_rewards[0])
-                episode_length += int(macro.durations[0])
-                episode_success = bool(episode_success or macro.successes[0])
-                if bool(macro.terminated[0] or macro.truncated[0]):
-                    break
-                images, proprio = processor.obs_batch_to_tensors(observations)
-            returns.append(episode_return)
-            lengths.append(episode_length)
-            successes.append(episode_success)
+            macro = _execute_macro_action(
+                cfg=eval_cfg,
+                adapter=adapter,
+                action_chunk=action_chunk,
+                observations=observations,
+                processor=processor,
+                reward_strategy=NativeReward(),
+                low=low,
+                high=high,
+                device=device,
+                active_mask=active,
+            )
+            observations = macro.observations
+            episode_returns += macro.episode_rewards
+            episode_lengths += macro.durations.cpu().numpy()
+            episode_successes |= macro.successes
+            images, proprio = processor.obs_batch_to_tensors(observations)
+
+            boundaries = (macro.terminated | macro.truncated).cpu().numpy()
+            boundaries |= episode_lengths >= int(eval_cfg.simulator.horizon)
+            finished = np.flatnonzero(active & boundaries)
+            replacement_indices: list[int] = []
+            replacement_seeds: list[int] = []
+            for env_index in finished:
+                episode_id = int(episode_ids[env_index])
+                returns[episode_id] = episode_returns[env_index]
+                lengths[episode_id] = episode_lengths[env_index]
+                successes[episode_id] = episode_successes[env_index]
+                completed_returns.append(float(episode_returns[env_index]))
+                completed_lengths.append(int(episode_lengths[env_index]))
+                completed_successes.append(bool(episode_successes[env_index]))
+
+                if next_episode_id < total_episodes:
+                    seed = first_seed + next_episode_id
+                    episode_ids[env_index] = next_episode_id
+                    generators[env_index] = seeded_flow_generator(seed)
+                    replacement_indices.append(int(env_index))
+                    replacement_seeds.append(seed)
+                    next_episode_id += 1
+                else:
+                    active[env_index] = False
+                    episode_ids[env_index] = -1
+                episode_returns[env_index] = 0.0
+                episode_lengths[env_index] = 0
+                episode_successes[env_index] = False
+
+            if replacement_indices:
+                reset_observations = adapter.reset_at(replacement_indices, replacement_seeds)
+                for env_index, observation in reset_observations.items():
+                    observations[env_index] = observation
+                processor.reset_batch_history_at(reset_observations)
+                ordered = [reset_observations[index] for index in replacement_indices]
+                reset_images, reset_proprio = processor.obs_batch_to_tensors(
+                    ordered,
+                    env_indices=replacement_indices,
+                )
+                images[replacement_indices] = reset_images
+                proprio[replacement_indices] = reset_proprio
+
+            completed = len(completed_returns)
+            previous = completed - len(finished)
+            crossed_interval = completed // progress_interval > previous // progress_interval
+            if crossed_interval or completed == total_episodes:
+                status = "done" if completed == total_episodes else "progress"
+                print(
+                    f"[reinflow-eval] {status} episodes={completed:04d}/{total_episodes:04d} "
+                    f"success={float(np.mean(completed_successes)):.3f} "
+                    f"return={float(np.mean(completed_returns)):.3f} "
+                    f"length={float(np.mean(completed_lengths)):.1f}",
+                    flush=True,
+                )
+            elif evaluation_decisions % heartbeat_interval == 0:
+                active_lengths = episode_lengths[active]
+                mean_step = float(np.mean(active_lengths)) if active_lengths.size else 0.0
+                print(
+                    f"[reinflow-eval] rollout completed={completed:04d}/{total_episodes:04d} "
+                    f"active={int(active.sum())} mean_episode_step={mean_step:.1f}/"
+                    f"{int(eval_cfg.simulator.horizon)}",
+                    flush=True,
+                )
     finally:
         adapter.close()
     return {
-        "episodes": len(returns),
-        "success_rate": float(np.mean(successes)) if successes else 0.0,
-        "return_mean": float(np.mean(returns)) if returns else 0.0,
-        "episode_length_mean": float(np.mean(lengths)) if lengths else 0.0,
-        "returns": returns,
-        "lengths": lengths,
-        "successes": successes,
+        "episodes": total_episodes,
+        "num_envs": num_envs,
+        "success_rate": float(np.mean(successes)),
+        "return_mean": float(np.mean(returns)),
+        "episode_length_mean": float(np.mean(lengths)),
+        "returns": returns.tolist(),
+        "lengths": lengths.tolist(),
+        "successes": successes.tolist(),
     }
+
+
+def _print_reinflow_update(cfg: RootConfig, row: dict[str, Any]) -> None:
+    """Print a compact fixed-width table for one completed ReinFlow update."""
+
+    actor_updated = bool(row["actor_updated"])
+    episode_return = _optional_metric(row["completed_episode_return_mean"], precision=3)
+    success = _optional_percentage(row["completed_episode_success_rate"])
+    policy = _optional_metric(row["policy_loss"] if actor_updated else None, precision=4)
+    approx_kl = _optional_metric(row["approx_kl"] if actor_updated else None, precision=5)
+    actor_grad = _optional_metric(row["actor_grad_norm"] if actor_updated else None, precision=3)
+    rows = (
+        ("Phase", str(row["phase"]), "Actor", "ON" if actor_updated else "OFF", "1;36"),
+        (
+            "Update steps",
+            str(int(row["update_primitive_steps"])),
+            "Total steps",
+            str(int(row["primitive_steps"])),
+            "36",
+        ),
+        (
+            "Throughput",
+            f"{float(row['primitive_steps_per_second']):.1f} steps/s",
+            "Noise std max",
+            f"{float(row['noise_std_upper_bound']):.3f}",
+            "36",
+        ),
+        None,
+        (
+            "Macro reward",
+            f"{float(row['rollout_macro_reward_mean']):.3f}",
+            "Native reward/step",
+            f"{float(row['rollout_native_reward_per_primitive_step']):.3f}",
+            "34",
+        ),
+        (
+            "Episode return",
+            episode_return,
+            "Completed episodes",
+            str(int(row["completed_episodes"])),
+            "34",
+        ),
+        (
+            "Episode success",
+            success,
+            "Partial return",
+            f"{float(row['partial_episode_return_mean']):.3f}",
+            "1;32" if row["completed_episode_success_rate"] else "34",
+        ),
+        (
+            "Success events",
+            str(int(row["rollout_success_events"])),
+            "Action clipping",
+            f"{float(row['action_clip_fraction']):.1%}",
+            "34",
+        ),
+        None,
+        (
+            "Policy loss",
+            policy,
+            "Value loss",
+            f"{float(row['value_loss']):.4f}",
+            "33" if row["phase"] == "critic_warmup" else "35",
+        ),
+        (
+            "Explained var",
+            f"{float(row['explained_variance']):.3f}",
+            "Approx KL",
+            approx_kl,
+            "33" if row["phase"] == "critic_warmup" else "35",
+        ),
+        (
+            "Log-prob rebase",
+            f"{float(row['rollout_log_prob_correction_max']):.3f}",
+            "Actor steps",
+            str(int(row["actor_optimizer_steps"])),
+            "33" if row["phase"] == "critic_warmup" else "35",
+        ),
+        (
+            "Actor grad",
+            actor_grad,
+            "Critic grad",
+            f"{float(row['critic_grad_norm']):.3f}",
+            "33" if row["phase"] == "critic_warmup" else "35",
+        ),
+    )
+    outer_border = "+" + "-" * 77 + "+"
+    grid_border = (
+        "+" + "-" * 20 + "+" + "-" * 17 + "+" + "-" * 20 + "+" + "-" * 17 + "+"
+    )
+    title = f"ReinFlow update {int(row['update']):04d}/{int(cfg.rl.total_updates):04d}"
+
+    print(terminal_color(outer_border, "1;36"), flush=True)
+    print(terminal_color(f"| {title:<75} |", "1;36"), flush=True)
+    print(terminal_color(grid_border, "1;36"), flush=True)
+    for table_row in rows:
+        if table_row is None:
+            print(terminal_color(grid_border, "2"), flush=True)
+            continue
+        left_name, left_value, right_name, right_value, color = table_row
+        print(
+            terminal_color(
+                _format_metric_row(left_name, left_value, right_name, right_value),
+                color,
+            ),
+            flush=True,
+        )
+    print(terminal_color(outer_border, "1;36"), flush=True)
+
+
+def _format_metric_row(
+    left_name: str,
+    left_value: str,
+    right_name: str,
+    right_value: str,
+) -> str:
+    """Format two metric/value pairs inside the fixed-width summary table."""
+
+    return (
+        f"| {left_name:<18} | {left_value:>15} "
+        f"| {right_name:<18} | {right_value:>15} |"
+    )
+
+
+def _optional_metric(value: object, *, precision: int) -> str:
+    """Format an optional scalar metric for human-readable progress output."""
+
+    return "n/a" if value is None else f"{float(value):.{precision}f}"
+
+
+def _optional_percentage(value: object) -> str:
+    """Format an optional fractional metric as a percentage."""
+
+    return "n/a" if value is None else f"{float(value):.1%}"
 
 
 def _execute_macro_action(
@@ -585,6 +895,7 @@ def _execute_macro_action(
     low: np.ndarray,
     high: np.ndarray,
     device: torch.device,
+    active_mask: np.ndarray | None = None,
 ) -> _MacroStep:
     """Execute a fixed policy chunk until its horizon or an episode boundary."""
 
@@ -597,7 +908,9 @@ def _execute_macro_action(
         device=device,
     )
     num_envs = adapter.num_envs
-    active = np.ones(num_envs, dtype=bool)
+    active = np.ones(num_envs, dtype=bool) if active_mask is None else np.asarray(active_mask, dtype=bool).copy()
+    if active.shape != (num_envs,):
+        raise ValueError(f"Expected active mask shaped {(num_envs,)}, got {active.shape}.")
     final_observations = list(observations)
     discounted_rewards = np.zeros(num_envs, dtype=np.float32)
     episode_rewards = np.zeros(num_envs, dtype=np.float32)
@@ -865,6 +1178,7 @@ def _normalized_actions_to_env(
         center = 0.5 * (high_t + low_t)
         radius = 0.5 * (high_t - low_t)
         env_actions = center + torch.tanh(actions) * radius
+    env_actions = _binarize_gripper_actions(env_actions, cfg)
     return torch.clamp(env_actions, low_t, high_t)
 
 
@@ -914,12 +1228,29 @@ def _policy_actions_to_env(
         center = 0.5 * (upper + lower)
         radius = 0.5 * (upper - lower)
         raw_actions = center + torch.tanh(actions.float()) * radius
+    raw_actions = _binarize_gripper_actions(raw_actions, cfg)
     clip_mask = (raw_actions < lower) | (raw_actions > upper)
     clipped = torch.maximum(torch.minimum(raw_actions, upper), lower)
     return (
         clipped.detach().cpu().numpy().astype(np.float32),
         clip_mask.detach().cpu().numpy(),
     )
+
+
+def _binarize_gripper_actions(actions: torch.Tensor, cfg: RootConfig) -> torch.Tensor:
+    """Apply the configured binary gripper command in environment action space."""
+
+    if not bool(cfg.rl.binary_gripper):
+        return actions
+    index = int(cfg.rl.binary_gripper_index)
+    index = index + actions.shape[-1] if index < 0 else index
+    output = actions.clone()
+    output[..., index] = torch.where(
+        actions[..., index] >= float(cfg.rl.binary_gripper_threshold),
+        actions.new_tensor(float(cfg.rl.binary_gripper_high_value)),
+        actions.new_tensor(float(cfg.rl.binary_gripper_low_value)),
+    )
+    return output
 
 
 def _validate_action_dimensions(cfg: RootConfig, low: np.ndarray, high: np.ndarray) -> None:
