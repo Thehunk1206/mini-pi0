@@ -1,0 +1,25 @@
+{
+  "success_rate": 0.10000000149011612,
+  "ci95_low": 0.05000000074505806,
+  "ci95_high": 0.1599999964237213,
+  "episode_len_mean": 474.75,
+  "episode_len_std": 80.30570983886719,
+  "reward_mean": 1365.784423828125,
+  "infer_ms_mean": 43.44987487792969,
+  "max_step_reward_mean": 5.131417751312256,
+  "action_clip_fraction_mean": 0.00023434784088749439,
+  "action_clip_fraction_by_dim_mean": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.00023434784088749439,
+    0.0
+  ],
+  "action_abs_mean": 0.17721344530582428,
+  "failure_reason_counts": {
+    "timeout_after_progress": 90,
+    "success": 10
+  }
+}

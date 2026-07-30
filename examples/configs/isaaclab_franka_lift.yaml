@@ -1,0 +1,68 @@
+experiment:
+  name: isaaclab-franka-lift
+  seed: 0
+  runs_root: runs
+
+simulator:
+  backend: isaaclab
+  task: franka_lift_cube
+  robot: franka
+  controller: joint_position
+  control_freq: 60
+  horizon: 300
+  reward_shaping: true
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [front]
+  camera_width: 128
+  camera_height: 128
+  env_kwargs:
+    headless: true
+    enable_cameras: true
+
+task:
+  object_name: cube
+
+robot:
+  name: franka
+  action_dim: 8
+  image_key: agentview_image
+  image_keys: [agentview_image]
+  proprio_keys:
+    - robot0_eef_pos
+    - robot0_eef_quat
+    - robot0_gripper_qpos
+    - observation.state.object
+    - observation.state.task_progress
+  state_keys:
+    - robot0_eef_pos
+    - robot0_eef_quat
+    - robot0_gripper_qpos
+    - observation.state.object
+    - observation.state.task_progress
+
+model:
+  name: mini_pi0_fm
+  action_dim: 8
+  prop_dim: 13
+  chunk_size: 16
+  cond_dim: 256
+  d_model: 256
+  nhead: 4
+  nlayers: 4
+  action_backbone: transformer
+  conditioning_mode: cross_attention
+  obs_horizon: 1
+  vision_backbone: resnet18
+  freeze_vision_backbone: true
+
+eval:
+  checkpoint: runs/isaaclab-franka-lift-bc/run1/checkpoints/best.pt
+  action_stats_path: runs/isaaclab-franka-lift-bc/run1/artifacts/action_stats.json
+  n_episodes: 5
+  execute_steps: 4
+  n_flow_steps: 10
+  max_steps: 300
+  record_grid: false
+  device: cuda

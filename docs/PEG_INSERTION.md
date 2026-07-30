@@ -158,7 +158,7 @@ mini-pi0 train \
 ## Evaluation
 
 Contact features during live eval are available through the ManiSkill adapter.
-For contact-enabled policies, use sequential CPU simulation:
+Sequential CPU simulation remains the strict imitation-policy parity path:
 
 ```yaml
 simulator:
@@ -217,8 +217,7 @@ they are mostly alignment/insertion failures after partial progress.
 
 ## Debugging Direction
 
-The current failure labels are still coarse. For PegInsertion, better rollout
-diagnostics should be phase-based:
+ReinFlow rollouts now emit phase diagnostics per environment:
 
 - peg grasped
 - peg dropped
@@ -237,5 +236,28 @@ These can separate:
 - jammed at contact
 - partial insertion timeout
 
-The next improvement should compute those task-specific metrics directly from
-peg and box poses plus contact features during eval.
+The adapter computes these metrics from peg/box poses and vector-aware
+ManiSkill contact queries. `jam_duration` increases while peg-box force exceeds
+the threshold without insertion-depth progress.
+
+## ReinFlow Fine-Tuning
+
+The main config uses the existing run2 FM checkpoint and its matching action
+statistics:
+
+```bash
+mini-pi0 rl-smoke \
+  --config examples/configs/maniskill3_peginsertion_reinflow_finetune.yaml
+
+mini-pi0 rl-train \
+  --config examples/configs/maniskill3_peginsertion_reinflow_finetune.yaml
+```
+
+It uses native dense reward, `flow_steps=6`, `execution_horizon=4`, learned
+transition noise in `[0.04, 0.10]`, and native GPU vectorization. The potential
+reward is isolated in
+`examples/configs/maniskill3_peginsertion_reinflow_potential.yaml`.
+
+The implementation smoke and one tiny two-environment update have passed. No
+RL success improvement is claimed until the fixed 100-episode, three-seed
+protocol in [REINFLOW_RL.md](REINFLOW_RL.md) is complete.

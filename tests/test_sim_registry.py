@@ -1,13 +1,11 @@
+import importlib.util
 import unittest
 from unittest.mock import patch
 
 from mini_pi0.config.io import load_config
-from mini_pi0.sim.maniskill3_adapter import (
-    ManiSkill3Adapter,
-    default_maniskill_reward_mode,
-    make_maniskill_env_with_reward_fallback,
-)
 from mini_pi0.sim.registry import backend_status, make_sim_adapter
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
 class SimRegistryTests(unittest.TestCase):
@@ -16,13 +14,12 @@ class SimRegistryTests(unittest.TestCase):
         self.assertIn("maniskill3", status)
         self.assertIn("isaaclab", status)
         self.assertIn("implemented", status["maniskill3"]["status"])
-        self.assertEqual(status["isaaclab"]["status"], "scaffolded only")
+        self.assertIn("implemented", status["isaaclab"]["status"])
 
     def test_isaaclab_scaffold_raises(self):
         cfg = load_config(overrides=["simulator.backend=isaaclab"])
-        adapter = make_sim_adapter(cfg)
         with self.assertRaises(Exception):
-            adapter.reset(seed=0)
+            make_sim_adapter(cfg)
 
     def test_maniskill3_adapter_constructs_or_reports_dependency(self):
         cfg = load_config(overrides=["simulator.backend=maniskill3"])
@@ -31,6 +28,7 @@ class SimRegistryTests(unittest.TestCase):
         except Exception as e:
             self.assertTrue(
                 "mani_skill" in str(e).lower()
+                or "torch" in str(e).lower()
                 or "render" in str(e).lower()
                 or "device" in str(e).lower()
                 or "name not found" in str(e).lower()
@@ -47,21 +45,30 @@ class SimRegistryTests(unittest.TestCase):
             except Exception:
                 pass
 
+    @unittest.skipIf(not HAS_TORCH, "torch is required to import ManiSkill adapter")
     def test_maniskill3_adapter_check_success_uses_native_success_flag(self):
+        from mini_pi0.sim.maniskill3_adapter import ManiSkill3Adapter
+
         adapter = object.__new__(ManiSkill3Adapter)
 
         self.assertTrue(adapter.check_success(info={"success": True}))
         self.assertTrue(adapter.check_success(info={"success": 1.0}))
         self.assertFalse(adapter.check_success(info={"success": False, "success_fraction": 0.0}))
 
+    @unittest.skipIf(not HAS_TORCH, "torch is required to import ManiSkill adapter")
     def test_default_maniskill_reward_mode_respects_reward_shaping_flag(self):
+        from mini_pi0.sim.maniskill3_adapter import default_maniskill_reward_mode
+
         sparse_cfg = load_config(overrides=["simulator.reward_shaping=false"])
         dense_cfg = load_config(overrides=["simulator.reward_shaping=true"])
 
         self.assertEqual(default_maniskill_reward_mode(sparse_cfg), "sparse")
         self.assertEqual(default_maniskill_reward_mode(dense_cfg), "dense")
 
+    @unittest.skipIf(not HAS_TORCH, "torch is required to import ManiSkill adapter")
     def test_maniskill_env_creation_retries_sparse_when_dense_is_unsupported(self):
+        from mini_pi0.sim.maniskill3_adapter import make_maniskill_env_with_reward_fallback
+
         calls = []
         expected_env = object()
 

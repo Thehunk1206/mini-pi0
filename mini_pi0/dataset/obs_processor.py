@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from mini_pi0.dataset.stats import ActionStats
 from mini_pi0.utils.device import resolve_device
@@ -18,7 +18,7 @@ class ObsProcessor:
 
     def __init__(
         self,
-        action_stats_path: str,
+        action_stats_path: str | None,
         image_key: str | None,
         image_keys: list[str] | None,
         proprio_keys: list[str],
@@ -29,7 +29,9 @@ class ObsProcessor:
         """Initialize observation processor and action normalization tensors.
 
         Args:
-            action_stats_path: JSON path containing ``mean`` and ``std`` action stats.
+            action_stats_path: Optional JSON path containing ``mean`` and
+                ``std`` action stats. When omitted, observation tensorization is
+                still available but ``denormalize`` is disabled.
             image_key: Backward-compatible single observation key for image tensors.
             image_keys: Optional ordered image observation keys for multi-camera input.
             proprio_keys: Ordered proprioception keys concatenated into one vector.
@@ -52,9 +54,12 @@ class ObsProcessor:
         self.preserve_camera_dim = bool(preserve_camera_dim)
         self._history: deque[dict[str, np.ndarray]] = deque(maxlen=self.obs_horizon)
         self._batch_history: dict[int, deque[dict[str, np.ndarray]]] = {}
-        stats = ActionStats.load(action_stats_path)
-        self.action_mean = torch.tensor(stats.mean, dtype=torch.float32, device=self.device)
-        self.action_std = torch.tensor(stats.std, dtype=torch.float32, device=self.device)
+        self.action_mean: torch.Tensor | None = None
+        self.action_std: torch.Tensor | None = None
+        if action_stats_path is not None:
+            stats = ActionStats.load(action_stats_path)
+            self.action_mean = torch.tensor(stats.mean, dtype=torch.float32, device=self.device)
+            self.action_std = torch.tensor(stats.std, dtype=torch.float32, device=self.device)
 
     def reset_history(self, obs: dict[str, np.ndarray]) -> None:
         """Reset sequential rollout history using repeat padding."""
@@ -72,6 +77,15 @@ class ObsProcessor:
             for _ in range(self.obs_horizon):
                 hist.append(obs)
             self._batch_history[int(idx)] = hist
+
+    def reset_batch_history_at(self, observations: Mapping[int, dict[str, np.ndarray]]) -> None:
+        """Reset histories only for environments that started new episodes."""
+
+        for env_index, observation in observations.items():
+            history: deque[dict[str, np.ndarray]] = deque(maxlen=self.obs_horizon)
+            for _ in range(self.obs_horizon):
+                history.append(observation)
+            self._batch_history[int(env_index)] = history
 
     def _single_obs_to_arrays(self, obs: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Convert one observation into unbatched visual/proprio arrays."""
@@ -194,6 +208,8 @@ class ObsProcessor:
             Denormalized action tensor.
         """
 
+        if self.action_mean is None or self.action_std is None:
+            raise RuntimeError("Action stats are unavailable; use env-bounds action normalization instead.")
         return actions * self.action_std + self.action_mean
 
     def clip(self, actions: torch.Tensor, low: np.ndarray, high: np.ndarray) -> torch.Tensor:

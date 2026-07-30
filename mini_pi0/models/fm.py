@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Flow-matching visuomotor policy modules.
 
 The module keeps the original FM objective intact while supporting richer
@@ -7,6 +5,8 @@ observation conditioning for robot policies: spatial visual tokens,
 observation history, cross-attention action denoisers, and token-to-FiLM
 conditioning for Conv1D/UNet action experts.
 """
+
+from __future__ import annotations
 
 import math
 from typing import Literal
@@ -912,14 +912,38 @@ class MiniPi0FlowMatching(nn.Module):
         prop: torch.Tensor,
         n_steps: int = 10,
         solver: str = "euler",
+        initial_noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Generate one normalized action chunk by integrating the flow field."""
+        """Generate one normalized action chunk by integrating the flow field.
+
+        Args:
+            img: Batched image observations.
+            prop: Batched proprioceptive observations.
+            n_steps: Number of ODE integration steps.
+            solver: ODE solver name, either ``euler`` or ``heun``.
+            initial_noise: Optional explicit standard-normal base sample. Supplying
+                it makes action sampling reproducible across evaluation runners.
+
+        Returns:
+            Batched normalized action chunks.
+
+        Raises:
+            ValueError: If ``initial_noise`` does not match the expected shape.
+        """
 
         batch = img.shape[0]
         cond = self._encode_conditioning(img, prop)
         h = self.action_transformer.chunk_size
         a_dim = self.action_transformer.action_dim
-        actions = torch.randn(batch, h, a_dim, device=img.device, dtype=img.dtype)
+        expected_shape = (batch, h, a_dim)
+        if initial_noise is None:
+            actions = torch.randn(expected_shape, device=img.device, dtype=img.dtype)
+        else:
+            if tuple(initial_noise.shape) != expected_shape:
+                raise ValueError(
+                    f"Expected initial_noise shaped {expected_shape}, got {tuple(initial_noise.shape)}."
+                )
+            actions = initial_noise.to(device=img.device, dtype=img.dtype)
         steps = max(1, int(n_steps))
         solver_key = str(solver or "euler").strip().lower()
         if solver_key not in {"euler", "heun"}:

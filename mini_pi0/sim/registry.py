@@ -4,12 +4,10 @@ from typing import Any
 
 from mini_pi0.config.schema import RootConfig
 from mini_pi0.sim.base import SimulatorAdapter
-from mini_pi0.sim.isaaclab_adapter import IsaacLabAdapter
-from mini_pi0.sim.maniskill3_adapter import ManiSkill3Adapter
 
 _SIM_REGISTRY = {
-    "maniskill3": ManiSkill3Adapter,
-    "isaaclab": IsaacLabAdapter,
+    "maniskill3": "mini_pi0.sim.maniskill3_adapter:ManiSkill3Adapter",
+    "isaaclab": "mini_pi0.sim.isaaclab_adapter:IsaacLabAdapter",
 }
 
 
@@ -39,7 +37,8 @@ def make_sim_adapter(cfg: RootConfig) -> SimulatorAdapter:
     key = str(cfg.simulator.backend).strip().lower()
     if key not in _SIM_REGISTRY:
         raise ValueError(f"Unknown simulator backend '{cfg.simulator.backend}'. Options: {list_backends()}")
-    return _SIM_REGISTRY[key](cfg)
+    cls = _load_adapter_class(_SIM_REGISTRY[key])
+    return cls(cfg)
 
 
 def backend_status() -> dict[str, dict[str, Any]]:
@@ -63,7 +62,22 @@ def backend_status() -> dict[str, dict[str, Any]]:
                 ok = False
                 msg = f"implemented, missing dependency: {type(e).__name__}"
         elif name == "isaaclab":
-            ok = False
-            msg = "scaffolded only"
+            try:
+                from mini_pi0.sim.isaaclab_adapter import isaaclab_available
+
+                ok = isaaclab_available()
+                msg = "implemented" if ok else "implemented, missing dependency: isaaclab"
+            except Exception as e:
+                ok = False
+                msg = f"implemented, status check failed: {type(e).__name__}"
         out[name] = {"ready": ok, "status": msg}
     return out
+
+
+def _load_adapter_class(path: str) -> type[SimulatorAdapter]:
+    """Load an adapter class from ``module:class`` path."""
+
+    module_name, class_name = path.split(":", maxsplit=1)
+    module = __import__(module_name, fromlist=[class_name])
+    cls = getattr(module, class_name)
+    return cls

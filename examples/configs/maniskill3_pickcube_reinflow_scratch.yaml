@@ -1,0 +1,90 @@
+experiment:
+  name: maniskill3-pickcube-reinflow-scratch
+  seed: 0
+  runs_root: runs
+
+simulator:
+  backend: maniskill3
+  task: PickCube-v1
+  robot: panda
+  controller: pd_ee_delta_pose
+  control_freq: 20
+  horizon: 200
+  reward_shaping: true
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [base_camera]
+  camera_width: 84
+  camera_height: 84
+  env_kwargs:
+    obs_mode: rgbd
+    render_mode: rgb_array
+    control_mode: pd_ee_delta_pose
+    sim_backend: physx_cuda
+
+task:
+  object_name: cube
+
+robot:
+  name: panda
+  action_dim: 7
+  image_key: agentview_image
+  image_keys: [agentview_image]
+  proprio_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+  state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+
+model:
+  name: mini_pi0_fm
+  action_dim: 7
+  prop_dim: 9
+  chunk_size: 16
+  cond_dim: 256
+  d_model: 256
+  nhead: 4
+  nlayers: 4
+  action_backbone: transformer
+  conditioning_mode: cross_attention
+  obs_horizon: 1
+  vision_backbone: resnet18
+  freeze_vision_backbone: true
+
+rl:
+  algorithm: reinflow_ppo
+  init_mode: scratch
+  action_normalization: env_bounds
+  checkpoint: null
+  action_stats_path: null
+  resume_from: null
+  use_reference_policy: false
+  total_updates: 2
+  rollout_decisions_per_update: 8
+  num_envs: 4
+  minibatch_size: 16
+  epochs_per_update: 2
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_ratio: 0.001
+  entropy_coef: 0.0
+  value_coef: 0.5
+  max_grad_norm: 1.0
+  actor_lr: 0.00003
+  critic_lr: 0.0003
+  target_kl: 0.01
+  flow_steps: 4
+  flow_solver: euler
+  execution_horizon: 2
+  noise_mode: learned_diagonal
+  noise_std_min: 0.05
+  noise_std_init: 0.08
+  noise_std_max: 0.12
+  reference_w2_coef: 0.0
+  reference_transition_kl_coef: 0.0
+  velocity_anchor_coef: 0.0
+  critic_warmup_updates: 0
+  terminate_on_success: true
+  reward_strategy: native
+  freeze_vision_during_rl: true
+  dtype: bf16
+  rollout_storage_device: auto
+  device: cuda

@@ -12,6 +12,7 @@ import torch
 
 from mini_pi0.config.schema import RootConfig, effective_image_keys
 from mini_pi0.dataset.obs_processor import ObsProcessor
+from mini_pi0.eval.flow_noise import sample_flow_initial_noise, seeded_flow_generator
 from mini_pi0.sim.base import SimulatorAdapter
 from mini_pi0.utils.precision import autocast_context, resolve_runtime_dtype
 
@@ -315,6 +316,7 @@ def evaluate(
 
     for ep in range(n_episodes):
         seed = _episode_seed(cfg, ep)
+        flow_generator = seeded_flow_generator(seed)
         adapter = make_adapter(seed)
         obs = adapter.reset(seed=seed)
         processor.reset_history(obs)
@@ -362,6 +364,14 @@ def evaluate(
             if not action_buffer:
                 execute_steps, n_flow_steps, smooth_alpha_chunk = _resolve_eval_rollout_controls(cfg, steps)
                 img, prop = processor.obs_to_tensors(obs)
+                initial_noise = sample_flow_initial_noise(
+                    [flow_generator],
+                    [True],
+                    chunk_size=int(cfg.model.chunk_size),
+                    action_dim=int(cfg.model.action_dim),
+                    device=img.device,
+                    dtype=img.dtype,
+                )
                 t0 = time.perf_counter()
                 with torch.no_grad(), _model_forward_context(cfg, img.device):
                     chunk = model.sample(
@@ -369,6 +379,7 @@ def evaluate(
                         prop,
                         n_steps=n_flow_steps,
                         solver=str(getattr(cfg.eval, "flow_solver", "euler")),
+                        initial_noise=initial_noise,
                     ).squeeze(0)
                 t_infer += time.perf_counter() - t0
                 chunks += 1
@@ -617,6 +628,10 @@ def evaluate_vectorized_maniskill(
         prev_actions: list[np.ndarray | None] = [None for _ in range(batch_n)]
         previous_chunk_tails: list[np.ndarray | None] = [None for _ in range(batch_n)]
         action_buffers: list[list[np.ndarray]] = [[] for _ in range(batch_n)]
+        flow_generators = [
+            seeded_flow_generator(_episode_seed(cfg, completed + index))
+            for index in range(batch_n)
+        ]
         infer_time_s = 0.0
         infer_chunks = 0
 
@@ -628,6 +643,14 @@ def evaluate_vectorized_maniskill(
                     env_indices=empty_active,
                 )
                 n_flow_steps = int(max(1, cfg.eval.n_flow_steps))
+                initial_noise = sample_flow_initial_noise(
+                    [flow_generators[index] for index in empty_active],
+                    [True] * len(empty_active),
+                    chunk_size=int(cfg.model.chunk_size),
+                    action_dim=int(cfg.model.action_dim),
+                    device=img.device,
+                    dtype=img.dtype,
+                )
                 t0 = time.perf_counter()
                 with torch.no_grad(), _model_forward_context(cfg, img.device):
                     chunk_t = model.sample(
@@ -635,6 +658,7 @@ def evaluate_vectorized_maniskill(
                         prop,
                         n_steps=n_flow_steps,
                         solver=str(getattr(cfg.eval, "flow_solver", "euler")),
+                        initial_noise=initial_noise,
                     )
                 infer_time_s += time.perf_counter() - t0
                 infer_chunks += 1
@@ -820,6 +844,7 @@ def record_episode(
     """
 
     adapter = make_adapter(seed)
+    flow_generator = seeded_flow_generator(seed)
     obs = adapter.reset(seed=seed)
     processor.reset_history(obs)
     frames: list[np.ndarray] = []
@@ -837,12 +862,21 @@ def record_episode(
     for _ in range(step_budget):
         if not action_buffer:
             img, prop = processor.obs_to_tensors(obs)
+            initial_noise = sample_flow_initial_noise(
+                [flow_generator],
+                [True],
+                chunk_size=int(cfg.model.chunk_size),
+                action_dim=int(cfg.model.action_dim),
+                device=img.device,
+                dtype=img.dtype,
+            )
             with torch.no_grad(), _model_forward_context(cfg, img.device):
                 chunk = model.sample(
                     img,
                     prop,
                     n_steps=int(cfg.eval.n_flow_steps),
                     solver=str(getattr(cfg.eval, "flow_solver", "euler")),
+                    initial_noise=initial_noise,
                 ).squeeze(0)
             chunk = processor.denormalize(chunk).detach().cpu().numpy()
             proposed = []

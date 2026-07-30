@@ -14,6 +14,7 @@ from mini_pi0.sim.contact_features import collect_contact_features
 # Register custom env on import.
 import mini_pi0.sim.maniskill3_custom_env  # noqa: F401
 import mini_pi0.sim.maniskill3_peginsertion_env  # noqa: F401
+import mini_pi0.sim.maniskill3_pullcube_env  # noqa: F401
 
 
 def default_maniskill_reward_mode(cfg: RootConfig) -> str:
@@ -74,8 +75,13 @@ class ManiSkill3Adapter(SimulatorAdapter):
         ]
 
         env_kwargs = dict(cfg.simulator.env_kwargs or {})
+        domain_randomization = env_kwargs.get("domain_randomization")
+        if isinstance(domain_randomization, dict) and "seed" not in domain_randomization:
+            domain_randomization = dict(domain_randomization)
+            domain_randomization["seed"] = int(cfg.experiment.seed)
+            env_kwargs["domain_randomization"] = domain_randomization
         task_id = str(cfg.simulator.task or "MiniPi0MultiObjectTray-v1")
-        if task_id.strip().lower() in {"pickcube-v1", "pickcube", "custom", "mini_pi0_multiobject", "lift"}:
+        if task_id.strip().lower() in {"custom", "mini_pi0_multiobject", "lift"}:
             task_id = "MiniPi0MultiObjectTray-v1"
         try:
             gym.spec(task_id)
@@ -84,7 +90,8 @@ class ManiSkill3Adapter(SimulatorAdapter):
 
         render_mode = "rgb_array" if bool(cfg.simulator.has_offscreen_renderer) else "none"
         env_kwargs.pop("render_mode", None)
-        render_backend = env_kwargs.pop("render_backend", "cpu")
+        default_render_backend = "gpu" if bool(cfg.simulator.has_offscreen_renderer) else "none"
+        render_backend = env_kwargs.pop("render_backend", default_render_backend)
         env_kwargs.pop("scripted_control_mode", None)
 
         control_mode = str(cfg.simulator.controller)
@@ -108,6 +115,9 @@ class ManiSkill3Adapter(SimulatorAdapter):
         self._last_info: dict[str, Any] = {}
         self._last_obs: dict[str, np.ndarray] | None = None
         self._last_raw_obs: Any = None
+        num_envs = int(getattr(self.unwrapped, "num_envs", 1))
+        self._previous_insertion_depth = np.zeros(num_envs, dtype=np.float32)
+        self._jam_steps = np.zeros(num_envs, dtype=np.int64)
 
     @property
     def unwrapped(self):
@@ -120,31 +130,31 @@ class ManiSkill3Adapter(SimulatorAdapter):
             return value.detach().cpu().numpy()
         return np.asarray(value)
 
-    def _get_object_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    def _get_object_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         uw = self.unwrapped
         if hasattr(uw, "_get_object_pos_tensor"):
             obj_pos = uw._get_object_pos_tensor()
             active = uw._active_object_mask.float()
             placed = uw._placed_mask.float()
-            frac = float(uw._last_success_fraction[0].item()) if uw._last_success_fraction is not None else 0.0
+            frac = float(uw._last_success_fraction[env_index].item()) if uw._last_success_fraction is not None else 0.0
 
-            obj_pos_np = self._to_numpy(obj_pos)[0].reshape(-1)
-            active_np = self._to_numpy(active)[0]
-            placed_np = self._to_numpy(placed)[0]
+            obj_pos_np = self._to_numpy(obj_pos)[env_index].reshape(-1)
+            active_np = self._to_numpy(active)[env_index]
+            placed_np = self._to_numpy(placed)[env_index]
             return obj_pos_np.astype(np.float32), active_np.astype(np.float32), placed_np.astype(np.float32), frac
 
         actor_names = [name for name in ("cubeA", "cubeB", "obj") if hasattr(uw, name)]
-        actor_states = [self._actor_pose_vector(getattr(uw, name)) for name in actor_names]
+        actor_states = [self._actor_pose_vector(getattr(uw, name), env_index=env_index) for name in actor_names]
         if actor_states:
             eval_info = self._evaluate_task()
-            success = bool(eval_info.get("success", False))
+            success = bool(_value_at(eval_info.get("success", False), env_index))
             obj_state = np.concatenate(actor_states, axis=0).astype(np.float32)
             active = np.ones((len(actor_states),), dtype=np.float32)
             placed = np.ones((len(actor_states),), dtype=np.float32) if success else np.zeros((len(actor_states),), dtype=np.float32)
             return obj_state, active, placed, float(success)
 
         eval_info = self._evaluate_task()
-        success = bool(eval_info.get("success", False))
+        success = bool(_value_at(eval_info.get("success", False), env_index))
         return (
             np.zeros((1,), dtype=np.float32),
             np.ones((1,), dtype=np.float32),
@@ -152,7 +162,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
             float(success),
         )
 
-    def _actor_pose_vector(self, actor: Any) -> np.ndarray:
+    def _actor_pose_vector(self, actor: Any, *, env_index: int = 0) -> np.ndarray:
         """Return one actor pose as a flat ``[x, y, z, qw, qx, qy, qz]`` vector."""
 
         pose = getattr(actor, "pose", None)
@@ -165,7 +175,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
             return np.zeros((7,), dtype=np.float32)
         arr = np.asarray(arr, dtype=np.float32)
         if arr.ndim >= 2:
-            arr = arr[0]
+            arr = arr[env_index]
         return arr.reshape(-1)[:7].astype(np.float32)
 
     def _evaluate_task(self) -> dict[str, Any]:
@@ -182,7 +192,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
             return {}
         return self._normalize_info(raw)
 
-    def _extract_sensor_frames(self) -> dict[str, np.ndarray]:
+    def _extract_sensor_frames(self, env_index: int = 0) -> dict[str, np.ndarray]:
         raw = self._last_raw_obs
         if not isinstance(raw, dict):
             return {}
@@ -199,9 +209,9 @@ class ManiSkill3Adapter(SimulatorAdapter):
                     continue
                 arr = self._to_numpy(rgb)
                 if arr.ndim == 5:
-                    arr = arr[0, 0]
+                    arr = arr[env_index, 0]
                 elif arr.ndim == 4:
-                    arr = arr[0]
+                    arr = arr[env_index]
                 if arr.ndim != 3:
                     continue
                 if arr.dtype != np.uint8:
@@ -211,26 +221,30 @@ class ManiSkill3Adapter(SimulatorAdapter):
         except Exception:
             return {}
 
-    def _canonical_obs_from_env(self) -> dict[str, np.ndarray]:
+    def _canonical_obs_from_env(
+        self,
+        env_index: int = 0,
+        peg_diagnostics: dict[str, np.ndarray] | None = None,
+    ) -> dict[str, np.ndarray]:
         uw = self.unwrapped
-        tcp_p = self._to_numpy(uw.agent.tcp.pose.p)[0].astype(np.float32)
-        tcp_q = self._to_numpy(uw.agent.tcp.pose.q)[0].astype(np.float32)
-        qpos = self._to_numpy(uw.agent.robot.get_qpos())[0].astype(np.float32)
-        qvel = self._to_numpy(uw.agent.robot.get_qvel())[0].astype(np.float32)
+        tcp_p = self._to_numpy(uw.agent.tcp.pose.p)[env_index].astype(np.float32)
+        tcp_q = self._to_numpy(uw.agent.tcp.pose.q)[env_index].astype(np.float32)
+        qpos = self._to_numpy(uw.agent.robot.get_qpos())[env_index].astype(np.float32)
+        qvel = self._to_numpy(uw.agent.robot.get_qvel())[env_index].astype(np.float32)
 
-        obj_flat, obj_mask, placed_mask, frac = self._get_object_state()
+        obj_flat, obj_mask, placed_mask, frac = self._get_object_state(env_index=env_index)
         grasped_mask = np.zeros_like(placed_mask, dtype=np.float32)
         try:
-            grasp_rows = [self._to_numpy(uw.agent.is_grasping(actor))[0] for actor in uw.objects]
+            grasp_rows = [self._to_numpy(uw.agent.is_grasping(actor))[env_index] for actor in uw.objects]
             if grasp_rows:
                 grasped_mask = np.asarray(grasp_rows, dtype=np.float32)
         except Exception:
             grasped_mask = np.zeros_like(placed_mask, dtype=np.float32)
 
-        sensor_frames = self._extract_sensor_frames()
+        sensor_frames = self._extract_sensor_frames(env_index=env_index)
         place_targets = getattr(uw, "_placement_targets", None)
         if place_targets is not None:
-            place_targets_np = self._to_numpy(place_targets)[0].reshape(-1).astype(np.float32)
+            place_targets_np = self._to_numpy(place_targets)[env_index].reshape(-1).astype(np.float32)
         else:
             place_targets_np = np.zeros_like(obj_flat, dtype=np.float32)
         frame = None
@@ -279,7 +293,9 @@ class ManiSkill3Adapter(SimulatorAdapter):
             "observation.state.place_targets": place_targets_np,
             "observation.state.task_progress": np.array([frac], dtype=np.float32),
         }
-        default_state.update(self._contact_state())
+        default_state.update(self._contact_state(env_index=env_index))
+        diagnostics = peg_diagnostics if peg_diagnostics is not None else self._peg_diagnostics(env_index)
+        default_state.update(diagnostics)
 
         for key in self._state_keys:
             out[key] = np.asarray(default_state.get(key, np.zeros((1,), dtype=np.float32)), dtype=np.float32)
@@ -291,20 +307,94 @@ class ManiSkill3Adapter(SimulatorAdapter):
             "observation.state.grasped_mask",
             "observation.state.place_targets",
             "observation.state.task_progress",
+            "observation.state.peg_grasped",
+            "observation.state.peg_hole_alignment_error",
+            "observation.state.peg_axis_error",
+            "observation.state.insertion_depth",
+            "observation.state.hole_depth",
+            "observation.state.peg_box_contact_force",
+            "observation.state.jam_duration",
         ):
-            out[key] = np.asarray(default_state[key], dtype=np.float32)
+            if key in default_state:
+                out[key] = np.asarray(default_state[key], dtype=np.float32)
 
         return out
 
-    def _contact_state(self) -> dict[str, np.ndarray]:
+    def _contact_state(self, env_index: int = 0) -> dict[str, np.ndarray]:
         """Return live compact contact features for configured proprio keys."""
 
         if not any(self._requires_contact_key(key) for key in self._state_keys):
             return {}
         try:
-            return collect_contact_features(self.unwrapped)
+            return collect_contact_features(self.unwrapped, env_index=env_index)
         except Exception:
             return {}
+
+    def _peg_diagnostics(self, env_index: int, *, update_jam: bool = False) -> dict[str, np.ndarray]:
+        """Return contact-aware PegInsertion progress diagnostics."""
+
+        diagnostics = self._peg_diagnostics_batch(update_jam=update_jam)
+        return diagnostics[env_index] if 0 <= env_index < len(diagnostics) else {}
+
+    def _peg_diagnostics_batch(self, *, update_jam: bool = False) -> list[dict[str, np.ndarray]]:
+        """Compute PegInsertion diagnostics once for every vector environment."""
+
+        env = self.unwrapped
+        num_envs = int(getattr(env, "num_envs", 1))
+        if not all(hasattr(env, name) for name in ("peg", "box", "peg_head_pose", "box_hole_pose")):
+            return [{} for _ in range(num_envs)]
+        try:
+            relative = (env.box_hole_pose.inv() * env.peg_head_pose).p.reshape(num_envs, 3)
+            peg_axis = env.peg.pose.to_transformation_matrix()[:, :3, 0]
+            hole_axis = env.box_hole_pose.to_transformation_matrix()[:, :3, 0]
+            grasped = env.agent.is_grasping(env.peg).reshape(num_envs, 1).to(relative.dtype)
+            force = env.scene.get_pairwise_contact_forces(env.peg, env.box).reshape(num_envs, 3)
+            half_sizes = env.peg_half_sizes.reshape(num_envs, -1)
+            features = torch.cat((relative, peg_axis, hole_axis, grasped, force, half_sizes), dim=1)
+            values = self._to_numpy(features)
+
+            relative_np = values[:, 0:3]
+            peg_axis_np = values[:, 3:6]
+            hole_axis_np = values[:, 6:9]
+            grasped_np = values[:, 9]
+            force_np = values[:, 10:13]
+            half_sizes_np = values[:, 13:]
+            alignment_error = np.linalg.norm(relative_np[:, 1:], axis=1)
+            insertion_depth = np.maximum(0.0, relative_np[:, 0] + 0.015)
+            cosine = np.clip(np.sum(peg_axis_np * hole_axis_np, axis=1), -1.0, 1.0)
+            axis_error = np.arccos(cosine)
+            contact_force = np.linalg.norm(force_np, axis=1)
+            hole_depth = np.maximum(1e-6, 2.0 * half_sizes_np[:, 0])
+            if update_jam:
+                advancing = insertion_depth > self._previous_insertion_depth[:num_envs] + 1e-4
+                jammed = (contact_force > 1.0) & ~advancing
+                self._jam_steps[:num_envs] = np.where(jammed, self._jam_steps[:num_envs] + 1, 0)
+                self._previous_insertion_depth[:num_envs] = insertion_depth
+            jam_duration = self._jam_steps[:num_envs] / max(1.0, float(self.cfg.simulator.control_freq))
+            return [
+                {
+                    "observation.state.peg_grasped": np.array([grasped_np[index]], dtype=np.float32),
+                    "observation.state.peg_hole_alignment_error": np.array(
+                        [alignment_error[index]], dtype=np.float32
+                    ),
+                    "observation.state.peg_axis_error": np.array([axis_error[index]], dtype=np.float32),
+                    "observation.state.insertion_depth": np.array([insertion_depth[index]], dtype=np.float32),
+                    "observation.state.hole_depth": np.array([hole_depth[index]], dtype=np.float32),
+                    "observation.state.peg_box_contact_force": np.array(
+                        [contact_force[index]], dtype=np.float32
+                    ),
+                    "observation.state.jam_duration": np.array([jam_duration[index]], dtype=np.float32),
+                }
+                for index in range(num_envs)
+            ]
+        except (AttributeError, IndexError, RuntimeError, TypeError, ValueError):
+            return [{} for _ in range(num_envs)]
+
+    def _reset_peg_diagnostics(self, indices: list[int]) -> None:
+        """Clear stateful jam diagnostics for reset environments."""
+
+        self._previous_insertion_depth[indices] = 0.0
+        self._jam_steps[indices] = 0
 
     @staticmethod
     def _requires_contact_key(key: str) -> bool:
@@ -346,6 +436,7 @@ class ManiSkill3Adapter(SimulatorAdapter):
     def reset(self, seed: int | None = None) -> dict[str, np.ndarray]:
         raw_obs, _info = self.env.reset(seed=seed)
         self._last_raw_obs = raw_obs
+        self._reset_peg_diagnostics([0])
         obs = self._canonical_obs_from_env()
         _, _, _, frac = self._get_object_state()
         obj_mask = obs["observation.state.object_mask"]
@@ -370,7 +461,10 @@ class ManiSkill3Adapter(SimulatorAdapter):
         self._last_raw_obs = raw_obs
         norm_info = self._normalize_info(dict(info))
 
-        obs = self._canonical_obs_from_env()
+        diagnostics = self._peg_diagnostics(0, update_jam=True)
+        obs = self._canonical_obs_from_env(peg_diagnostics=diagnostics)
+        for key, value in diagnostics.items():
+            norm_info[key.removeprefix("observation.state.")] = float(value[0])
         native_success = bool(norm_info.get("success", False))
         if "success_fraction" in norm_info:
             frac = float(norm_info["success_fraction"])
@@ -387,8 +481,13 @@ class ManiSkill3Adapter(SimulatorAdapter):
         self._last_info = norm_info
         self._last_obs = obs
 
-        done = bool(np.asarray(terminated).item() or np.asarray(truncated).item())
-        return StepOutput(obs=obs, reward=float(np.asarray(reward).item()), done=done, info=norm_info)
+        return StepOutput(
+            obs=obs,
+            reward=float(np.asarray(self._to_numpy(reward)).reshape(-1)[0]),
+            terminated=bool(np.asarray(self._to_numpy(terminated)).reshape(-1)[0]),
+            truncated=bool(np.asarray(self._to_numpy(truncated)).reshape(-1)[0]),
+            info=norm_info,
+        )
 
     def action_spec(self) -> tuple[np.ndarray, np.ndarray]:
         space = self.env.action_space
@@ -474,3 +573,13 @@ def _camera_name_for_image_key(image_key: str) -> str:
     if image_key.endswith("_image"):
         return f"{image_key[:-6]}_camera"
     return image_key
+
+
+def _value_at(value: Any, env_index: int) -> Any:
+    """Return one row from a scalar or batched task diagnostic."""
+
+    array = np.asarray(value)
+    if array.ndim == 0:
+        return array.item()
+    selected = array[int(env_index)]
+    return selected.item() if np.asarray(selected).ndim == 0 else selected

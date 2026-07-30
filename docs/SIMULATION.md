@@ -1,13 +1,18 @@
 # Simulation
 
-The active simulator path is ManiSkill through `simulator.backend=maniskill3`.
-IsaacLab remains as a scaffolded adapter for future work.
+The default simulator path is ManiSkill through `simulator.backend=maniskill3`.
+Isaac Lab is implemented as an optional backend through
+`simulator.backend=isaaclab` and is expected to run inside the Dockerized Isaac
+Lab runtime.
 
 Check backend status:
 
 ```bash
 mini-pi0 backends
 ```
+
+Outside the Isaac container, the Isaac backend reports that the dependency is
+missing. Inside the container it should report `implemented`.
 
 Common ManiSkill config fields:
 
@@ -26,6 +31,68 @@ simulator:
     render_mode: rgb_array
     control_mode: pd_joint_pos
 ```
+
+## Isaac Lab Backend
+
+Isaac Lab support is intentionally optional. The adapter lazily imports
+`isaaclab`, launches the Isaac Lab `AppLauncher` in headless mode, registers
+`isaaclab_tasks`, and creates the configured Gymnasium task. No host Isaac,
+CUDA, or driver installation is performed by this repo.
+
+Common Isaac config fields:
+
+```yaml
+simulator:
+  backend: isaaclab
+  task: franka_lift_cube
+  robot: franka
+  controller: joint_position
+  control_freq: 60
+  horizon: 300
+  has_renderer: false
+  has_offscreen_renderer: true
+  use_camera_obs: true
+  camera_names: [front]
+  env_kwargs:
+    headless: true
+    enable_cameras: true
+```
+
+Task aliases are resolved by `mini_pi0.sim.isaaclab_tasks`:
+
+| mini-pi0 key | Isaac Lab Gym id | Status |
+| --- | --- | --- |
+| `franka_lift_cube` | `Isaac-Lift-Cube-Franka-v0` | First smoke-test target |
+| `franka_stack_cube` | `Isaac-Stack-Cube-Franka-v0` | Follow-up stacking target |
+| `franka_pick_place` | `Isaac-PickPlace-Franka-v0` | Optional if available in the installed Isaac Lab image |
+| `franka_peg_insertion` | `Isaac-Peg-Insertion-Franka-v0` | Contact-rich target after lift/stack validation |
+
+Run a smoke test in Docker:
+
+```bash
+docker compose -f compose.isaaclab.yaml run --rm isaaclab \
+  mini-pi0 isaac-smoke --config examples/configs/isaaclab_franka_lift.yaml
+```
+
+The adapter maps Isaac observations into the same canonical mini-pi0 keys used
+by ManiSkill eval/deploy: `agentview_image`, `robot0_eef_pos`,
+`robot0_eef_quat`, `robot0_gripper_qpos`, `observation.state.object`, and
+`observation.state.task_progress`.
+
+ReinFlow uses a native vector adapter when `rl.num_envs > 1`, creating one
+Isaac environment and one SimulationApp. Scalar adapters remain available
+through `SerialBatchAdapter`. See [ISAACLAB_DOCKER.md](ISAACLAB_DOCKER.md) for
+the required validation order.
+
+## RL Vectorization
+
+The RL runner consumes only the `BatchedSimulatorAdapter` contract. ManiSkill
+uses one native GPU vector environment for `num_envs > 1`; Isaac Lab uses one
+native vector environment inside Docker. Other and future simulators can reuse
+`SerialBatchAdapter` until they provide a native implementation.
+
+The batch contract preserves termination and truncation separately, supports
+selective reset, and validates shared finite action bounds before rollout.
 
 ## Custom Environments
 

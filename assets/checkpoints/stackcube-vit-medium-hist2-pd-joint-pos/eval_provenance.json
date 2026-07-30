@@ -1,0 +1,11 @@
+{
+  "checkpoint": "runs/maniskill3-stackcube-motionplanning-transformer-vit-hist2-medium/run1/checkpoints/best.pt",
+  "strict_parity": true,
+  "parity": {
+    "checkpoint_path": "runs/maniskill3-stackcube-motionplanning-transformer-vit-hist2-medium/run1/checkpoints/best.pt",
+    "issues": [],
+    "warnings": [],
+    "ok": true
+  },
+  "requested_to_runtime_diff": {}
+}

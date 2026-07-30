@@ -566,6 +566,80 @@ class DeployConfig:
 
 
 @dataclass
+class RLConfig:
+    """Configuration for ReinFlow PPO and the Gaussian comparison baseline."""
+
+    algorithm: str = "reinflow_ppo"
+    init_mode: str = "scratch"
+    action_normalization: str = "env_bounds"
+    checkpoint: str | None = None
+    action_stats_path: str | None = None
+    resume_from: str | None = None
+    use_reference_policy: bool = False
+    total_updates: int = 10
+    rollout_steps: int = 128
+    rollout_decisions_per_update: int = 128
+    num_envs: int = 1
+    minibatch_size: int = 64
+    epochs_per_update: int = 4
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_ratio: float = 0.001
+    entropy_coef: float = 0.0
+    value_coef: float = 0.5
+    kl_coef: float = 0.05
+    max_grad_norm: float = 1.0
+    lr: float = 3e-5
+    actor_lr: float = 3e-5
+    critic_lr: float = 3e-4
+    actor_weight_decay: float = 0.0
+    critic_weight_decay: float = 0.0
+    lr_scheduler: str = "constant"
+    actor_lr_warmup_updates: int = 0
+    critic_warmup_updates: int = 0
+    critic_output_bias_init: float = 0.0
+    log_std_init: float = -1.0
+    target_kl: float | None = None
+    flow_steps: int = 4
+    flow_solver: str = "euler"
+    execution_horizon: int = 1
+    binary_gripper: bool = False
+    binary_gripper_index: int = -1
+    binary_gripper_threshold: float = 0.0
+    binary_gripper_low_value: float = -1.0
+    binary_gripper_high_value: float = 1.0
+    noise_mode: str = "learned_diagonal"
+    noise_std_min: float = 0.05
+    noise_std_max: float = 0.12
+    noise_std_init: float = 0.08
+    noise_std_final_max: float | None = None
+    noise_schedule_hold_fraction: float = 1.0
+    clip_denoised_actions: bool = True
+    scratch_policy_clip: float = 5.0
+    entropy_per_symbol: bool = True
+    reference_w2_coef: float = 0.0
+    reference_transition_kl_coef: float = 0.0
+    velocity_anchor_coef: float = 0.0
+    critic_warmup_epochs: int = 1
+    terminate_on_success: bool = True
+    eval_every_updates: int = 0
+    eval_episodes: int = 20
+    eval_seed_start: int = 10000
+    eval_num_envs: int | None = None
+    eval_sim_backend: str | None = None
+    eval_disable_domain_randomization: bool = True
+    progress_bar: bool = True
+    reward_strategy: str = "native"
+    peg_potential_grasp_weight: float = 1.0
+    peg_potential_alignment_weight: float = 2.0
+    peg_potential_insertion_weight: float = 4.0
+    freeze_vision_during_rl: bool = True
+    dtype: str = "fp32"
+    rollout_storage_device: str = "auto"
+    device: str = "auto"
+
+
+@dataclass
 class RootConfig:
     """Top-level strongly typed configuration object for all CLI commands.
 
@@ -580,6 +654,7 @@ class RootConfig:
         train: Training loop controls.
         eval: Evaluation loop controls.
         deploy: Deployment loop controls.
+        rl: Reinforcement-learning fine-tuning controls.
     """
 
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
@@ -592,6 +667,7 @@ class RootConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     deploy: DeployConfig = field(default_factory=DeployConfig)
+    rl: RLConfig = field(default_factory=RLConfig)
 
 
 def to_dict(cfg: RootConfig) -> dict[str, Any]:
