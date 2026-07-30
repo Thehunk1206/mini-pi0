@@ -24,6 +24,8 @@ rollouts/
 *.mp4
 *.png
 *.npz
+!assets/checkpoints/
+!assets/checkpoints/**
 !assets/stackcube_success_grid_3x3.mp4
 !assets/stackcube_eval_metrics.png
 !assets/peginsertion_failure_grid_hole_left_camera_3x3.mp4

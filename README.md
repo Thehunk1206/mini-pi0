@@ -320,6 +320,9 @@ python -m pytest -q
 ## Results
 
 Full task benchmark tracking lives in [docs/TASK_BENCHMARK.md](docs/TASK_BENCHMARK.md).
+The corresponding trained checkpoints and matching action statistics are
+published through Git LFS under
+[`assets/checkpoints`](assets/checkpoints/README.md).
 
 ### StackCube-v1
 

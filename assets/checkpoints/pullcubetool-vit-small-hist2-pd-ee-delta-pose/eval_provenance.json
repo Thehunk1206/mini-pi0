@@ -1,0 +1,11 @@
+{
+  "checkpoint": "runs/maniskill3-pullcubetool-mp-transformer-vit-hist2-small-pd-ee-delta-pose/run1/checkpoints/best.pt",
+  "strict_parity": true,
+  "parity": {
+    "checkpoint_path": "runs/maniskill3-pullcubetool-mp-transformer-vit-hist2-small-pd-ee-delta-pose/run1/checkpoints/best.pt",
+    "issues": [],
+    "warnings": [],
+    "ok": true
+  },
+  "requested_to_runtime_diff": {}
+}
