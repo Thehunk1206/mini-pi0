@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111410" />
+    <title>SO-101 Joint Control</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">HANDY BOT · LOCAL CONTROL</p>
+          <h1>SO-101 joint console</h1>
+          <p class="subtitle">Calibrated, bounded control for six Feetech joints.</p>
+        </div>
+        <div id="statusBadge" class="status-badge offline">
+          <span class="status-dot"></span>
+          <span id="statusText">Offline</span>
+        </div>
+      </header>
+
+      <section class="connection-panel" aria-label="Robot connection">
+        <label class="port-field">
+          <span>Serial port</span>
+          <input id="serialPort" autocomplete="off" spellcheck="false" />
+        </label>
+        <button id="connectButton" class="button primary">Connect</button>
+        <button id="disconnectButton" class="button quiet" disabled>Disconnect</button>
+        <button id="torqueButton" class="button hold" disabled>Release torque</button>
+        <button id="stopButton" class="button stop" disabled>Emergency stop</button>
+      </section>
+
+      <section class="safety-strip" aria-label="Safety status">
+        <div>
+          <span class="label">Calibration</span>
+          <strong id="robotId">handy_bot</strong>
+        </div>
+        <div>
+          <span class="label">Control rate</span>
+          <strong>20 Hz</strong>
+        </div>
+        <div>
+          <span class="label">Joint speed cap</span>
+          <strong>45°/s</strong>
+        </div>
+        <div>
+          <span class="label">Thermal stop</span>
+          <strong>55°C</strong>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LIVE TARGETS</p>
+            <h2>Joint positions</h2>
+          </div>
+          <p id="controlHint">Connect the arm to unlock the controls.</p>
+        </div>
+        <div id="jointGrid" class="joint-grid" aria-live="polite"></div>
+      </section>
+
+      <section class="log-panel">
+        <div class="section-heading compact">
+          <div>
+            <p class="eyebrow">SESSION</p>
+            <h2>Safety log</h2>
+          </div>
+          <button id="clearLogButton" class="text-button">Clear view</button>
+        </div>
+        <div id="eventLog" class="event-log" role="log" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="alert"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
