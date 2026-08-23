@@ -21,6 +21,12 @@ DEFAULT_CALIBRATION = Path(
     )
 ).expanduser()
 DEFAULT_SERIAL_PORT = os.environ.get("SO101_SERIAL_PORT", "/dev/cu.usbmodem5B610338651")
+DEFAULT_BASE_POSITION = Path(
+    os.environ.get(
+        "SO101_BASE_POSITION_FILE",
+        f"~/.cache/huggingface/lerobot/base_positions/robots/so_follower/{DEFAULT_CALIBRATION.stem}.json",
+    )
+).expanduser()
 
 
 class ConnectRequest(BaseModel):
@@ -94,6 +100,22 @@ def create_app(controller: RobotController) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/api/base-position/capture")
+    def capture_base_position() -> dict:
+        try:
+            return controller.capture_base_position()
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/base-position/return")
+    def return_to_base() -> dict:
+        try:
+            return controller.return_to_base()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/api/emergency-stop")
     def emergency_stop() -> dict:
         try:
@@ -111,7 +133,11 @@ def create_app(controller: RobotController) -> FastAPI:
     return app
 
 
-default_controller = RobotController(DEFAULT_CALIBRATION, DEFAULT_SERIAL_PORT)
+default_controller = RobotController(
+    DEFAULT_CALIBRATION,
+    DEFAULT_SERIAL_PORT,
+    base_position_file=DEFAULT_BASE_POSITION,
+)
 app = create_app(default_controller)
 
 
@@ -119,10 +145,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local SO-101 joint-control dashboard")
     parser.add_argument("--serial-port", default=DEFAULT_SERIAL_PORT)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION)
+    parser.add_argument("--base-position", type=Path, default=DEFAULT_BASE_POSITION)
     parser.add_argument("--web-port", type=int, default=8000)
     args = parser.parse_args()
 
-    controller = RobotController(args.calibration, args.serial_port)
+    controller = RobotController(
+        args.calibration,
+        args.serial_port,
+        base_position_file=args.base_position,
+    )
     uvicorn.run(create_app(controller), host="127.0.0.1", port=args.web_port, log_level="info")
 
 

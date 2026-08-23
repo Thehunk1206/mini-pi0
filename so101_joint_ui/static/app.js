@@ -12,6 +12,7 @@ const state = {
   dragging: new Set(),
   sendTimers: new Map(),
   locallyClearedEvents: 0,
+  telemetryClearedThrough: 0,
   shownError: null,
 };
 
@@ -21,6 +22,10 @@ const elements = {
   disconnectButton: document.querySelector("#disconnectButton"),
   torqueButton: document.querySelector("#torqueButton"),
   stopButton: document.querySelector("#stopButton"),
+  captureBaseButton: document.querySelector("#captureBaseButton"),
+  returnBaseButton: document.querySelector("#returnBaseButton"),
+  baseStatus: document.querySelector("#baseStatus"),
+  baseHint: document.querySelector("#baseHint"),
   statusBadge: document.querySelector("#statusBadge"),
   statusText: document.querySelector("#statusText"),
   robotId: document.querySelector("#robotId"),
@@ -28,6 +33,8 @@ const elements = {
   jointGrid: document.querySelector("#jointGrid"),
   eventLog: document.querySelector("#eventLog"),
   clearLogButton: document.querySelector("#clearLogButton"),
+  telemetryLog: document.querySelector("#telemetryLog"),
+  clearTelemetryButton: document.querySelector("#clearTelemetryButton"),
   toast: document.querySelector("#toast"),
 };
 
@@ -92,6 +99,8 @@ function createJointCards(snapshot) {
         <span>Command <b data-command="${joint}">—</b></span>
         <span>Temp <b data-temp="${joint}">—</b></span>
         <span>Voltage <b data-voltage="${joint}">—</b></span>
+        <span>Current <b data-current="${joint}">—</b></span>
+        <span>Load <b data-load="${joint}">—</b></span>
       </div>
     `;
     elements.jointGrid.appendChild(card);
@@ -137,12 +146,27 @@ function render(snapshot) {
   elements.disconnectButton.disabled = !connected;
   elements.torqueButton.disabled = !connected;
   elements.stopButton.disabled = !connected;
+  elements.captureBaseButton.disabled = !connected || snapshot.returning_to_base;
+  elements.returnBaseButton.disabled =
+    !connected || !snapshot.base_position || snapshot.returning_to_base;
   elements.torqueButton.textContent = holding ? "Release torque" : "Enable hold";
+  elements.returnBaseButton.textContent = snapshot.returning_to_base
+    ? "Returning…"
+    : "Return to base position";
+
+  elements.baseStatus.textContent = snapshot.base_position ? "Captured" : "Not captured";
+  elements.baseHint.textContent = snapshot.returning_to_base
+    ? "All joints are moving to the saved pose; holding torque will remain enabled."
+    : snapshot.base_position
+      ? "Saved persistently. Return is rate-limited and keeps holding torque enabled."
+      : "Connect and place the arm in a stable parked pose before capturing.";
 
   elements.statusBadge.className = `status-badge ${holding ? "holding" : connected ? "released" : "offline"}`;
   elements.statusText.textContent = holding ? "Holding" : connected ? "Torque released" : "Offline";
-  elements.controlHint.textContent = holding
-    ? "Drag a slider; motion is rate-limited and bounded by calibration."
+  elements.controlHint.textContent = snapshot.returning_to_base
+    ? "Returning to the captured base pose. Emergency stop remains available."
+    : holding
+      ? "Drag a slider; motion is rate-limited and bounded by calibration."
     : connected
       ? "Torque is released. Enable hold to unlock sliders."
       : "Connect the arm to unlock the controls.";
@@ -155,16 +179,49 @@ function render(snapshot) {
     const command = document.querySelector(`[data-command="${joint}"]`);
     const temp = document.querySelector(`[data-temp="${joint}"]`);
     const voltage = document.querySelector(`[data-voltage="${joint}"]`);
+    const current = document.querySelector(`[data-current="${joint}"]`);
+    const load = document.querySelector(`[data-load="${joint}"]`);
     if (!slider) return;
 
-    slider.disabled = !holding;
+    slider.disabled = !holding || snapshot.returning_to_base;
     if (!state.dragging.has(joint)) slider.value = snapshot.targets[joint];
     actual.textContent = formatValue(snapshot.positions[joint], limit.unit);
     target.textContent = `Target ${formatValue(snapshot.targets[joint], limit.unit)}`;
     command.textContent = formatValue(snapshot.commanded_positions[joint], limit.unit);
     temp.textContent = snapshot.temperatures[joint] == null ? "—" : `${snapshot.temperatures[joint]}°C`;
     voltage.textContent = snapshot.voltages[joint] == null ? "—" : `${(snapshot.voltages[joint] / 10).toFixed(1)}V`;
+    current.textContent = snapshot.currents_ma?.[joint] == null
+      ? "—"
+      : `${snapshot.currents_ma[joint].toFixed(1)}mA`;
+    load.textContent = snapshot.loads_percent?.[joint] == null
+      ? "—"
+      : `${snapshot.loads_percent[joint] >= 0 ? "+" : ""}${snapshot.loads_percent[joint].toFixed(1)}%`;
   });
+
+  const telemetry = (snapshot.telemetry_log || [])
+    .filter((sample) => sample.sequence > state.telemetryClearedThrough)
+    .slice()
+    .reverse();
+  elements.telemetryLog.innerHTML = telemetry.length
+    ? telemetry
+        .map(
+          (sample) => `
+            <div class="telemetry-sample">
+              <time>${sample.time}</time>
+              <div class="telemetry-motors">
+                ${Object.keys(JOINT_LABELS)
+                  .map((joint, index) => {
+                    const current = sample.currents_ma[joint];
+                    const load = sample.loads_percent[joint];
+                    const loadText = load == null ? "—" : `${load >= 0 ? "+" : ""}${load.toFixed(1)}%`;
+                    return `<span><b>M${index + 1}</b> ${current == null ? "—" : `${current.toFixed(1)}mA`} / ${loadText}</span>`;
+                  })
+                  .join("")}
+              </div>
+            </div>`,
+        )
+        .join("")
+    : '<p class="empty-log">No motor telemetry in this view.</p>';
 
   const events = snapshot.events.slice(state.locallyClearedEvents).slice().reverse();
   elements.eventLog.innerHTML = events.length
@@ -237,6 +294,24 @@ elements.torqueButton.addEventListener("click", async () => {
   }
 });
 
+elements.captureBaseButton.addEventListener("click", async () => {
+  try {
+    render(await api("/api/base-position/capture", { method: "POST" }));
+    showToast("Captured the measured pose as the persistent base position.");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
+elements.returnBaseButton.addEventListener("click", async () => {
+  try {
+    render(await api("/api/base-position/return", { method: "POST" }));
+    showToast("Returning all joints to base; holding torque remains enabled.");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
 elements.stopButton.addEventListener("click", async () => {
   try {
     render(await api("/api/emergency-stop", { method: "POST" }));
@@ -248,6 +323,11 @@ elements.stopButton.addEventListener("click", async () => {
 
 elements.clearLogButton.addEventListener("click", () => {
   state.locallyClearedEvents = state.snapshot?.events.length || 0;
+  render(state.snapshot);
+});
+
+elements.clearTelemetryButton.addEventListener("click", () => {
+  state.telemetryClearedThrough = state.snapshot?.telemetry_log?.at(-1)?.sequence || 0;
   render(state.snapshot);
 });
 

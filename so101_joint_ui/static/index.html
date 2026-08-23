@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#111410" />
     <title>SO-101 Joint Control</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260823-base-position" />
   </head>
   <body>
     <main class="shell">
@@ -30,6 +30,16 @@
         <button id="disconnectButton" class="button quiet" disabled>Disconnect</button>
         <button id="torqueButton" class="button hold" disabled>Release torque</button>
         <button id="stopButton" class="button stop" disabled>Emergency stop</button>
+      </section>
+
+      <section class="base-panel" aria-label="Base position">
+        <div class="base-copy">
+          <span class="label">Base position</span>
+          <strong id="baseStatus">Not captured</strong>
+          <small id="baseHint">Connect and place the arm in a stable parked pose before capturing.</small>
+        </div>
+        <button id="captureBaseButton" class="button quiet" disabled>Capture base position</button>
+        <button id="returnBaseButton" class="button base" disabled>Return to base position</button>
       </section>
 
       <section class="safety-strip" aria-label="Safety status">
@@ -62,6 +72,18 @@
         <div id="jointGrid" class="joint-grid" aria-live="polite"></div>
       </section>
 
+      <section class="log-panel telemetry-panel">
+        <div class="section-heading compact">
+          <div>
+            <p class="eyebrow">LIVE MOTOR DATA</p>
+            <h2>Current and load log</h2>
+          </div>
+          <button id="clearTelemetryButton" class="text-button">Clear view</button>
+        </div>
+        <p class="log-hint">Current is electrical draw. Signed load is the servo's output effort and direction.</p>
+        <div id="telemetryLog" class="telemetry-log" role="log" aria-live="polite"></div>
+      </section>
+
       <section class="log-panel">
         <div class="section-heading compact">
           <div>
@@ -75,6 +97,6 @@
     </main>
 
     <div id="toast" class="toast" role="alert"></div>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=20260823-base-position" defer></script>
   </body>
 </html>
