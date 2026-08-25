@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a0d0c" />
+    <link rel="icon" href="data:," />
+    <title>SO-101 Phone Teleoperation</title>
+    <link rel="stylesheet" href="/static/styles.css?v=2" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">HANDY BOT · LIVE CONTROL</p>
+          <h1>SO-101 teleoperation console</h1>
+          <p class="subtitle">Runtime motion tuning and encoder-derived URDF tracking.</p>
+        </div>
+        <div class="status-stack">
+          <div id="robotStatus" class="status offline"><span></span>Offline</div>
+          <div id="phoneStatus" class="status neutral"><span></span>Phone released</div>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Live metrics">
+        <article><span>Loop</span><strong id="loopMetric">—</strong><small>target 33.3 ms</small></article>
+        <article><span>Cartesian error</span><strong id="errorMetric">—</strong><small>FK target vs actual</small></article>
+        <article><span>Minimum voltage</span><strong id="voltageMetric">—</strong><small>across six servos</small></article>
+        <article><span>Total current</span><strong id="currentMetric">—</strong><small>estimated draw</small></article>
+      </section>
+
+      <div class="main-grid">
+        <section class="panel renderer-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">URDF LIVE VIEW</p>
+              <h2 id="robotName">SO-101</h2>
+            </div>
+            <span class="hint">Drag to orbit · scroll to zoom</span>
+          </div>
+          <canvas id="robotCanvas" aria-label="Interactive SO-101 URDF visualization"></canvas>
+          <div class="legend">
+            <span><i class="actual"></i>Measured pose</span>
+            <span><i class="target"></i>Commanded pose</span>
+            <span><i class="trail"></i>End-effector trail</span>
+          </div>
+          <p class="model-note">Kinematic skeleton rendered from the checked-in URDF. The URDF contains no visual meshes.</p>
+        </section>
+
+        <section class="panel controls-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">MOTION PROFILE</p>
+              <h2>Live tuning</h2>
+            </div>
+            <span id="settingsState" class="settings-state">Applied</span>
+          </div>
+          <p class="warning">Release <strong>Hold to move</strong> before applying changes. Settings are written by the teleop loop, never by the web thread.</p>
+          <form id="settingsForm">
+            <label class="control-row">
+              <span><b>Servo acceleration</b><small>Primary response-speed control</small></span>
+              <input data-setting="servo_acceleration" type="range" min="1" max="100" step="1" />
+              <output data-output="servo_acceleration">—</output>
+            </label>
+            <label class="control-row">
+              <span><b>Joint target delta</b><small>Maximum command error from measured pose</small></span>
+              <input data-setting="max_relative_target_deg" type="range" min="1" max="10" step="0.5" />
+              <output data-output="max_relative_target_deg">—</output>
+            </label>
+            <label class="control-row">
+              <span><b>Phone translation gain</b><small>Phone displacement to robot displacement</small></span>
+              <input data-setting="phone_translation_gain" type="range" min="0.05" max="0.5" step="0.01" />
+              <output data-output="phone_translation_gain">—</output>
+            </label>
+            <label class="control-row">
+              <span><b>Cartesian step</b><small>Maximum target change per cycle</small></span>
+              <input data-setting="max_ee_step_m" type="range" min="0.005" max="0.1" step="0.005" />
+              <output data-output="max_ee_step_m">—</output>
+            </label>
+            <label class="control-row">
+              <span><b>Gripper speed</b><small>A/B button position increment</small></span>
+              <input data-setting="gripper_speed_factor" type="range" min="1" max="25" step="1" />
+              <output data-output="gripper_speed_factor">—</output>
+            </label>
+            <div class="button-row">
+              <button id="applyButton" class="button primary" type="submit">Apply profile</button>
+              <button id="baseButton" class="button base" type="button">Return to base + recalibrate</button>
+            </div>
+          </form>
+          <p id="controlMessage" class="control-message" role="alert"></p>
+        </section>
+      </div>
+
+      <section class="panel motor-panel">
+        <div class="section-heading">
+          <div><p class="eyebrow">SERVO BUS</p><h2>Joint telemetry</h2></div>
+          <span id="phaseLabel" class="hint">startup</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Joint</th><th>Actual</th><th>Command</th><th>Voltage</th><th>Current</th><th>Load</th><th>Temp</th></tr></thead>
+            <tbody id="motorRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js?v=2" defer></script>
+  </body>
+</html>

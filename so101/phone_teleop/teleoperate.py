@@ -45,7 +45,11 @@ from lerobot.teleoperators.phone.phone_processor import MapPhoneActionToRobotAct
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
+from .control_ui import ControlSettings, DesktopControlServer, RuntimeControlState
 from .flight_recorder import ElectricalTelemetrySampler, FlightRecorder
+from .safety import TranslationOnlyPhoneControl, configure_servo_acceleration
+from .urdf_model import URDFKinematicModel
+from .visualization import EndEffector3DVisualizer
 
 
 FPS = 30
@@ -61,6 +65,12 @@ MAX_FOLLOWING_ERROR = 15.0
 BASE_MOVE_TIMEOUT_S = 20.0
 BASE_JOINT_TOLERANCE_DEG = 2.0
 BASE_GRIPPER_TOLERANCE_PERCENT = 3.0
+MAX_RELATIVE_TARGET_DEG = 4.0
+PHONE_TRANSLATION_GAIN = 0.15
+MAX_EE_STEP_M = 0.03
+GRIPPER_SPEED_FACTOR = 8.0
+SERVO_ACCELERATION = 20
+DESKTOP_UI_PORT = 8001
 
 
 class TerminalKeyReader:
@@ -109,12 +119,39 @@ def bounded_step(current: float, target: float, maximum_step: float) -> float:
     return current + math.copysign(maximum_step, delta)
 
 
+def apply_control_settings(
+    settings: ControlSettings,
+    robot: SO100Follower,
+    joint_names: list[str],
+    ee_reference: EEReferenceAndDelta,
+    ee_safety: EEBoundsAndSafety,
+    gripper_processor: GripperVelocityToJoint,
+    previous: ControlSettings | None,
+) -> dict[str, int] | None:
+    """Apply a validated UI profile from the serial-owning teleop thread."""
+    acceleration_readback = None
+    if previous is None or settings.servo_acceleration != previous.servo_acceleration:
+        acceleration_readback = configure_servo_acceleration(
+            robot.bus, joint_names, settings.servo_acceleration
+        )
+
+    robot.config.max_relative_target = float(settings.max_relative_target_deg)
+    ee_reference.end_effector_step_sizes = {
+        axis: float(settings.phone_translation_gain) for axis in ("x", "y", "z")
+    }
+    ee_safety.max_ee_step_m = float(settings.max_ee_step_m)
+    gripper_processor.speed_factor = float(settings.gripper_speed_factor)
+    return acceleration_readback
+
+
 def return_to_base(
     robot: SO100Follower,
     base: dict[str, float],
     joint_names: list[str],
     recorder: FlightRecorder,
     telemetry_sampler: ElectricalTelemetrySampler,
+    visualizer: EndEffector3DVisualizer,
+    runtime_state: RuntimeControlState,
 ) -> None:
     """Move all joints together to the captured base pose with rate/error limits."""
     print("Returning to base position. Release Hold to move...")
@@ -135,22 +172,17 @@ def return_to_base(
         }
         action = {f"{joint}.pos": value for joint, value in command.items()}
         recorder.set_phase("base.send_action")
-        robot.send_action(action)
+        sent_action = robot.send_action(action)
         precise_sleep(period)
         recorder.set_phase("base.get_observation")
         observation = robot.get_observation()
         recorder.set_phase("base.read_electrical")
         electrical = telemetry_sampler.maybe_read(robot.bus)
-        recorder.record(
-            observation=observation,
-            action=action,
-            electrical=electrical,
-            event="return_to_base",
-        )
-        recorder.record_electrical_summary(telemetry_sampler)
-
         following_errors = {
-            joint: abs(command[joint] - float(observation[f"{joint}.pos"]))
+            joint: abs(
+                float(sent_action[f"{joint}.pos"])
+                - float(observation[f"{joint}.pos"])
+            )
             for joint in joint_names
         }
         worst_joint = max(following_errors, key=following_errors.get)
@@ -161,7 +193,27 @@ def return_to_base(
                 f"({following_errors[worst_joint]:.1f} error)."
             )
 
-        log_rerun_data(observation=observation, action=action)
+        cartesian, urdf_render = visualizer.log(observation, sent_action)
+        recorder.record(
+            observation=observation,
+            action=sent_action,
+            requested_action=action,
+            electrical=electrical,
+            cartesian=cartesian.to_dict(),
+            event="return_to_base",
+        )
+        recorder.record_electrical_summary(telemetry_sampler)
+        log_rerun_data(observation=observation, action=sent_action)
+        runtime_state.publish(
+            connected=True,
+            phase="return_to_base",
+            phone_enabled=False,
+            positions={joint: float(observation[f"{joint}.pos"]) for joint in joint_names},
+            commands={joint: float(sent_action[f"{joint}.pos"]) for joint in joint_names},
+            electrical=electrical,
+            cartesian=cartesian.to_dict(),
+            robot=urdf_render.to_dict(),
+        )
         reached = all(
             abs(float(observation[f"{joint}.pos"]) - base[joint])
             <= (
@@ -201,6 +253,7 @@ def main():
         id="handy_bot",
         use_degrees=True,
         num_read_retries=10,
+        max_relative_target=MAX_RELATIVE_TARGET_DEG,
     )
     teleop_config = PhoneConfig(phone_os=PhoneOS.ANDROID)
 
@@ -209,14 +262,31 @@ def main():
     joint_names = list(robot.bus.motors.keys())
     base_position = load_base_position(BASE_POSITION_PATH, joint_names)
 
+    urdf_path = Path(__file__).resolve().parent / "kinematics" / "so101_kinematics.urdf"
     # This is the calibrated SO-101 URDF already checked into this branch.
     kinematics_solver = RobotKinematics(
-        urdf_path=str(
-            Path(__file__).resolve().parent / "kinematics" / "so101_kinematics.urdf"
-        ),
+        urdf_path=str(urdf_path),
         target_frame_name="gripper_frame_link",
         joint_names=joint_names,
     )
+    urdf_model = URDFKinematicModel.from_file(urdf_path)
+    translation_only = TranslationOnlyPhoneControl()
+    ee_reference = EEReferenceAndDelta(
+        kinematics=kinematics_solver,
+        end_effector_step_sizes={
+            "x": PHONE_TRANSLATION_GAIN,
+            "y": PHONE_TRANSLATION_GAIN,
+            "z": PHONE_TRANSLATION_GAIN,
+        },
+        motor_names=joint_names,
+        use_latched_reference=True,
+    )
+    ee_safety = EEBoundsAndSafety(
+        end_effector_bounds={"min": [-1.0, -1.0, -1.0], "max": [1.0, 1.0, 1.0]},
+        max_ee_step_m=MAX_EE_STEP_M,
+        raise_on_jump=False,
+    )
+    gripper_processor = GripperVelocityToJoint(speed_factor=GRIPPER_SPEED_FACTOR)
 
     # Build pipeline to convert phone action to EE pose action to joint action.
     phone_to_robot_joints_processor = RobotProcessorPipeline[
@@ -224,17 +294,10 @@ def main():
     ](
         steps=[
             MapPhoneActionToRobotAction(platform=teleop_config.phone_os),
-            EEReferenceAndDelta(
-                kinematics=kinematics_solver,
-                end_effector_step_sizes={"x": 0.5, "y": 0.5, "z": 0.5},
-                motor_names=joint_names,
-                use_latched_reference=True,
-            ),
-            EEBoundsAndSafety(
-                end_effector_bounds={"min": [-1.0, -1.0, -1.0], "max": [1.0, 1.0, 1.0]},
-                max_ee_step_m=0.10,
-            ),
-            GripperVelocityToJoint(speed_factor=20.0),
+            translation_only,
+            ee_reference,
+            ee_safety,
+            gripper_processor,
             InverseKinematicsEEToJoints(
                 kinematics=kinematics_solver,
                 motor_names=joint_names,
@@ -247,21 +310,76 @@ def main():
 
     recorder = FlightRecorder(LOG_DIR, joint_names, fps=FPS)
     telemetry_sampler = ElectricalTelemetrySampler(joint_names, frequency_hz=5.0)
+    visualizer = EndEffector3DVisualizer(kinematics_solver, joint_names, urdf_model)
+    initial_settings = ControlSettings(
+        max_relative_target_deg=MAX_RELATIVE_TARGET_DEG,
+        phone_translation_gain=PHONE_TRANSLATION_GAIN,
+        max_ee_step_m=MAX_EE_STEP_M,
+        gripper_speed_factor=GRIPPER_SPEED_FACTOR,
+        servo_acceleration=SERVO_ACCELERATION,
+    )
+    runtime_state = RuntimeControlState(initial_settings)
+    desktop_ui = DesktopControlServer(runtime_state, port=DESKTOP_UI_PORT)
+    zero_links = urdf_model.link_positions(dict.fromkeys(joint_names, 0.0))
+    runtime_state.publish(
+        robot={
+            "name": urdf_model.robot_name,
+            "root_link": urdf_model.root_link,
+            "edges": urdf_model.edges,
+            "actual_links_m": zero_links,
+            "target_links_m": zero_links,
+        }
+    )
 
     print(f"Flight-recorder session log: {recorder.session_path}")
+    print(
+        "Safety profile: XYZ-only, "
+        f"translation gain={PHONE_TRANSLATION_GAIN}, "
+        f"EE step={MAX_EE_STEP_M:.2f}m, "
+        f"joint delta={MAX_RELATIVE_TARGET_DEG:.1f}deg, "
+        f"gripper speed={GRIPPER_SPEED_FACTOR:.1f}, "
+        f"servo acceleration={SERVO_ACCELERATION}"
+    )
+    settings_version = -1
+    applied_settings: ControlSettings | None = None
     try:
+        recorder.set_phase("desktop_ui.start")
+        desktop_ui.start()
+        print(f"Desktop control UI: {desktop_ui.url}")
         # Calibrate the phone and spawn Rerun before opening the servo bus. This
         # avoids leaving the serial connection idle during phone calibration.
         recorder.set_phase("phone.connect_and_calibrate")
         teleop_device.connect()
         recorder.set_phase("rerun.start")
         init_rerun(session_name="phone_so101_teleop")
+        visualizer.initialize()
         recorder.set_phase("robot.connect")
         robot.connect()
+        recorder.set_phase("robot.apply_control_settings")
+        initial_update = runtime_state.pending_settings(settings_version)
+        if initial_update is None:
+            raise RuntimeError("Initial control profile is unavailable")
+        settings_version, requested_settings = initial_update
+        acceleration_readback = apply_control_settings(
+            requested_settings,
+            robot,
+            joint_names,
+            ee_reference,
+            ee_safety,
+            gripper_processor,
+            applied_settings,
+        )
+        applied_settings = requested_settings
+        runtime_state.mark_settings_applied(settings_version, requested_settings)
+        print(f"Verified servo acceleration: {acceleration_readback}")
+        recorder.record(
+            event=f"control_settings_applied:{requested_settings}"
+        )
         recorder.set_phase("robot.initial_electrical")
         telemetry_sampler.maybe_read(robot.bus, force=True)
         recorder.record(electrical=telemetry_sampler.latest, event="robot_connected")
         recorder.record_electrical_summary(telemetry_sampler)
+        runtime_state.publish(connected=True, phase="ready", electrical=telemetry_sampler.latest)
 
         if not robot.is_connected or not teleop_device.is_connected:
             raise ValueError("Robot or teleop is not connected!")
@@ -274,7 +392,38 @@ def main():
             while True:
                 t0 = time.perf_counter()
 
-                if keyboard.poll() == "b":
+                pending_settings = runtime_state.pending_settings(settings_version)
+                if pending_settings is not None and not runtime_state.phone_enabled():
+                    requested_version, requested_settings = pending_settings
+                    settings_version = requested_version
+                    recorder.set_phase("teleop.apply_control_settings")
+                    try:
+                        acceleration_readback = apply_control_settings(
+                            requested_settings,
+                            robot,
+                            joint_names,
+                            ee_reference,
+                            ee_safety,
+                            gripper_processor,
+                            applied_settings,
+                        )
+                        phone_to_robot_joints_processor.reset()
+                    except Exception as exc:
+                        runtime_state.mark_settings_error(requested_version, str(exc))
+                        recorder.record(event=f"control_settings_error:{exc}")
+                    else:
+                        applied_settings = requested_settings
+                        runtime_state.mark_settings_applied(
+                            requested_version, requested_settings
+                        )
+                        recorder.record(
+                            event=f"control_settings_applied:{requested_settings}"
+                        )
+                        print(f"Applied control settings: {requested_settings}")
+                        if acceleration_readback is not None:
+                            print(f"Verified servo acceleration: {acceleration_readback}")
+
+                if keyboard.poll() == "b" or runtime_state.consume_base_return():
                     try:
                         return_to_base(
                             robot,
@@ -282,6 +431,8 @@ def main():
                             joint_names,
                             recorder,
                             telemetry_sampler,
+                            visualizer,
+                            runtime_state,
                         )
                     except TimeoutError as exc:
                         # A timeout is recoverable: keep holding the last base
@@ -290,10 +441,12 @@ def main():
                         print(f"WARNING: {exc}")
                         recorder.record(event=f"base_timeout: {exc}")
                     recorder.set_phase("base.wait_for_phone_release")
+                    runtime_state.publish(phase="base.wait_for_phone_release")
                     wait_for_phone_release(teleop_device)
                     phone_to_robot_joints_processor.reset()
                     print("Arm is holding base. Restarting phone calibration...")
                     recorder.set_phase("base.phone_recalibration")
+                    runtime_state.publish(phase="base.phone_recalibration")
                     teleop_device.calibrate()
                     print("Phone pose captured. Release Hold to move once...")
                     recorder.set_phase("base.wait_after_phone_recalibration")
@@ -316,27 +469,47 @@ def main():
 
                 # Send action to robot.
                 recorder.set_phase("teleop.send_action")
-                robot.send_action(joint_action)
+                sent_action = robot.send_action(joint_action)
 
                 # Poll electrical feedback at 5 Hz and retain the latest values
                 # in every 30 Hz control sample.
                 recorder.set_phase("teleop.read_electrical")
                 electrical = telemetry_sampler.maybe_read(robot.bus)
+                # Visualize.
+                recorder.set_phase("teleop.visualize")
+                cartesian, urdf_render = visualizer.log(robot_obs, sent_action)
+                log_rerun_data(
+                    observation={**phone_obs, **telemetry_sampler.rerun_scalars()},
+                    action=sent_action,
+                )
                 loop_ms = (time.perf_counter() - t0) * 1000.0
                 recorder.set_phase("teleop")
                 recorder.record(
                     observation=robot_obs,
-                    action=joint_action,
+                    action=sent_action,
+                    requested_action=joint_action,
                     phone_action=phone_obs,
                     electrical=electrical,
+                    cartesian=cartesian.to_dict(),
                     loop_ms=loop_ms,
                 )
                 recorder.record_electrical_summary(telemetry_sampler)
-
-                # Visualize.
-                log_rerun_data(
-                    observation={**phone_obs, **telemetry_sampler.rerun_scalars()},
-                    action=joint_action,
+                runtime_state.publish(
+                    connected=True,
+                    phase="teleop",
+                    phone_enabled=bool(phone_obs.get("phone.enabled", False)),
+                    loop_ms=loop_ms,
+                    positions={
+                        joint: float(robot_obs[f"{joint}.pos"])
+                        for joint in joint_names
+                    },
+                    commands={
+                        joint: float(sent_action[f"{joint}.pos"])
+                        for joint in joint_names
+                    },
+                    electrical=electrical,
+                    cartesian=cartesian.to_dict(),
+                    robot=urdf_render.to_dict(),
                 )
 
                 precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
@@ -345,6 +518,7 @@ def main():
         print(f"INCIDENT CAPTURED: {incident_path}")
         raise
     finally:
+        runtime_state.publish(phase="shutdown", phone_enabled=False)
         if robot.is_connected:
             recorder.set_phase("shutdown.robot_disconnect")
             try:
@@ -368,6 +542,8 @@ def main():
             except Exception as exc:
                 incident_path = recorder.capture_incident(exc, during="phone_disconnect")
                 print(f"PHONE DISCONNECT FAILURE CAPTURED: {incident_path}")
+        runtime_state.publish(connected=False, phase="stopped", phone_enabled=False)
+        desktop_ui.stop()
         recorder.close()
 
 

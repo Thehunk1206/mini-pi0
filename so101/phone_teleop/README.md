@@ -5,7 +5,8 @@ maps the calibrated phone pose to end-effector targets, solves joint commands
 through inverse kinematics, and provides:
 
 - Android WebXR over USB with ADB port forwarding
-- Rerun visualization
+- a localhost desktop console for live tuning and articulated URDF tracking
+- Rerun 3D actual/commanded robot tracking and motor telemetry
 - a terminal `B` shortcut for return-to-base and phone recalibration
 - per-motor voltage, current, load, and temperature telemetry
 - 30 Hz session logs and automatic pre-failure incident captures
@@ -17,8 +18,14 @@ through inverse kinematics, and provides:
 so101/phone_teleop/
 ├── teleoperate.py              # Phone, IK, robot control, and base return
 ├── flight_recorder.py          # Electrical telemetry and incident capture
+├── safety.py                   # XYZ-only control and servo acceleration setup
+├── control_ui.py               # Thread-safe localhost desktop console
+├── visualization.py            # Rerun robot/end-effector 3D view and trail
+├── urdf_model.py               # Lightweight URDF forward kinematics
+├── dashboard/                  # Desktop UI HTML, CSS, and JavaScript
 ├── kinematics/
 │   └── so101_kinematics.urdf   # Self-contained kinematics model
+├── tests/                      # Hardware-independent safety/logging tests
 └── README.md
 ```
 
@@ -33,25 +40,25 @@ so101/phone_teleop/
 | Base position | `~/.cache/huggingface/lerobot/base_positions/robots/so_follower/handy_bot.json` |
 | Phone | Android WebXR |
 | Control rate | 30 Hz |
+| Phone-controlled axes | XYZ translation and gripper; orientation locked |
+| Translation gain | `0.15` per axis |
+| Cartesian step limit | `0.03 m` per control cycle, rate-limited |
+| Joint target delta | `4.0°` from measured position per cycle |
+| Gripper speed factor | `8.0` |
+| STS3215 acceleration | `20`, written and verified after every connection |
+| Desktop console | `http://127.0.0.1:8001` |
 | LeRobot version | `0.6.1` |
 
-These values are currently defined directly in `teleoperate.py`; the launcher
-does not yet expose command-line configuration flags.
+These are startup defaults. The motion values can be changed for the current
+session from the desktop console after releasing **Hold to move**.
 
 ## Installation
 
-Use the repository's existing `.venv`. Install the phone and visualization
-extras if they are not already present:
+Use the repository's existing `.venv` and install the pinned phone, Rerun, and
+desktop-console dependencies:
 
 ```bash
-.venv/bin/python -m pip install 'lerobot[phone,viz]==0.6.1'
-```
-
-This branch uses `rerun-sdk 0.33.1`, which satisfies LeRobot 0.6.1's supported
-Rerun range:
-
-```bash
-.venv/bin/python -m pip install 'rerun-sdk==0.33.1'
+.venv/bin/python -m pip install -r so101/phone_teleop/requirements.txt
 ```
 
 ### Install ADB
@@ -164,7 +171,14 @@ The launcher starts the phone server before opening the servo bus. On Android:
 5. Release **Hold to move** before the robot connects.
 6. Wait for `Starting teleop loop` before commanding motion.
 
-Rerun opens automatically after phone calibration.
+The desktop console opens automatically at <http://127.0.0.1:8001>. It is
+available during phone calibration and throughout teleoperation. Rerun opens
+automatically after phone calibration. If the browser does not open, visit the
+desktop-console address manually.
+
+Phone rotation is intentionally ignored in this initial safety profile. The
+end-effector orientation measured when **Hold to move** is engaged remains the
+IK orientation reference while XYZ translation and the gripper are controlled.
 
 ## Phone controls
 
@@ -178,6 +192,43 @@ Rerun opens automatically after phone calibration.
 
 The phone's **B** button controls the gripper. It is different from pressing
 `B` in the terminal.
+
+## Desktop control console
+
+The console runs in a background web-server thread, but it never talks to the
+servo bus directly. It queues validated changes for the 30 Hz teleoperation
+thread, which remains the only owner of the serial connection.
+
+It provides:
+
+- an orbitable and zoomable articulated skeleton generated from the checked-in
+  SO-101 URDF
+- green measured joint geometry, orange commanded geometry, and a cyan
+  measured end-effector trail
+- actual/commanded joint position and live voltage, current, load, and
+  temperature for every servo
+- loop time, Cartesian tracking error, minimum bus voltage, and summed current
+- session controls for servo acceleration, joint target delta, phone
+  translation gain, Cartesian step limit, and gripper speed
+- **Return to base + recalibrate**, equivalent to terminal `B`
+
+Release **Hold to move** before pressing **Apply profile**. Applying is blocked
+while the phone clutch is held, and the button remains pending until the
+teleoperation loop has accepted the values. Settings last for the current run;
+the startup defaults are restored next time. The acceleration register is
+written to all six servos and read back whenever its value changes.
+
+If motion trails too far behind the phone, increase **Servo acceleration** in
+small increments first, for example `20 -> 25 -> 30`. If the commanded pose is
+still consistently ahead of the measured pose, increase **Joint target delta**
+gradually, for example `4° -> 5°`. Translation gain changes how far the robot
+moves for a given phone displacement; it is not the primary setting for motor
+lag. Stop increasing response settings if voltage falls, current rises sharply,
+or following error grows.
+
+The checked-in URDF is intentionally kinematics-only and contains no visual or
+collision meshes. Consequently, both desktop and Rerun views render the full
+articulated link/joint skeleton rather than a textured CAD model.
 
 ## Return to base and recalibrate
 
@@ -200,9 +251,22 @@ Before exiting, use terminal `B` to return to base. Then press `Ctrl+C`. If the
 bus has already failed, software may be unable to disable torque; switch off
 motor power before touching the arm.
 
-## Visualization and flight-recorder logs
+## 3D visualization and flight-recorder logs
 
-Rerun displays phone/action values and these per-motor signals:
+Rerun opens with a synchronized 3D robot and end-effector view:
+
+- green/orange link skeletons: measured and commanded URDF poses
+- green marker and trail: measured end-effector position from forward kinematics
+- RGB arrows: measured end-effector orientation axes
+- orange marker: commanded end-effector position after joint-delta clamping
+- red line: Cartesian difference between measured and commanded positions
+- plots: actual/target XYZ and Cartesian error in millimeters
+
+The measured 3D pose is a forward-kinematics estimate derived from the joint
+encoders. It does not measure structural flex, gripper deflection, backlash, or
+external displacement with a camera.
+
+The same Rerun session displays phone/action values and these per-motor signals:
 
 - voltage in volts
 - estimated current in milliamps
@@ -215,8 +279,10 @@ Every run writes:
 logs/phone_teleop/session_<timestamp>.jsonl
 ```
 
-The session log contains measured positions, generated joint commands, phone
-state, control-loop timing, and the latest electrical readings at 30 Hz.
+The session log contains measured positions, requested IK commands, the commands
+actually sent after LeRobot's joint-delta clamp, actual/target Cartesian
+positions, Cartesian error, phone state, control-loop timing, and the latest
+electrical readings at 30 Hz.
 Voltage and current are sampled from the servo bus at 5 Hz; load and temperature
 are sampled at 1 Hz.
 
@@ -226,9 +292,10 @@ When an exception occurs, the final approximately 20 seconds are copied into:
 logs/phone_teleop/incident_<timestamp>_<number>.json
 ```
 
-The incident includes the exact control phase, exception, traceback, commands,
-positions, phone inputs, and last valid electrical samples. A second incident
-is written when torque-disable also fails during shutdown.
+The incident includes the exact control phase, exception, traceback, requested
+and sent commands, joint and Cartesian positions, phone inputs, and last valid
+electrical samples. A second incident is written when torque-disable also fails
+during shutdown.
 
 The terminal prints the generated paths and a once-per-second summary:
 
@@ -240,20 +307,30 @@ The servo telemetry cannot measure the minimum of a sub-200 ms voltage
 transient after the bus stops responding. Use an oscilloscope or power analyzer
 for the true rail minimum.
 
-## Current safety limitation
+## Conservative motion profile
 
-The retained upstream example still maps IK output directly to joint targets.
-It currently uses:
+The phone pipeline now reduces simultaneous motor acceleration in four layers:
 
-- 0.5 m/m end-effector translation scaling in the Python pipeline
-- a 10 cm Cartesian step limit
-- no accumulating joint-command slew limiter during phone motion
-- LeRobot's default maximum servo acceleration
+1. Phone rotation is removed, leaving XYZ translation and gripper control.
+2. Translation gain is reduced from `0.5` to `0.15`, and Cartesian changes are
+   rate-limited to 3 cm rather than terminating the loop on a larger jump.
+3. LeRobot limits every joint target to 4° from its latest measured position.
+   The flight recorder stores both the requested and actually sent command.
+4. The STS3215 `Acceleration` register is reduced from LeRobot's configured
+   value of `254` to `20` after connection and read back for verification.
 
-Flight-recorder analysis identified single-frame target changes above 20°,
-following errors above 40°, and a servo-rail drop from approximately 5.2 V to
-4.5 V before all six motors stopped replying. Until trajectory limiting and
-lower acceleration are implemented:
+The desktop console permits deliberate session tuning within validated ranges.
+The startup profile remains conservative, and changes are only accepted while
+the phone clutch is released.
+
+The phone should still be used as a clutch: hold **Move**, make a small motion,
+release it, reposition the phone, and engage it again. Keep phone **Scale** at
+`0.25` or below until voltage and following behavior are validated.
+
+Previous flight-recorder analysis identified single-frame target changes above
+20°, following errors above 40°, and a servo-rail drop from approximately
+5.2 V to 4.5 V before all six motors stopped replying. The new limits reduce
+that demand, but they cannot compensate for an inadequate supply or wiring:
 
 - keep phone **Scale** at `0.25` or below
 - move slowly and avoid sudden direction reversals
@@ -264,6 +341,14 @@ lower acceleration are implemented:
 Repeated `There is no status packet` errors for all IDs indicate a bus-wide
 power or communication loss, not an individual IK failure. After such an error,
 do not assume the shutdown torque-disable command succeeded.
+
+The Waveshare Bus Servo Adapter (A) passes the input motor voltage through
+without regulation and is specified for a maximum of 5 A. Use a correctly
+rated external servo supply and keep the power path short. Do not disable the
+servo's voltage or current protection. See the
+[Waveshare adapter FAQ](https://docs.waveshare.com/Bus_Servo_Adapter_A/FAQ),
+[LeRobot phone example](https://github.com/huggingface/lerobot/blob/main/examples/phone_to_so100/teleoperate.py),
+and [SO follower configuration](https://github.com/huggingface/lerobot/blob/main/src/lerobot/robots/so_follower/config_so_follower.py).
 
 ## Troubleshooting
 
@@ -310,3 +395,14 @@ Check, in order:
 5. Whether another process attempted to use the bus.
 
 Do not solve a bus-wide power dropout by only increasing serial retry counts.
+
+## Tests
+
+The safety, recorder, desktop API, URDF, and Cartesian-calculation tests do not
+require hardware:
+
+```bash
+.venv/bin/python -m unittest discover \
+  -s so101/phone_teleop/tests \
+  -p 'test_*.py'
+```

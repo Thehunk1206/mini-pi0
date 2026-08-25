@@ -132,8 +132,10 @@ class FlightRecorder:
         *,
         observation: dict[str, Any] | None = None,
         action: dict[str, Any] | None = None,
+        requested_action: dict[str, Any] | None = None,
         phone_action: dict[str, Any] | None = None,
         electrical: dict[str, dict[str, float | int]] | None = None,
+        cartesian: dict[str, Any] | None = None,
         loop_ms: float | None = None,
         event: str | None = None,
     ) -> dict[str, Any]:
@@ -153,6 +155,12 @@ class FlightRecorder:
                 for joint in self.joint_names
                 if action is not None and f"{joint}.pos" in action
             },
+            "requested_commands": {
+                joint: float(requested_action[f"{joint}.pos"])
+                for joint in self.joint_names
+                if requested_action is not None and f"{joint}.pos" in requested_action
+            },
+            "cartesian": _json_value(cartesian or {}),
             "phone": _json_value(phone_action or {}),
             "electrical": _json_value(electrical or {}),
         }
