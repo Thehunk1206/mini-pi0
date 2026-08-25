@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0a0d0c" />
     <link rel="icon" href="data:," />
     <title>SO-101 Phone Teleoperation</title>
-    <link rel="stylesheet" href="/static/styles.css?v=2" />
+    <link rel="stylesheet" href="/static/styles.css?v=3" />
   </head>
   <body>
     <main class="shell">
@@ -14,7 +14,7 @@
         <div>
           <p class="eyebrow">HANDY BOT · LIVE CONTROL</p>
           <h1>SO-101 teleoperation console</h1>
-          <p class="subtitle">Runtime motion tuning and encoder-derived URDF tracking.</p>
+          <p class="subtitle">Restored LeRobot mapping with encoder-derived URDF tracking.</p>
         </div>
         <div class="status-stack">
           <div id="robotStatus" class="status offline"><span></span>Offline</div>
@@ -50,43 +50,23 @@
         <section class="panel controls-panel">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">MOTION PROFILE</p>
-              <h2>Live tuning</h2>
+              <p class="eyebrow">CONTROL MAPPING</p>
+              <h2>LeRobot example</h2>
             </div>
-            <span id="settingsState" class="settings-state">Applied</span>
+            <span class="settings-state">RESTORED</span>
           </div>
-          <p class="warning">Release <strong>Hold to move</strong> before applying changes. Settings are written by the teleop loop, never by the web thread.</p>
-          <form id="settingsForm">
-            <label class="control-row">
-              <span><b>Servo acceleration</b><small>Primary response-speed control</small></span>
-              <input data-setting="servo_acceleration" type="range" min="1" max="100" step="1" />
-              <output data-output="servo_acceleration">—</output>
-            </label>
-            <label class="control-row">
-              <span><b>Joint target delta</b><small>Maximum command error from measured pose</small></span>
-              <input data-setting="max_relative_target_deg" type="range" min="1" max="10" step="0.5" />
-              <output data-output="max_relative_target_deg">—</output>
-            </label>
-            <label class="control-row">
-              <span><b>Phone translation gain</b><small>Phone displacement to robot displacement</small></span>
-              <input data-setting="phone_translation_gain" type="range" min="0.05" max="0.5" step="0.01" />
-              <output data-output="phone_translation_gain">—</output>
-            </label>
-            <label class="control-row">
-              <span><b>Cartesian step</b><small>Maximum target change per cycle</small></span>
-              <input data-setting="max_ee_step_m" type="range" min="0.005" max="0.1" step="0.005" />
-              <output data-output="max_ee_step_m">—</output>
-            </label>
-            <label class="control-row">
-              <span><b>Gripper speed</b><small>A/B button position increment</small></span>
-              <input data-setting="gripper_speed_factor" type="range" min="1" max="25" step="1" />
-              <output data-output="gripper_speed_factor">—</output>
-            </label>
-            <div class="button-row">
-              <button id="applyButton" class="button primary" type="submit">Apply profile</button>
-              <button id="baseButton" class="button base" type="button">Return to base + recalibrate</button>
-            </div>
-          </form>
+          <p class="mapping-note">Phone pose is passed through LeRobot's original six-DoF processor pipeline. The dashboard observes this path but cannot modify or reset its reference.</p>
+          <dl class="mapping-grid">
+            <div><dt>Controlled pose</dt><dd>XYZ + roll, pitch, yaw</dd></div>
+            <div><dt>Translation gain</dt><dd>0.50</dd></div>
+            <div><dt>Cartesian step</dt><dd>0.10 m</dd></div>
+            <div><dt>Gripper speed</dt><dd>20</dd></div>
+            <div><dt>Joint clamp</dt><dd>LeRobot default (off)</dd></div>
+            <div><dt>Servo acceleration</dt><dd>LeRobot default (254)</dd></div>
+          </dl>
+          <div class="button-row single">
+            <button id="baseButton" class="button base" type="button">Return to base + recalibrate</button>
+          </div>
           <p id="controlMessage" class="control-message" role="alert"></p>
         </section>
       </div>
@@ -104,6 +84,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=2" defer></script>
+    <script src="/static/app.js?v=3" defer></script>
   </body>
 </html>

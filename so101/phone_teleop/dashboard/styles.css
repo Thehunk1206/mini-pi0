@@ -45,25 +45,19 @@ h2 { font-size: 20px; }
 .model-note { margin: 4px 20px 15px; color: #6f7e75; font-size: 10px; }
 .controls-panel { padding-bottom: 15px; }
 .settings-state { color: var(--green); font-size: 11px; font-weight: 800; text-transform: uppercase; }
-.settings-state.pending { color: var(--orange); }
-.settings-state.error { color: var(--red); }
-.warning { margin: 0 20px 10px; padding: 10px 12px; border-left: 3px solid var(--orange); background: #241b0d; color: #ddc49b; font-size: 11px; line-height: 1.45; }
-.control-row { display: grid; grid-template-columns: 1.35fr 1fr 48px; align-items: center; gap: 14px; padding: 12px 20px; border-top: 1px solid #202923; }
-.control-row span { min-width: 0; }
-.control-row b, .control-row small { display: block; }
-.control-row b { font-size: 12px; }
-.control-row small { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.3; }
-input[type="range"] { width: 100%; accent-color: var(--green); }
-output { color: #fff; text-align: right; font: 700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.mapping-note { margin: 0 20px 14px; padding: 11px 13px; border-left: 3px solid var(--green); background: #10241a; color: #b9c9be; font-size: 11px; line-height: 1.5; }
+.mapping-grid { margin: 0; border-top: 1px solid #202923; }
+.mapping-grid div { display: flex; justify-content: space-between; gap: 24px; padding: 14px 20px; border-bottom: 1px solid #202923; }
+.mapping-grid dt { color: var(--muted); font-size: 11px; }
+.mapping-grid dd { margin: 0; color: #edf3ec; text-align: right; font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .button-row { display: grid; grid-template-columns: 1fr 1.25fr; gap: 10px; padding: 18px 20px 4px; }
+.button-row.single { grid-template-columns: 1fr; }
 .button { border: 1px solid var(--line); border-radius: 9px; padding: 11px 13px; color: #edf3ec; background: #1b241f; font-weight: 750; cursor: pointer; }
 .button:hover:not(:disabled) { filter: brightness(1.15); }
 .button:disabled { cursor: not-allowed; opacity: .42; }
-.button.primary { border-color: #2e9b62; background: #187342; }
 .button.base { border-color: #70521f; background: #473617; }
 .control-message { min-height: 17px; margin: 8px 20px 0; color: var(--muted); font-size: 11px; }
 .control-message.error { color: var(--red); }
-.control-message.success { color: var(--green); }
 .motor-panel { margin-top: 12px; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }

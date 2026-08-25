@@ -1,16 +1,7 @@
 const JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"];
-const SETTING_UNITS = {
-  servo_acceleration: "",
-  max_relative_target_deg: "°",
-  phone_translation_gain: "",
-  max_ee_step_m: " m",
-  gripper_speed_factor: "",
-};
 
 const ui = {
   state: null,
-  initializedSettings: false,
-  dirtySettings: false,
   trail: [],
   camera: { yaw: -0.7, pitch: 0.55, zoom: 900, target: [0, 0, 0] },
   dragging: false,
@@ -26,46 +17,15 @@ const elements = {
   currentMetric: document.querySelector("#currentMetric"),
   robotName: document.querySelector("#robotName"),
   canvas: document.querySelector("#robotCanvas"),
-  settingsForm: document.querySelector("#settingsForm"),
-  settingsState: document.querySelector("#settingsState"),
-  applyButton: document.querySelector("#applyButton"),
   baseButton: document.querySelector("#baseButton"),
   controlMessage: document.querySelector("#controlMessage"),
   phaseLabel: document.querySelector("#phaseLabel"),
   motorRows: document.querySelector("#motorRows"),
 };
 
-function formatSetting(name, value) {
-  if (name === "servo_acceleration" || name === "gripper_speed_factor") return `${Math.round(value)}${SETTING_UNITS[name]}`;
-  const digits = name === "max_ee_step_m" ? 3 : name === "max_relative_target_deg" ? 1 : 2;
-  return `${Number(value).toFixed(digits)}${SETTING_UNITS[name]}`;
-}
-
 function setStatus(element, text, className) {
   element.className = `status ${className}`;
   element.innerHTML = `<span></span>${text}`;
-}
-
-function initializeSettings(settings) {
-  Object.entries(settings).forEach(([name, value]) => {
-    const input = document.querySelector(`[data-setting="${name}"]`);
-    const output = document.querySelector(`[data-output="${name}"]`);
-    if (!input || !output) return;
-    input.value = value;
-    output.textContent = formatSetting(name, value);
-  });
-  ui.initializedSettings = true;
-  ui.dirtySettings = false;
-}
-
-function settingsPayload() {
-  const payload = {};
-  document.querySelectorAll("[data-setting]").forEach((input) => {
-    payload[input.dataset.setting] = input.dataset.setting === "servo_acceleration"
-      ? Number.parseInt(input.value, 10)
-      : Number(input.value);
-  });
-  return payload;
 }
 
 async function api(path, options = {}) {
@@ -205,19 +165,7 @@ function updateState(state) {
   setStatus(elements.phoneStatus, state.phone_enabled ? "Phone commanding" : "Phone released", state.phone_enabled ? "active" : "neutral");
   elements.robotName.textContent = state.robot?.name || "SO-101";
   elements.phaseLabel.textContent = state.phase || "unknown";
-  elements.applyButton.disabled = Boolean(state.phone_enabled || state.settings_pending);
   elements.baseButton.disabled = !state.connected || state.return_base_pending;
-  if (!ui.initializedSettings || (!ui.dirtySettings && !state.settings_pending)) initializeSettings(state.desired_settings);
-  elements.settingsState.textContent = state.settings_error ? "Error" : state.settings_pending ? "Pending" : "Applied";
-  elements.settingsState.className = `settings-state ${state.settings_error ? "error" : state.settings_pending ? "pending" : ""}`;
-  if (state.settings_error) {
-    elements.controlMessage.textContent = state.settings_error;
-    elements.controlMessage.className = "control-message error";
-  } else if (!state.settings_pending && elements.controlMessage.dataset.kind === "settings") {
-    elements.controlMessage.textContent = "Profile applied by the teleoperation loop.";
-    elements.controlMessage.className = "control-message success";
-    delete elements.controlMessage.dataset.kind;
-  }
   const actualEE = state.cartesian?.actual_position_m;
   if (Array.isArray(actualEE) && state.connected) {
     const last = ui.trail.at(-1);
@@ -230,27 +178,6 @@ function updateState(state) {
   renderTable(state);
   renderRobot(state);
 }
-
-document.querySelectorAll("[data-setting]").forEach((input) => {
-  input.addEventListener("input", () => {
-    ui.dirtySettings = true;
-    document.querySelector(`[data-output="${input.dataset.setting}"]`).textContent = formatSetting(input.dataset.setting, input.value);
-  });
-});
-
-elements.settingsForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  elements.controlMessage.textContent = "Queuing settings for the teleop loop…";
-  elements.controlMessage.className = "control-message";
-  elements.controlMessage.dataset.kind = "settings";
-  try {
-    updateState(await api("/api/settings", { method: "POST", body: JSON.stringify(settingsPayload()) }));
-    ui.dirtySettings = false;
-  } catch (error) {
-    elements.controlMessage.textContent = error.message;
-    elements.controlMessage.className = "control-message error";
-  }
-});
 
 elements.baseButton.addEventListener("click", async () => {
   elements.controlMessage.textContent = "Base return queued. Release Hold to move.";

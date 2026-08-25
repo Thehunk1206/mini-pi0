@@ -1,4 +1,4 @@
-"""Local desktop control panel for live SO-101 phone teleoperation tuning."""
+"""Local desktop telemetry and URDF panel for SO-101 phone teleoperation."""
 
 from __future__ import annotations
 
@@ -6,47 +6,20 @@ import copy
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-
-
-@dataclass(frozen=True)
-class ControlSettings:
-    max_relative_target_deg: float
-    phone_translation_gain: float
-    max_ee_step_m: float
-    gripper_speed_factor: float
-    servo_acceleration: int
-
-
-class SettingsRequest(BaseModel):
-    max_relative_target_deg: float = Field(ge=1.0, le=10.0)
-    phone_translation_gain: float = Field(ge=0.05, le=0.50)
-    max_ee_step_m: float = Field(ge=0.005, le=0.10)
-    gripper_speed_factor: float = Field(ge=1.0, le=25.0)
-    servo_acceleration: int = Field(ge=1, le=100)
-
-    def to_settings(self) -> ControlSettings:
-        return ControlSettings(**self.model_dump())
 
 
 class RuntimeControlState:
     """Thread-safe bridge between the HTTP UI and the serial control loop."""
 
-    def __init__(self, settings: ControlSettings) -> None:
+    def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._desired_settings = settings
-        self._applied_settings = settings
-        self._settings_version = 0
-        self._applied_settings_version = -1
-        self._settings_error: str | None = None
         self._return_base_requested = False
         self._live: dict[str, Any] = {
             "connected": False,
@@ -70,40 +43,8 @@ class RuntimeControlState:
         with self._lock:
             return {
                 **copy.deepcopy(self._live),
-                "desired_settings": asdict(self._desired_settings),
-                "applied_settings": asdict(self._applied_settings),
-                "settings_version": self._settings_version,
-                "applied_settings_version": self._applied_settings_version,
-                "settings_error": self._settings_error,
-                "settings_pending": self._settings_version != self._applied_settings_version,
                 "return_base_pending": self._return_base_requested,
             }
-
-    def update_settings(self, settings: ControlSettings) -> int:
-        with self._lock:
-            self._desired_settings = settings
-            self._settings_version += 1
-            self._settings_error = None
-            return self._settings_version
-
-    def pending_settings(
-        self, last_seen_version: int
-    ) -> tuple[int, ControlSettings] | None:
-        with self._lock:
-            if self._settings_version == last_seen_version:
-                return None
-            return self._settings_version, self._desired_settings
-
-    def mark_settings_applied(self, version: int, settings: ControlSettings) -> None:
-        with self._lock:
-            self._applied_settings_version = version
-            self._applied_settings = settings
-            self._settings_error = None
-
-    def mark_settings_error(self, version: int, message: str) -> None:
-        with self._lock:
-            self._applied_settings_version = version
-            self._settings_error = message
 
     def request_base_return(self) -> None:
         with self._lock:
@@ -119,11 +60,6 @@ class RuntimeControlState:
         with self._lock:
             self._live.update(copy.deepcopy(values))
 
-    def phone_enabled(self) -> bool:
-        """Return the clutch state without copying the full render payload."""
-        with self._lock:
-            return bool(self._live["phone_enabled"])
-
 
 def create_app(state: RuntimeControlState, ready_event: threading.Event) -> FastAPI:
     static_dir = Path(__file__).parent / "dashboard"
@@ -135,7 +71,7 @@ def create_app(state: RuntimeControlState, ready_event: threading.Event) -> Fast
 
     app = FastAPI(
         title="SO-101 Phone Teleoperation",
-        description="Local runtime tuning and URDF visualization",
+        description="Local runtime telemetry and URDF visualization",
         lifespan=lifespan,
     )
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -156,17 +92,6 @@ def create_app(state: RuntimeControlState, ready_event: threading.Event) -> Fast
 
     @app.get("/api/state")
     def get_state() -> dict[str, Any]:
-        return state.snapshot()
-
-    @app.post("/api/settings")
-    def update_settings(request: SettingsRequest) -> dict[str, Any]:
-        snapshot = state.snapshot()
-        if snapshot["phone_enabled"]:
-            raise HTTPException(
-                status_code=409,
-                detail="Release Hold to move before applying control settings",
-            )
-        state.update_settings(request.to_settings())
         return state.snapshot()
 
     @app.post("/api/return-to-base")

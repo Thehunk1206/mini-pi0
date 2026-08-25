@@ -5,7 +5,7 @@ maps the calibrated phone pose to end-effector targets, solves joint commands
 through inverse kinematics, and provides:
 
 - Android WebXR over USB with ADB port forwarding
-- a localhost desktop console for live tuning and articulated URDF tracking
+- a localhost desktop console for articulated URDF tracking and telemetry
 - Rerun 3D actual/commanded robot tracking and motor telemetry
 - a terminal `B` shortcut for return-to-base and phone recalibration
 - per-motor voltage, current, load, and temperature telemetry
@@ -18,7 +18,6 @@ through inverse kinematics, and provides:
 so101/phone_teleop/
 ├── teleoperate.py              # Phone, IK, robot control, and base return
 ├── flight_recorder.py          # Electrical telemetry and incident capture
-├── safety.py                   # XYZ-only control and servo acceleration setup
 ├── control_ui.py               # Thread-safe localhost desktop console
 ├── visualization.py            # Rerun robot/end-effector 3D view and trail
 ├── urdf_model.py               # Lightweight URDF forward kinematics
@@ -40,17 +39,18 @@ so101/phone_teleop/
 | Base position | `~/.cache/huggingface/lerobot/base_positions/robots/so_follower/handy_bot.json` |
 | Phone | Android WebXR |
 | Control rate | 30 Hz |
-| Phone-controlled axes | XYZ translation and gripper; orientation locked |
-| Translation gain | `0.15` per axis |
-| Cartesian step limit | `0.03 m` per control cycle, rate-limited |
-| Joint target delta | `4.0°` from measured position per cycle |
-| Gripper speed factor | `8.0` |
-| STS3215 acceleration | `20`, written and verified after every connection |
+| Phone-controlled axes | XYZ translation, roll/pitch/yaw orientation, and gripper |
+| Translation gain | `0.5` per axis |
+| Cartesian step limit | `0.10 m` per control cycle |
+| Joint target clamp | disabled, matching the LeRobot example |
+| Gripper speed factor | `20.0` |
+| STS3215 acceleration | LeRobot default (`254`) |
 | Desktop console | `http://127.0.0.1:8001` |
 | LeRobot version | `0.6.1` |
 
-These are startup defaults. The motion values can be changed for the current
-session from the desktop console after releasing **Hold to move**.
+These values reproduce the previously working LeRobot phone example. The
+desktop console deliberately cannot change the phone mapping or reset its
+reference.
 
 ## Installation
 
@@ -176,9 +176,9 @@ available during phone calibration and throughout teleoperation. Rerun opens
 automatically after phone calibration. If the browser does not open, visit the
 desktop-console address manually.
 
-Phone rotation is intentionally ignored in this initial safety profile. The
-end-effector orientation measured when **Hold to move** is engaged remains the
-IK orientation reference while XYZ translation and the gripper are controlled.
+Phone translation and rotation both control the end-effector, matching the
+LeRobot example. Releasing and re-engaging **Hold to move** captures the
+latched phone and robot references used by that processor.
 
 ## Phone controls
 
@@ -195,9 +195,9 @@ The phone's **B** button controls the gripper. It is different from pressing
 
 ## Desktop control console
 
-The console runs in a background web-server thread, but it never talks to the
-servo bus directly. It queues validated changes for the 30 Hz teleoperation
-thread, which remains the only owner of the serial connection.
+The console runs in a background web-server thread and never talks to the
+servo bus directly. The 30 Hz teleoperation thread remains the only owner of
+the serial connection and the phone processor.
 
 It provides:
 
@@ -208,23 +208,11 @@ It provides:
 - actual/commanded joint position and live voltage, current, load, and
   temperature for every servo
 - loop time, Cartesian tracking error, minimum bus voltage, and summed current
-- session controls for servo acceleration, joint target delta, phone
-  translation gain, Cartesian step limit, and gripper speed
+- a read-only summary of the restored LeRobot control mapping
 - **Return to base + recalibrate**, equivalent to terminal `B`
 
-Release **Hold to move** before pressing **Apply profile**. Applying is blocked
-while the phone clutch is held, and the button remains pending until the
-teleoperation loop has accepted the values. Settings last for the current run;
-the startup defaults are restored next time. The acceleration register is
-written to all six servos and read back whenever its value changes.
-
-If motion trails too far behind the phone, increase **Servo acceleration** in
-small increments first, for example `20 -> 25 -> 30`. If the commanded pose is
-still consistently ahead of the measured pose, increase **Joint target delta**
-gradually, for example `4° -> 5°`. Translation gain changes how far the robot
-moves for a given phone displacement; it is not the primary setting for motor
-lag. Stop increasing response settings if voltage falls, current rises sharply,
-or following error grows.
+There are no live motion sliders. This prevents the dashboard from changing or
+resetting the phone reference during a teleoperation session.
 
 The checked-in URDF is intentionally kinematics-only and contains no visual or
 collision meshes. Consequently, both desktop and Rerun views render the full
@@ -258,7 +246,7 @@ Rerun opens with a synchronized 3D robot and end-effector view:
 - green/orange link skeletons: measured and commanded URDF poses
 - green marker and trail: measured end-effector position from forward kinematics
 - RGB arrows: measured end-effector orientation axes
-- orange marker: commanded end-effector position after joint-delta clamping
+- orange marker: commanded end-effector position
 - red line: Cartesian difference between measured and commanded positions
 - plots: actual/target XYZ and Cartesian error in millimeters
 
@@ -279,10 +267,9 @@ Every run writes:
 logs/phone_teleop/session_<timestamp>.jsonl
 ```
 
-The session log contains measured positions, requested IK commands, the commands
-actually sent after LeRobot's joint-delta clamp, actual/target Cartesian
-positions, Cartesian error, phone state, control-loop timing, and the latest
-electrical readings at 30 Hz.
+The session log contains measured positions, requested IK commands, commands
+sent to the robot, actual/target Cartesian positions, Cartesian error, phone
+state, control-loop timing, and the latest electrical readings at 30 Hz.
 Voltage and current are sampled from the servo bus at 5 Hz; load and temperature
 are sampled at 1 Hz.
 
@@ -307,21 +294,19 @@ The servo telemetry cannot measure the minimum of a sub-200 ms voltage
 transient after the bus stops responding. Use an oscilloscope or power analyzer
 for the true rail minimum.
 
-## Conservative motion profile
+## LeRobot control mapping and safe use
 
-The phone pipeline now reduces simultaneous motor acceleration in four layers:
+The phone processor order and motion values match the previously working
+LeRobot example:
 
-1. Phone rotation is removed, leaving XYZ translation and gripper control.
-2. Translation gain is reduced from `0.5` to `0.15`, and Cartesian changes are
-   rate-limited to 3 cm rather than terminating the loop on a larger jump.
-3. LeRobot limits every joint target to 4° from its latest measured position.
-   The flight recorder stores both the requested and actually sent command.
-4. The STS3215 `Acceleration` register is reduced from LeRobot's configured
-   value of `254` to `20` after connection and read back for verification.
+1. `MapPhoneActionToRobotAction` maps the Android pose and buttons.
+2. `EEReferenceAndDelta` applies XYZ gain `0.5` and retains roll/pitch/yaw.
+3. `EEBoundsAndSafety` uses the example's `0.10 m` jump threshold.
+4. `GripperVelocityToJoint` uses speed factor `20`.
+5. `InverseKinematicsEEToJoints` solves all six joint commands.
 
-The desktop console permits deliberate session tuning within validated ranges.
-The startup profile remains conservative, and changes are only accepted while
-the phone clutch is released.
+No translation-only filter, live reference-changing settings, joint-target
+clamp, or custom acceleration write is inserted in this path.
 
 The phone should still be used as a clutch: hold **Move**, make a small motion,
 release it, reposition the phone, and engage it again. Keep phone **Scale** at
@@ -329,8 +314,8 @@ release it, reposition the phone, and engage it again. Keep phone **Scale** at
 
 Previous flight-recorder analysis identified single-frame target changes above
 20°, following errors above 40°, and a servo-rail drop from approximately
-5.2 V to 4.5 V before all six motors stopped replying. The new limits reduce
-that demand, but they cannot compensate for an inadequate supply or wiring:
+5.2 V to 4.5 V before all six motors stopped replying. Because the restored
+mapping is more responsive, use it cautiously and validate the power path:
 
 - keep phone **Scale** at `0.25` or below
 - move slowly and avoid sudden direction reversals
@@ -398,7 +383,7 @@ Do not solve a bus-wide power dropout by only increasing serial retry counts.
 
 ## Tests
 
-The safety, recorder, desktop API, URDF, and Cartesian-calculation tests do not
+The recorder, desktop API, URDF, and Cartesian-calculation tests do not
 require hardware:
 
 ```bash
