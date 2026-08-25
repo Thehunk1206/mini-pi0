@@ -45,11 +45,11 @@ from lerobot.teleoperators.phone.phone_processor import MapPhoneActionToRobotAct
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
-from flight_recorder import ElectricalTelemetrySampler, FlightRecorder
+from .flight_recorder import ElectricalTelemetrySampler, FlightRecorder
 
 
 FPS = 30
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = REPO_ROOT / "logs" / "phone_teleop"
 BASE_POSITION_PATH = (
     Path.home()
@@ -211,7 +211,9 @@ def main():
 
     # This is the calibrated SO-101 URDF already checked into this branch.
     kinematics_solver = RobotKinematics(
-        urdf_path=str(Path(__file__).resolve().parent / "SO101" / "so101_kinematics.urdf"),
+        urdf_path=str(
+            Path(__file__).resolve().parent / "kinematics" / "so101_kinematics.urdf"
+        ),
         target_frame_name="gripper_frame_link",
         joint_names=joint_names,
     )
@@ -253,7 +255,7 @@ def main():
         recorder.set_phase("phone.connect_and_calibrate")
         teleop_device.connect()
         recorder.set_phase("rerun.start")
-        init_rerun(session_name="phone_so100_teleop")
+        init_rerun(session_name="phone_so101_teleop")
         recorder.set_phase("robot.connect")
         robot.connect()
         recorder.set_phase("robot.initial_electrical")

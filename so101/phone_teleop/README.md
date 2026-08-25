@@ -14,10 +14,10 @@ through inverse kinematics, and provides:
 ## Project layout
 
 ```text
-phone_to_so101/
+so101/phone_teleop/
 ├── teleoperate.py              # Phone, IK, robot control, and base return
 ├── flight_recorder.py          # Electrical telemetry and incident capture
-├── SO101/
+├── kinematics/
 │   └── so101_kinematics.urdf   # Self-contained kinematics model
 └── README.md
 ```
@@ -112,7 +112,7 @@ ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 ```
 
 It commonly appears as `/dev/ttyACM0` or `/dev/ttyUSB0`. Update the `port`
-value in `phone_to_so101/teleoperate.py` before launching.
+value in `so101/phone_teleop/teleoperate.py` before launching.
 
 If opening the servo port returns `Permission denied`, add the current user to
 the serial-device group and then log out and back in:
@@ -151,7 +151,7 @@ ls -l /dev/ttyACM0
 From the repository root, run:
 
 ```bash
-.venv/bin/python phone_to_so101/teleoperate.py
+.venv/bin/python -m so101.phone_teleop.teleoperate
 ```
 
 The launcher starts the phone server before opening the servo bus. On Android:

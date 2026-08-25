@@ -59,6 +59,8 @@ Click a preview to open the MP4.
 - ReinFlow path-space PPO with scratch and checkpoint modes, macro-action GAE,
   reproducible per-episode FM evaluation noise, and resumable checkpoints.
 - Optional Dockerized Isaac Lab backend with native vector environments.
+- A calibrated local joint dashboard for the SO-101 follower, with bounded
+  controls, base-pose handling, and live motor telemetry.
 - Android phone-motion teleoperation for the calibrated SO-101 follower, with
   Rerun visualization and electrical incident capture.
 
@@ -82,28 +84,36 @@ examples/configs/
   maniskill3_tray_transformer_vit_hist2_chunk16.yaml
   maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml
 
-phone_to_so101/
-  teleoperate.py       # Android WebXR -> IK -> SO-101 control loop
-  flight_recorder.py   # voltage/current/load/temperature incident capture
-  SO101/               # self-contained kinematics URDF
+so101/
+  joint_ui/       # Local calibrated browser dashboard
+  phone_teleop/   # Android WebXR -> IK -> SO-101 control
+  deployment/     # Experimental physical-policy deployment code
 ```
 
-## SO-101 Android Phone Teleoperation
+## SO-101 Hardware Tools
 
-Android phone-motion control for the SO-101 follower is provided in
-[`phone_to_so101/`](phone_to_so101/README.md).
+All physical SO-101 utilities are organized in [`so101/`](so101/README.md):
 
-After configuring Android USB debugging and ADB forwarding, launch it from the
-repository root:
+- [`joint_ui/`](so101/joint_ui/README.md) provides bounded per-joint sliders,
+  live telemetry, base-position controls, and emergency torque release.
+- [`phone_teleop/`](so101/phone_teleop/README.md) provides Android phone-motion
+  control, Rerun visualization, base return/recalibration, and incident logs.
+- [`deployment/`](so101/deployment/README.md) contains an experimental legacy
+  policy-deployment prototype; it is not validated for calibrated SO-101 use.
+
+Quick joint-dashboard launch:
 
 ```bash
-adb reverse tcp:4443 tcp:4443
-.venv/bin/python phone_to_so101/teleoperate.py
+source .venv/bin/activate
+uv pip install -r so101/joint_ui/requirements.txt
+python -m so101.joint_ui.app \
+  --serial-port /dev/cu.usbmodem5B610338651 \
+  --calibration ~/.cache/huggingface/lerobot/calibration/robots/so_follower/handy_bot.json
 ```
 
-See the application README for dependency installation, phone controls, the
-terminal `B` base/recalibration sequence, Rerun telemetry, incident-log format,
-and the current power/motion safety limitations.
+The hardware tools share one servo serial port, so run only one controller at a
+time. See the SO-101 index and application-specific READMEs before connecting
+the arm.
 
 ## Install
 

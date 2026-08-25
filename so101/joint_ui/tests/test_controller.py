@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from so101_joint_ui.controller import (
+from so101.joint_ui.controller import (
     BODY_JOINTS,
     JOINTS,
     advance_commanded_positions,
