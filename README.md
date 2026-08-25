@@ -59,6 +59,8 @@ Click a preview to open the MP4.
 - ReinFlow path-space PPO with scratch and checkpoint modes, macro-action GAE,
   reproducible per-episode FM evaluation noise, and resumable checkpoints.
 - Optional Dockerized Isaac Lab backend with native vector environments.
+- Android phone-motion teleoperation for the calibrated SO-101 follower, with
+  Rerun visualization and electrical incident capture.
 
 ## Repository Layout
 
@@ -79,7 +81,29 @@ examples/configs/
   maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml
   maniskill3_tray_transformer_vit_hist2_chunk16.yaml
   maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml
+
+phone_to_so101/
+  teleoperate.py       # Android WebXR -> IK -> SO-101 control loop
+  flight_recorder.py   # voltage/current/load/temperature incident capture
+  SO101/               # self-contained kinematics URDF
 ```
+
+## SO-101 Android Phone Teleoperation
+
+Android phone-motion control for the SO-101 follower is provided in
+[`phone_to_so101/`](phone_to_so101/README.md).
+
+After configuring Android USB debugging and ADB forwarding, launch it from the
+repository root:
+
+```bash
+adb reverse tcp:4443 tcp:4443
+.venv/bin/python phone_to_so101/teleoperate.py
+```
+
+See the application README for dependency installation, phone controls, the
+terminal `B` base/recalibration sequence, Rerun telemetry, incident-log format,
+and the current power/motion safety limitations.
 
 ## Install
 
