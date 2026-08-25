@@ -79,7 +79,34 @@ examples/configs/
   maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml
   maniskill3_tray_transformer_vit_hist2_chunk16.yaml
   maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml
+
+so101_joint_ui/
+  app.py          # Local FastAPI dashboard and HTTP controls
+  controller.py   # Calibrated motion, telemetry, and safety loop
+  static/         # Browser interface
 ```
+
+## SO-101 Joint Control UI
+
+The local dashboard in [`so101_joint_ui/`](so101_joint_ui/README.md) provides a
+slider for each calibrated SO-101 joint, live voltage/current/load/temperature
+telemetry, persistent base-position capture and return, and explicit torque and
+emergency controls.
+
+After installing its hardware-specific requirements, start it from the
+repository root:
+
+```bash
+source .venv/bin/activate
+uv pip install -r so101_joint_ui/requirements.txt
+python -m so101_joint_ui.app \
+  --serial-port /dev/cu.usbmodem5B610338651 \
+  --calibration ~/.cache/huggingface/lerobot/calibration/robots/so_follower/handy_bot.json
+```
+
+Open <http://127.0.0.1:8000>. See the application README for Linux serial-port
+setup, the recommended operating sequence, controls, safety behavior,
+telemetry interpretation, base-position storage, and troubleshooting.
 
 ## Install
 
