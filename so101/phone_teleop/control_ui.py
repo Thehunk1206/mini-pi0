@@ -30,6 +30,12 @@ class RuntimeControlState:
             "commands": {},
             "electrical": {},
             "cartesian": {},
+            "control_mapping": {
+                "orientation_enabled": False,
+                "translation_gain": None,
+                "max_ee_step_m": None,
+                "gripper_speed_factor": None,
+            },
             "robot": {
                 "name": "SO-101",
                 "root_link": "base_link",

@@ -11,7 +11,11 @@ from lerobot.robots.so_follower.robot_kinematic_processor import (
 from lerobot.teleoperators.phone.config_phone import PhoneOS
 from lerobot.teleoperators.phone.phone_processor import MapPhoneActionToRobotAction
 
-from so101.phone_teleop.teleoperate import build_phone_processor
+from so101.phone_teleop.phone_control import DisablePhoneOrientation
+from so101.phone_teleop.teleoperate import (
+    ENABLE_PHONE_ORIENTATION,
+    build_phone_processor,
+)
 
 
 JOINTS = [
@@ -30,16 +34,43 @@ URDF_PATH = (
 class OfficialPhonePipelineTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        kinematics = RobotKinematics(
+        cls.kinematics = RobotKinematics(
             urdf_path=str(URDF_PATH),
             target_frame_name="gripper_frame_link",
             joint_names=JOINTS,
         )
-        cls.pipeline = build_phone_processor(PhoneOS.ANDROID, kinematics, JOINTS)
 
-    def test_processor_order_matches_lerobot_example(self):
+    def build(self, enable_orientation):
+        return build_phone_processor(
+            PhoneOS.ANDROID,
+            self.kinematics,
+            JOINTS,
+            enable_orientation=enable_orientation,
+        )
+
+    def test_default_mode_is_xyz_only(self):
+        self.assertFalse(ENABLE_PHONE_ORIENTATION)
+        pipeline = build_phone_processor(
+            PhoneOS.ANDROID, self.kinematics, JOINTS
+        )
+
         self.assertEqual(
-            [type(step) for step in self.pipeline.steps],
+            [type(step) for step in pipeline.steps],
+            [
+                MapPhoneActionToRobotAction,
+                DisablePhoneOrientation,
+                EEReferenceAndDelta,
+                EEBoundsAndSafety,
+                GripperVelocityToJoint,
+                InverseKinematicsEEToJoints,
+            ],
+        )
+
+    def test_orientation_switch_restores_exact_lerobot_order(self):
+        pipeline = self.build(enable_orientation=True)
+
+        self.assertEqual(
+            [type(step) for step in pipeline.steps],
             [
                 MapPhoneActionToRobotAction,
                 EEReferenceAndDelta,
@@ -50,9 +81,16 @@ class OfficialPhonePipelineTest(unittest.TestCase):
         )
 
     def test_lerobot_example_motion_values_are_preserved(self):
-        reference = self.pipeline.steps[1]
-        safety = self.pipeline.steps[2]
-        gripper = self.pipeline.steps[3]
+        pipeline = self.build(enable_orientation=False)
+        reference = next(
+            step for step in pipeline.steps if isinstance(step, EEReferenceAndDelta)
+        )
+        safety = next(
+            step for step in pipeline.steps if isinstance(step, EEBoundsAndSafety)
+        )
+        gripper = next(
+            step for step in pipeline.steps if isinstance(step, GripperVelocityToJoint)
+        )
 
         self.assertEqual(
             reference.end_effector_step_sizes,
@@ -62,6 +100,27 @@ class OfficialPhonePipelineTest(unittest.TestCase):
         self.assertEqual(safety.max_ee_step_m, 0.10)
         self.assertTrue(safety.raise_on_jump)
         self.assertEqual(gripper.speed_factor, 20.0)
+
+    def test_xyz_only_filter_preserves_translation_and_zeros_rotation(self):
+        action = {
+            "target_x": 0.1,
+            "target_y": -0.2,
+            "target_z": 0.3,
+            "target_wx": 0.4,
+            "target_wy": -0.5,
+            "target_wz": 0.6,
+        }
+
+        result = DisablePhoneOrientation().action(action)
+
+        self.assertEqual(
+            [result[key] for key in ("target_x", "target_y", "target_z")],
+            [0.1, -0.2, 0.3],
+        )
+        self.assertEqual(
+            [result[key] for key in ("target_wx", "target_wy", "target_wz")],
+            [0.0, 0.0, 0.0],
+        )
 
 
 if __name__ == "__main__":

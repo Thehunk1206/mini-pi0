@@ -47,6 +47,7 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 from .control_ui import DesktopControlServer, RuntimeControlState
 from .flight_recorder import ElectricalTelemetrySampler, FlightRecorder
+from .phone_control import DisablePhoneOrientation
 from .urdf_model import URDFKinematicModel
 from .visualization import EndEffector3DVisualizer
 
@@ -68,6 +69,8 @@ PHONE_TRANSLATION_GAIN = 0.5
 MAX_EE_STEP_M = 0.10
 GRIPPER_SPEED_FACTOR = 20.0
 DESKTOP_UI_PORT = 8001
+# Set to True to restore roll/pitch/yaw from the LeRobot phone example.
+ENABLE_PHONE_ORIENTATION = False
 
 
 class TerminalKeyReader:
@@ -120,13 +123,18 @@ def build_phone_processor(
     phone_os: PhoneOS,
     kinematics_solver: RobotKinematics,
     joint_names: list[str],
+    *,
+    enable_orientation: bool | None = None,
 ) -> RobotProcessorPipeline:
-    """Build the unmodified LeRobot phone-to-joint processor sequence."""
-    return RobotProcessorPipeline[
-        tuple[RobotAction, RobotObservation], RobotAction
-    ](
-        steps=[
-            MapPhoneActionToRobotAction(platform=phone_os),
+    """Build the LeRobot phone pipeline with an optional XYZ-only mode."""
+    if enable_orientation is None:
+        enable_orientation = ENABLE_PHONE_ORIENTATION
+
+    steps = [MapPhoneActionToRobotAction(platform=phone_os)]
+    if not enable_orientation:
+        steps.append(DisablePhoneOrientation())
+    steps.extend(
+        [
             EEReferenceAndDelta(
                 kinematics=kinematics_solver,
                 end_effector_step_sizes={
@@ -150,7 +158,12 @@ def build_phone_processor(
                 motor_names=joint_names,
                 initial_guess_current_joints=True,
             ),
-        ],
+        ]
+    )
+    return RobotProcessorPipeline[
+        tuple[RobotAction, RobotObservation], RobotAction
+    ](
+        steps=steps,
         to_transition=robot_action_observation_to_transition,
         to_output=transition_to_robot_action,
     )
@@ -284,7 +297,10 @@ def main():
 
     # Build pipeline to convert phone action to EE pose action to joint action.
     phone_to_robot_joints_processor = build_phone_processor(
-        teleop_config.phone_os, kinematics_solver, joint_names
+        teleop_config.phone_os,
+        kinematics_solver,
+        joint_names,
+        enable_orientation=ENABLE_PHONE_ORIENTATION,
     )
 
     recorder = FlightRecorder(LOG_DIR, joint_names, fps=FPS)
@@ -294,6 +310,12 @@ def main():
     desktop_ui = DesktopControlServer(runtime_state, port=DESKTOP_UI_PORT)
     zero_links = urdf_model.link_positions(dict.fromkeys(joint_names, 0.0))
     runtime_state.publish(
+        control_mapping={
+            "orientation_enabled": ENABLE_PHONE_ORIENTATION,
+            "translation_gain": PHONE_TRANSLATION_GAIN,
+            "max_ee_step_m": MAX_EE_STEP_M,
+            "gripper_speed_factor": GRIPPER_SPEED_FACTOR,
+        },
         robot={
             "name": urdf_model.robot_name,
             "root_link": urdf_model.root_link,
@@ -305,7 +327,8 @@ def main():
 
     print(f"Flight-recorder session log: {recorder.session_path}")
     print(
-        "LeRobot example mapping: XYZ plus orientation, "
+        "Phone mapping: "
+        f"{'XYZ plus orientation' if ENABLE_PHONE_ORIENTATION else 'XYZ only'}, "
         f"translation gain={PHONE_TRANSLATION_GAIN}, "
         f"EE step={MAX_EE_STEP_M:.2f}m, "
         f"gripper speed={GRIPPER_SPEED_FACTOR:.1f}, "

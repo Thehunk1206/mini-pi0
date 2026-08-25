@@ -39,7 +39,7 @@ so101/phone_teleop/
 | Base position | `~/.cache/huggingface/lerobot/base_positions/robots/so_follower/handy_bot.json` |
 | Phone | Android WebXR |
 | Control rate | 30 Hz |
-| Phone-controlled axes | XYZ translation, roll/pitch/yaw orientation, and gripper |
+| Phone-controlled axes | XYZ translation and gripper; roll/pitch/yaw disabled by the global switch |
 | Translation gain | `0.5` per axis |
 | Cartesian step limit | `0.10 m` per control cycle |
 | Joint target clamp | disabled, matching the LeRobot example |
@@ -48,9 +48,11 @@ so101/phone_teleop/
 | Desktop console | `http://127.0.0.1:8001` |
 | LeRobot version | `0.6.1` |
 
-These values reproduce the previously working LeRobot phone example. The
-desktop console deliberately cannot change the phone mapping or reset its
-reference.
+The motion values reproduce the previously working LeRobot phone example. The
+single global `ENABLE_PHONE_ORIENTATION` near the top of `teleoperate.py`
+selects the orientation behavior. It defaults to `False` for XYZ-only control;
+set it to `True` to restore roll, pitch, and yaw. The desktop console cannot
+change the mapping or reset its reference.
 
 ## Installation
 
@@ -176,9 +178,14 @@ available during phone calibration and throughout teleoperation. Rerun opens
 automatically after phone calibration. If the browser does not open, visit the
 desktop-console address manually.
 
-Phone translation and rotation both control the end-effector, matching the
-LeRobot example. Releasing and re-engaging **Hold to move** captures the
-latched phone and robot references used by that processor.
+Phone translation controls the end-effector while roll, pitch, and yaw deltas
+are zeroed. The end-effector keeps the orientation captured when **Hold to
+move** establishes the latched phone and robot references. To enable rotation,
+change this global before starting the process:
+
+```python
+ENABLE_PHONE_ORIENTATION = True
+```
 
 ## Phone controls
 
@@ -208,7 +215,7 @@ It provides:
 - actual/commanded joint position and live voltage, current, load, and
   temperature for every servo
 - loop time, Cartesian tracking error, minimum bus voltage, and summed current
-- a read-only summary of the restored LeRobot control mapping
+- a read-only summary of the active XYZ-only or six-DoF control mapping
 - **Return to base + recalibrate**, equivalent to terminal `B`
 
 There are no live motion sliders. This prevents the dashboard from changing or
@@ -300,13 +307,16 @@ The phone processor order and motion values match the previously working
 LeRobot example:
 
 1. `MapPhoneActionToRobotAction` maps the Android pose and buttons.
-2. `EEReferenceAndDelta` applies XYZ gain `0.5` and retains roll/pitch/yaw.
-3. `EEBoundsAndSafety` uses the example's `0.10 m` jump threshold.
-4. `GripperVelocityToJoint` uses speed factor `20`.
-5. `InverseKinematicsEEToJoints` solves all six joint commands.
+2. When `ENABLE_PHONE_ORIENTATION` is `False`, one stateless filter zeros only
+   `target_wx`, `target_wy`, and `target_wz`.
+3. `EEReferenceAndDelta` applies the example's XYZ gain `0.5`.
+4. `EEBoundsAndSafety` uses the example's `0.10 m` jump threshold.
+5. `GripperVelocityToJoint` uses speed factor `20`.
+6. `InverseKinematicsEEToJoints` solves the joint commands.
 
-No translation-only filter, live reference-changing settings, joint-target
-clamp, or custom acceleration write is inserted in this path.
+No live reference-changing settings, joint-target clamp, or custom
+acceleration write is inserted in this path. Setting the global to `True`
+omits the orientation filter and restores the exact LeRobot processor order.
 
 The phone should still be used as a clutch: hold **Move**, make a small motion,
 release it, reposition the phone, and engage it again. Keep phone **Scale** at

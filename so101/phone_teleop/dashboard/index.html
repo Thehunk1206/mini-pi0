@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0a0d0c" />
     <link rel="icon" href="data:," />
     <title>SO-101 Phone Teleoperation</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3" />
+    <link rel="stylesheet" href="/static/styles.css?v=4" />
   </head>
   <body>
     <main class="shell">
@@ -14,7 +14,7 @@
         <div>
           <p class="eyebrow">HANDY BOT · LIVE CONTROL</p>
           <h1>SO-101 teleoperation console</h1>
-          <p class="subtitle">Restored LeRobot mapping with encoder-derived URDF tracking.</p>
+          <p class="subtitle">Configurable phone orientation with encoder-derived URDF tracking.</p>
         </div>
         <div class="status-stack">
           <div id="robotStatus" class="status offline"><span></span>Offline</div>
@@ -51,16 +51,16 @@
           <div class="section-heading">
             <div>
               <p class="eyebrow">CONTROL MAPPING</p>
-              <h2>LeRobot example</h2>
+              <h2>LeRobot-based mapping</h2>
             </div>
-            <span class="settings-state">RESTORED</span>
+            <span id="orientationMode" class="settings-state">XYZ ONLY</span>
           </div>
-          <p class="mapping-note">Phone pose is passed through LeRobot's original six-DoF processor pipeline. The dashboard observes this path but cannot modify or reset its reference.</p>
+          <p id="mappingNote" class="mapping-note">The active control mode is loaded from the teleoperation process.</p>
           <dl class="mapping-grid">
-            <div><dt>Controlled pose</dt><dd>XYZ + roll, pitch, yaw</dd></div>
-            <div><dt>Translation gain</dt><dd>0.50</dd></div>
-            <div><dt>Cartesian step</dt><dd>0.10 m</dd></div>
-            <div><dt>Gripper speed</dt><dd>20</dd></div>
+            <div><dt>Controlled pose</dt><dd id="controlledPose">—</dd></div>
+            <div><dt>Translation gain</dt><dd id="translationGain">—</dd></div>
+            <div><dt>Cartesian step</dt><dd id="cartesianStep">—</dd></div>
+            <div><dt>Gripper speed</dt><dd id="gripperSpeed">—</dd></div>
             <div><dt>Joint clamp</dt><dd>LeRobot default (off)</dd></div>
             <div><dt>Servo acceleration</dt><dd>LeRobot default (254)</dd></div>
           </dl>
@@ -84,6 +84,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=3" defer></script>
+    <script src="/static/app.js?v=4" defer></script>
   </body>
 </html>

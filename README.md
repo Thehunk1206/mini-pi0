@@ -155,12 +155,13 @@ adb reverse tcp:4443 tcp:4443
 .venv/bin/python -m so101.phone_teleop.teleoperate
 ```
 
-Open `https://127.0.0.1:4443` in Android Chrome. The processor uses the restored
-LeRobot example mapping: XYZ plus roll/pitch/yaw control, translation gain
-`0.5`, Cartesian threshold `0.10 m`, gripper speed `20`, no joint-target clamp,
-and LeRobot's default servo acceleration. **Hold to move** acts as a clutch,
-**Scale** adjusts motion magnitude, and the phone A/B buttons operate the
-gripper. Press `B` in the launching terminal to return all joints to the
+Open `https://127.0.0.1:4443` in Android Chrome. The processor retains the
+LeRobot example's translation gain `0.5`, Cartesian threshold `0.10 m`,
+gripper speed `20`, unclamped joint targets, and default servo acceleration.
+`ENABLE_PHONE_ORIENTATION = False` selects XYZ-only control by default; change
+that global to `True` to restore roll/pitch/yaw. **Hold to move** acts as a
+clutch, **Scale** adjusts motion magnitude, and the phone A/B buttons operate
+the gripper. Press `B` in the launching terminal to return all joints to the
 captured base pose and restart phone calibration.
 
 The launcher opens a desktop console at <http://127.0.0.1:8001> with an

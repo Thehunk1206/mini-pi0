@@ -18,6 +18,7 @@ class DesktopControlAPITest(unittest.TestCase):
         payload = response.json()
         self.assertFalse(payload["connected"])
         self.assertFalse(payload["phone_enabled"])
+        self.assertFalse(payload["control_mapping"]["orientation_enabled"])
         self.assertEqual(payload["phase"], "startup")
 
     def test_dashboard_assets_are_served(self):

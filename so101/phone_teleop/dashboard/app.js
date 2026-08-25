@@ -16,6 +16,12 @@ const elements = {
   voltageMetric: document.querySelector("#voltageMetric"),
   currentMetric: document.querySelector("#currentMetric"),
   robotName: document.querySelector("#robotName"),
+  orientationMode: document.querySelector("#orientationMode"),
+  mappingNote: document.querySelector("#mappingNote"),
+  controlledPose: document.querySelector("#controlledPose"),
+  translationGain: document.querySelector("#translationGain"),
+  cartesianStep: document.querySelector("#cartesianStep"),
+  gripperSpeed: document.querySelector("#gripperSpeed"),
   canvas: document.querySelector("#robotCanvas"),
   baseButton: document.querySelector("#baseButton"),
   controlMessage: document.querySelector("#controlMessage"),
@@ -161,9 +167,19 @@ function renderRobot(state) {
 
 function updateState(state) {
   ui.state = state;
+  const mapping = state.control_mapping || {};
+  const orientationEnabled = Boolean(mapping.orientation_enabled);
   setStatus(elements.robotStatus, state.connected ? "Robot connected" : "Offline", state.connected ? "online" : "offline");
   setStatus(elements.phoneStatus, state.phone_enabled ? "Phone commanding" : "Phone released", state.phone_enabled ? "active" : "neutral");
   elements.robotName.textContent = state.robot?.name || "SO-101";
+  elements.orientationMode.textContent = orientationEnabled ? "6-DOF" : "XYZ ONLY";
+  elements.controlledPose.textContent = orientationEnabled ? "XYZ + roll, pitch, yaw" : "XYZ (orientation locked)";
+  elements.mappingNote.textContent = orientationEnabled
+    ? "Phone translation and rotation are active. Set ENABLE_PHONE_ORIENTATION to False for XYZ-only control."
+    : "Phone roll, pitch, and yaw are ignored. Set ENABLE_PHONE_ORIENTATION to True to restore six-DoF control.";
+  elements.translationGain.textContent = mapping.translation_gain == null ? "—" : Number(mapping.translation_gain).toFixed(2);
+  elements.cartesianStep.textContent = mapping.max_ee_step_m == null ? "—" : `${Number(mapping.max_ee_step_m).toFixed(2)} m`;
+  elements.gripperSpeed.textContent = mapping.gripper_speed_factor == null ? "—" : Number(mapping.gripper_speed_factor).toFixed(0);
   elements.phaseLabel.textContent = state.phase || "unknown";
   elements.baseButton.disabled = !state.connected || state.return_base_pending;
   const actualEE = state.cartesian?.actual_position_m;
