@@ -1,3 +1,10 @@
+"""Experimental legacy SO-100 deployment prototype.
+
+This module bypasses LeRobot calibration and is not validated for SO-101
+hardware. Prefer the calibrated tools in ``so101.joint_ui`` and
+``so101.phone_teleop`` for physical-arm control.
+"""
+
 import time
 from collections import deque
 

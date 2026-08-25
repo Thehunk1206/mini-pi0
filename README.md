@@ -59,6 +59,10 @@ Click a preview to open the MP4.
 - ReinFlow path-space PPO with scratch and checkpoint modes, macro-action GAE,
   reproducible per-episode FM evaluation noise, and resumable checkpoints.
 - Optional Dockerized Isaac Lab backend with native vector environments.
+- A calibrated local joint dashboard for the SO-101 follower, with bounded
+  controls, base-pose handling, and live motor telemetry.
+- Android phone-motion teleoperation for the calibrated SO-101 follower, with
+  Rerun visualization and electrical incident capture.
 
 ## Repository Layout
 
@@ -79,7 +83,37 @@ examples/configs/
   maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml
   maniskill3_tray_transformer_vit_hist2_chunk16.yaml
   maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml
+
+so101/
+  joint_ui/       # Local calibrated browser dashboard
+  phone_teleop/   # Android WebXR -> IK -> SO-101 control
+  deployment/     # Experimental physical-policy deployment code
 ```
+
+## SO-101 Hardware Tools
+
+All physical SO-101 utilities are organized in [`so101/`](so101/README.md):
+
+- [`joint_ui/`](so101/joint_ui/README.md) provides bounded per-joint sliders,
+  live telemetry, base-position controls, and emergency torque release.
+- [`phone_teleop/`](so101/phone_teleop/README.md) provides Android phone-motion
+  control, Rerun visualization, base return/recalibration, and incident logs.
+- [`deployment/`](so101/deployment/README.md) contains an experimental legacy
+  policy-deployment prototype; it is not validated for calibrated SO-101 use.
+
+Quick joint-dashboard launch:
+
+```bash
+source .venv/bin/activate
+uv pip install -r so101/joint_ui/requirements.txt
+python -m so101.joint_ui.app \
+  --serial-port /dev/cu.usbmodem5B610338651 \
+  --calibration ~/.cache/huggingface/lerobot/calibration/robots/so_follower/handy_bot.json
+```
+
+The hardware tools share one servo serial port, so run only one controller at a
+time. See the SO-101 index and application-specific READMEs before connecting
+the arm.
 
 ## Install
 

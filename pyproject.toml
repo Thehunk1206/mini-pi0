@@ -34,4 +34,8 @@ dev = ["pytest"]
 mini-pi0 = "mini_pi0.cli.main:main"
 
 [tool.setuptools.packages.find]
-include = ["mini_pi0*"]
+include = ["mini_pi0*", "so101*"]
+
+[tool.setuptools.package-data]
+"so101.joint_ui" = ["static/*"]
+"so101.phone_teleop" = ["kinematics/*.urdf"]
