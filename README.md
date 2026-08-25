@@ -101,19 +101,80 @@ All physical SO-101 utilities are organized in [`so101/`](so101/README.md):
 - [`deployment/`](so101/deployment/README.md) contains an experimental legacy
   policy-deployment prototype; it is not validated for calibrated SO-101 use.
 
-Quick joint-dashboard launch:
+### Shared setup
+
+The calibrated tools expect the six-joint `handy_bot` follower calibration and
+the captured base pose at:
+
+```text
+~/.cache/huggingface/lerobot/calibration/robots/so_follower/handy_bot.json
+~/.cache/huggingface/lerobot/base_positions/robots/so_follower/handy_bot.json
+```
+
+Connect and externally power the Waveshare servo bus, then find its serial
+port:
+
+```bash
+lerobot-find-port
+```
+
+Typical devices are `/dev/cu.usbmodem...` on macOS and `/dev/ttyACM0` or
+`/dev/ttyUSB0` on Linux. The calibration must contain all six joints with motor
+IDs 1 through 6. Run only one application that owns the servo port at a time.
+
+### Joint dashboard
+
+Install and start the localhost-only dashboard:
 
 ```bash
 source .venv/bin/activate
 uv pip install -r so101/joint_ui/requirements.txt
+export SO101_SERIAL_PORT=/dev/cu.usbmodem5B610338651
 python -m so101.joint_ui.app \
-  --serial-port /dev/cu.usbmodem5B610338651 \
+  --serial-port "$SO101_SERIAL_PORT" \
   --calibration ~/.cache/huggingface/lerobot/calibration/robots/so_follower/handy_bot.json
 ```
 
-The hardware tools share one servo serial port, so run only one controller at a
-time. See the SO-101 index and application-specific READMEs before connecting
-the arm.
+Open <http://127.0.0.1:8000>. The UI provides calibrated sliders for all six
+joints, measured/target/commanded positions, voltage/current/load/temperature
+telemetry, torque release and hold, persistent base-pose capture and return,
+and an emergency stop available through the UI or `Escape` key. See the
+[joint-UI guide](so101/joint_ui/README.md) for Linux permissions, safety limits,
+control behavior, and troubleshooting.
+
+### Android phone teleoperation
+
+Phone control requires the LeRobot phone and visualization extras plus Android
+Platform Tools. After enabling Android USB debugging and authorizing the host:
+
+```bash
+.venv/bin/python -m pip install 'lerobot[phone,viz]==0.6.1'
+adb reverse tcp:4443 tcp:4443
+.venv/bin/python -m so101.phone_teleop.teleoperate
+```
+
+Open `https://127.0.0.1:4443` in Android Chrome. **Hold to move** enables
+phone-pose control, **Scale** adjusts motion magnitude, and the phone A/B
+buttons operate the gripper. Press `B` in the launching terminal to return all
+joints to the captured base pose and restart phone calibration.
+
+Rerun visualization opens automatically. Teleoperation sessions and automatic
+incident captures are written under `logs/phone_teleop/`, including joint
+commands, measured positions, phone inputs, loop timing, voltage, current,
+load, and temperature. See the [phone-teleoperation guide](so101/phone_teleop/README.md)
+for ADB installation on macOS and Linux, phone controls, electrical diagnostics,
+and current motion limitations.
+
+### Hardware safety
+
+- Support the arm before releasing torque and keep the hardware power switch
+  reachable.
+- Return to base is controlled robot motion; it is not an emergency stop.
+- A whole-bus `There is no status packet` error can indicate lost servo power
+  or communication. Torque-disable may also fail after that loss.
+- The code in `so101/deployment/` uses raw register access and placeholder
+  action mapping. Do not run it on the SO-101 without a calibration-aware
+  hardware review.
 
 ## Install
 
