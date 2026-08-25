@@ -40,6 +40,7 @@ so101/phone_teleop/
 | Phone | Android WebXR |
 | Control rate | 30 Hz |
 | Phone-controlled axes | XYZ translation and gripper; roll/pitch/yaw disabled by the global switch |
+| Translation axis map | robot X ← mapped phone Y, robot Y ← mapped phone X, Z unchanged |
 | Translation gain | `0.5` per axis |
 | Cartesian step limit | `0.10 m` per control cycle |
 | Joint target clamp | disabled, matching the LeRobot example |
@@ -53,6 +54,19 @@ single global `ENABLE_PHONE_ORIENTATION` near the top of `teleoperate.py`
 selects the orientation behavior. It defaults to `False` for XYZ-only control;
 set it to `True` to restore roll, pitch, and yaw. The desktop console cannot
 change the mapping or reset its reference.
+
+Two additional globals define the translation frame without embedding it in
+the processor implementation:
+
+```python
+PHONE_TRANSLATION_AXIS_MAP = {"x": "y", "y": "x", "z": "z"}
+PHONE_TRANSLATION_AXIS_SIGNS = {"x": 1.0, "y": 1.0, "z": 1.0}
+```
+
+The map fixes the observed lateral/forward exchange while preserving vertical
+motion. Each map key is a robot output axis and its value is the
+LeRobot-mapped phone input axis. If an axis is correct but moves in the opposite
+direction, change only that output's sign from `1.0` to `-1.0`.
 
 ## Installation
 
@@ -307,16 +321,20 @@ The phone processor order and motion values match the previously working
 LeRobot example:
 
 1. `MapPhoneActionToRobotAction` maps the Android pose and buttons.
-2. When `ENABLE_PHONE_ORIENTATION` is `False`, one stateless filter zeros only
+2. `RemapPhoneTranslation` applies `PHONE_TRANSLATION_AXIS_MAP` and
+   `PHONE_TRANSLATION_AXIS_SIGNS`; the current configuration swaps X/Y and
+   preserves Z.
+3. When `ENABLE_PHONE_ORIENTATION` is `False`, one stateless filter zeros only
    `target_wx`, `target_wy`, and `target_wz`.
-3. `EEReferenceAndDelta` applies the example's XYZ gain `0.5`.
-4. `EEBoundsAndSafety` uses the example's `0.10 m` jump threshold.
-5. `GripperVelocityToJoint` uses speed factor `20`.
-6. `InverseKinematicsEEToJoints` solves the joint commands.
+4. `EEReferenceAndDelta` applies the example's XYZ gain `0.5`.
+5. `EEBoundsAndSafety` uses the example's `0.10 m` jump threshold.
+6. `GripperVelocityToJoint` uses speed factor `20`.
+7. `InverseKinematicsEEToJoints` solves the joint commands.
 
 No live reference-changing settings, joint-target clamp, or custom
-acceleration write is inserted in this path. Setting the global to `True`
-omits the orientation filter and restores the exact LeRobot processor order.
+acceleration write is inserted in this path. Setting the orientation global to
+`True` omits only the orientation filter; the configured robot-frame axis map
+remains active.
 
 The phone should still be used as a clutch: hold **Move**, make a small motion,
 release it, reposition the phone, and engage it again. Keep phone **Scale** at

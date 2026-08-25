@@ -159,7 +159,8 @@ Open `https://127.0.0.1:4443` in Android Chrome. The processor retains the
 LeRobot example's translation gain `0.5`, Cartesian threshold `0.10 m`,
 gripper speed `20`, unclamped joint targets, and default servo acceleration.
 `ENABLE_PHONE_ORIENTATION = False` selects XYZ-only control by default; change
-that global to `True` to restore roll/pitch/yaw. **Hold to move** acts as a
+that global to `True` to restore roll/pitch/yaw. The configurable translation
+map swaps X/Y for this robot frame and preserves Z. **Hold to move** acts as a
 clutch, **Scale** adjusts motion magnitude, and the phone A/B buttons operate
 the gripper. Press `B` in the launching terminal to return all joints to the
 captured base pose and restart phone calibration.

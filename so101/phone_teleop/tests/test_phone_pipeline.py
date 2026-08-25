@@ -11,9 +11,14 @@ from lerobot.robots.so_follower.robot_kinematic_processor import (
 from lerobot.teleoperators.phone.config_phone import PhoneOS
 from lerobot.teleoperators.phone.phone_processor import MapPhoneActionToRobotAction
 
-from so101.phone_teleop.phone_control import DisablePhoneOrientation
+from so101.phone_teleop.phone_control import (
+    DisablePhoneOrientation,
+    RemapPhoneTranslation,
+)
 from so101.phone_teleop.teleoperate import (
     ENABLE_PHONE_ORIENTATION,
+    PHONE_TRANSLATION_AXIS_MAP,
+    PHONE_TRANSLATION_AXIS_SIGNS,
     build_phone_processor,
 )
 
@@ -58,6 +63,7 @@ class OfficialPhonePipelineTest(unittest.TestCase):
             [type(step) for step in pipeline.steps],
             [
                 MapPhoneActionToRobotAction,
+                RemapPhoneTranslation,
                 DisablePhoneOrientation,
                 EEReferenceAndDelta,
                 EEBoundsAndSafety,
@@ -66,13 +72,14 @@ class OfficialPhonePipelineTest(unittest.TestCase):
             ],
         )
 
-    def test_orientation_switch_restores_exact_lerobot_order(self):
+    def test_orientation_switch_omits_only_orientation_filter(self):
         pipeline = self.build(enable_orientation=True)
 
         self.assertEqual(
             [type(step) for step in pipeline.steps],
             [
                 MapPhoneActionToRobotAction,
+                RemapPhoneTranslation,
                 EEReferenceAndDelta,
                 EEBoundsAndSafety,
                 GripperVelocityToJoint,
@@ -100,6 +107,46 @@ class OfficialPhonePipelineTest(unittest.TestCase):
         self.assertEqual(safety.max_ee_step_m, 0.10)
         self.assertTrue(safety.raise_on_jump)
         self.assertEqual(gripper.speed_factor, 20.0)
+
+    def test_global_translation_map_swaps_xy_and_preserves_z(self):
+        self.assertEqual(
+            PHONE_TRANSLATION_AXIS_MAP,
+            {"x": "y", "y": "x", "z": "z"},
+        )
+        self.assertEqual(
+            PHONE_TRANSLATION_AXIS_SIGNS,
+            {"x": 1.0, "y": 1.0, "z": 1.0},
+        )
+        action = {
+            "target_x": 1.0,
+            "target_y": 2.0,
+            "target_z": 3.0,
+        }
+
+        result = RemapPhoneTranslation(
+            PHONE_TRANSLATION_AXIS_MAP, PHONE_TRANSLATION_AXIS_SIGNS
+        ).action(action)
+
+        self.assertEqual(
+            [result[key] for key in ("target_x", "target_y", "target_z")],
+            [2.0, 1.0, 3.0],
+        )
+
+    def test_translation_signs_can_reverse_individual_robot_axes(self):
+        action = {
+            "target_x": 1.0,
+            "target_y": 2.0,
+            "target_z": 3.0,
+        }
+
+        result = RemapPhoneTranslation(
+            {"x": "y", "y": "x", "z": "z"},
+            {"x": -1.0, "y": 1.0, "z": 1.0},
+        ).action(action)
+
+        self.assertEqual(result["target_x"], -2.0)
+        self.assertEqual(result["target_y"], 1.0)
+        self.assertEqual(result["target_z"], 3.0)
 
     def test_xyz_only_filter_preserves_translation_and_zeros_rotation(self):
         action = {

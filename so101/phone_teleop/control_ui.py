@@ -35,6 +35,8 @@ class RuntimeControlState:
                 "translation_gain": None,
                 "max_ee_step_m": None,
                 "gripper_speed_factor": None,
+                "translation_axis_map": {},
+                "translation_axis_signs": {},
             },
             "robot": {
                 "name": "SO-101",

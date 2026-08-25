@@ -47,7 +47,7 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 from .control_ui import DesktopControlServer, RuntimeControlState
 from .flight_recorder import ElectricalTelemetrySampler, FlightRecorder
-from .phone_control import DisablePhoneOrientation
+from .phone_control import DisablePhoneOrientation, RemapPhoneTranslation
 from .urdf_model import URDFKinematicModel
 from .visualization import EndEffector3DVisualizer
 
@@ -71,6 +71,10 @@ GRIPPER_SPEED_FACTOR = 20.0
 DESKTOP_UI_PORT = 8001
 # Set to True to restore roll/pitch/yaw from the LeRobot phone example.
 ENABLE_PHONE_ORIENTATION = False
+# Robot output axis -> LeRobot-mapped phone axis. This swaps lateral/forward.
+PHONE_TRANSLATION_AXIS_MAP = {"x": "y", "y": "x", "z": "z"}
+# Set an output axis to -1.0 only if that direction is reversed on the robot.
+PHONE_TRANSLATION_AXIS_SIGNS = {"x": 1.0, "y": 1.0, "z": 1.0}
 
 
 class TerminalKeyReader:
@@ -125,12 +129,21 @@ def build_phone_processor(
     joint_names: list[str],
     *,
     enable_orientation: bool | None = None,
+    translation_axis_map: dict[str, str] | None = None,
+    translation_axis_signs: dict[str, float] | None = None,
 ) -> RobotProcessorPipeline:
     """Build the LeRobot phone pipeline with an optional XYZ-only mode."""
     if enable_orientation is None:
         enable_orientation = ENABLE_PHONE_ORIENTATION
+    if translation_axis_map is None:
+        translation_axis_map = PHONE_TRANSLATION_AXIS_MAP
+    if translation_axis_signs is None:
+        translation_axis_signs = PHONE_TRANSLATION_AXIS_SIGNS
 
-    steps = [MapPhoneActionToRobotAction(platform=phone_os)]
+    steps = [
+        MapPhoneActionToRobotAction(platform=phone_os),
+        RemapPhoneTranslation(translation_axis_map, translation_axis_signs),
+    ]
     if not enable_orientation:
         steps.append(DisablePhoneOrientation())
     steps.extend(
@@ -301,6 +314,8 @@ def main():
         kinematics_solver,
         joint_names,
         enable_orientation=ENABLE_PHONE_ORIENTATION,
+        translation_axis_map=PHONE_TRANSLATION_AXIS_MAP,
+        translation_axis_signs=PHONE_TRANSLATION_AXIS_SIGNS,
     )
 
     recorder = FlightRecorder(LOG_DIR, joint_names, fps=FPS)
@@ -315,6 +330,8 @@ def main():
             "translation_gain": PHONE_TRANSLATION_GAIN,
             "max_ee_step_m": MAX_EE_STEP_M,
             "gripper_speed_factor": GRIPPER_SPEED_FACTOR,
+            "translation_axis_map": PHONE_TRANSLATION_AXIS_MAP,
+            "translation_axis_signs": PHONE_TRANSLATION_AXIS_SIGNS,
         },
         robot={
             "name": urdf_model.robot_name,
@@ -332,6 +349,7 @@ def main():
         f"translation gain={PHONE_TRANSLATION_GAIN}, "
         f"EE step={MAX_EE_STEP_M:.2f}m, "
         f"gripper speed={GRIPPER_SPEED_FACTOR:.1f}, "
+        f"axes={PHONE_TRANSLATION_AXIS_MAP}, "
         "no joint target clamp, default servo acceleration"
     )
     try:

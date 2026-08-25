@@ -19,6 +19,7 @@ const elements = {
   orientationMode: document.querySelector("#orientationMode"),
   mappingNote: document.querySelector("#mappingNote"),
   controlledPose: document.querySelector("#controlledPose"),
+  axisMapping: document.querySelector("#axisMapping"),
   translationGain: document.querySelector("#translationGain"),
   cartesianStep: document.querySelector("#cartesianStep"),
   gripperSpeed: document.querySelector("#gripperSpeed"),
@@ -32,6 +33,17 @@ const elements = {
 function setStatus(element, text, className) {
   element.className = `status ${className}`;
   element.innerHTML = `<span></span>${text}`;
+}
+
+function formatAxisMapping(mapping) {
+  const axisMap = mapping.translation_axis_map || {};
+  const signs = mapping.translation_axis_signs || {};
+  return ["x", "y", "z"].map((outputAxis) => {
+    const inputAxis = axisMap[outputAxis];
+    if (!inputAxis) return `${outputAxis.toUpperCase()} ← —`;
+    const sign = Number(signs[outputAxis]) < 0 ? "−" : "";
+    return `${outputAxis.toUpperCase()} ← ${sign}${inputAxis.toUpperCase()}`;
+  }).join(" · ");
 }
 
 async function api(path, options = {}) {
@@ -174,6 +186,7 @@ function updateState(state) {
   elements.robotName.textContent = state.robot?.name || "SO-101";
   elements.orientationMode.textContent = orientationEnabled ? "6-DOF" : "XYZ ONLY";
   elements.controlledPose.textContent = orientationEnabled ? "XYZ + roll, pitch, yaw" : "XYZ (orientation locked)";
+  elements.axisMapping.textContent = formatAxisMapping(mapping);
   elements.mappingNote.textContent = orientationEnabled
     ? "Phone translation and rotation are active. Set ENABLE_PHONE_ORIENTATION to False for XYZ-only control."
     : "Phone roll, pitch, and yaw are ignored. Set ENABLE_PHONE_ORIENTATION to True to restore six-DoF control.";
