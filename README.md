@@ -61,9 +61,8 @@ Click a preview to open the MP4.
 - Optional Dockerized Isaac Lab backend with native vector environments.
 - A calibrated local joint dashboard for the SO-101 follower, with bounded
   controls, base-pose handling, and live motor telemetry.
-- Android phone-motion teleoperation for the calibrated SO-101 follower, with
-  a live desktop telemetry/URDF console, Rerun visualization, and electrical
-  incident capture.
+- Smooth Android phone teleoperation for the calibrated SO-101 follower, with
+  filtered Cartesian control, jerk-limited motion, and a digital-twin console.
 
 ## Repository Layout
 
@@ -146,36 +145,11 @@ control behavior, and troubleshooting.
 
 ### Android phone teleoperation
 
-Phone control requires the LeRobot phone and visualization extras plus Android
-Platform Tools. After enabling Android USB debugging and authorizing the host:
-
-```bash
-.venv/bin/python -m pip install -r so101/phone_teleop/requirements.txt
-adb reverse tcp:4443 tcp:4443
-.venv/bin/python -m so101.phone_teleop.teleoperate
-```
-
-Open `https://127.0.0.1:4443` in Android Chrome. The processor retains the
-LeRobot example's translation gain `0.5`, Cartesian threshold `0.10 m`,
-gripper speed `20`, unclamped joint targets, and default servo acceleration.
-`ENABLE_PHONE_ORIENTATION = False` selects XYZ-only control by default; change
-that global to `True` to restore roll/pitch/yaw. The configurable translation
-map swaps X/Y for this robot frame and preserves Z. **Hold to move** acts as a
-clutch, **Scale** adjusts motion magnitude, and the phone A/B buttons operate
-the gripper. Press `B` in the launching terminal to return all joints to the
-captured base pose and restart phone calibration.
-
-The launcher opens a desktop console at <http://127.0.0.1:8001> with an
-interactive measured/commanded URDF skeleton, joint and electrical telemetry,
-the restored mapping summary, and a base-return control. Rerun opens with the
-same articulated skeleton plus the measured end-effector trail, commanded
-target, Cartesian error, and synchronized telemetry. Teleoperation
-sessions and automatic incident captures are written under
-`logs/phone_teleop/`, including requested and sent joint commands, Cartesian
-positions, phone inputs, loop timing, voltage, current, load, and temperature.
-See the [phone-teleoperation guide](so101/phone_teleop/README.md) for ADB
-installation on macOS and Linux, phone controls, electrical diagnostics, and
-current motion limitations.
+The latest SO-101 stack supports filtered Android WebXR control, synchronized
+jerk-limited motion, live hardware visualization, and a hardware-free
+trajectory lab. Start with the [`so101/` hardware-tools overview](so101/README.md),
+then follow the dedicated [phone-teleoperation guide](so101/phone_teleop/README.md)
+for setup, commands, profiles, calibration, simulation, and safety guidance.
 
 ### Hardware safety
 
