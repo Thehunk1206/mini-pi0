@@ -62,7 +62,8 @@ Click a preview to open the MP4.
 - A calibrated local joint dashboard for the SO-101 follower, with bounded
   controls, base-pose handling, and live motor telemetry.
 - Android phone-motion teleoperation for the calibrated SO-101 follower, with
-  Rerun visualization and electrical incident capture.
+  a live desktop telemetry/URDF console, Rerun visualization, and electrical
+  incident capture.
 
 ## Repository Layout
 
@@ -97,7 +98,8 @@ All physical SO-101 utilities are organized in [`so101/`](so101/README.md):
 - [`joint_ui/`](so101/joint_ui/README.md) provides bounded per-joint sliders,
   live telemetry, base-position controls, and emergency torque release.
 - [`phone_teleop/`](so101/phone_teleop/README.md) provides Android phone-motion
-  control, Rerun visualization, base return/recalibration, and incident logs.
+  control, a live desktop telemetry/URDF console, Rerun visualization, base
+  return/recalibration, and incident logs.
 - [`deployment/`](so101/deployment/README.md) contains an experimental legacy
   policy-deployment prototype; it is not validated for calibrated SO-101 use.
 
@@ -148,22 +150,32 @@ Phone control requires the LeRobot phone and visualization extras plus Android
 Platform Tools. After enabling Android USB debugging and authorizing the host:
 
 ```bash
-.venv/bin/python -m pip install 'lerobot[phone,viz]==0.6.1'
+.venv/bin/python -m pip install -r so101/phone_teleop/requirements.txt
 adb reverse tcp:4443 tcp:4443
 .venv/bin/python -m so101.phone_teleop.teleoperate
 ```
 
-Open `https://127.0.0.1:4443` in Android Chrome. **Hold to move** enables
-phone-pose control, **Scale** adjusts motion magnitude, and the phone A/B
-buttons operate the gripper. Press `B` in the launching terminal to return all
-joints to the captured base pose and restart phone calibration.
+Open `https://127.0.0.1:4443` in Android Chrome. The processor retains the
+LeRobot example's translation gain `0.5`, Cartesian threshold `0.10 m`,
+gripper speed `20`, unclamped joint targets, and default servo acceleration.
+`ENABLE_PHONE_ORIENTATION = False` selects XYZ-only control by default; change
+that global to `True` to restore roll/pitch/yaw. The configurable translation
+map swaps X/Y for this robot frame and preserves Z. **Hold to move** acts as a
+clutch, **Scale** adjusts motion magnitude, and the phone A/B buttons operate
+the gripper. Press `B` in the launching terminal to return all joints to the
+captured base pose and restart phone calibration.
 
-Rerun visualization opens automatically. Teleoperation sessions and automatic
-incident captures are written under `logs/phone_teleop/`, including joint
-commands, measured positions, phone inputs, loop timing, voltage, current,
-load, and temperature. See the [phone-teleoperation guide](so101/phone_teleop/README.md)
-for ADB installation on macOS and Linux, phone controls, electrical diagnostics,
-and current motion limitations.
+The launcher opens a desktop console at <http://127.0.0.1:8001> with an
+interactive measured/commanded URDF skeleton, joint and electrical telemetry,
+the restored mapping summary, and a base-return control. Rerun opens with the
+same articulated skeleton plus the measured end-effector trail, commanded
+target, Cartesian error, and synchronized telemetry. Teleoperation
+sessions and automatic incident captures are written under
+`logs/phone_teleop/`, including requested and sent joint commands, Cartesian
+positions, phone inputs, loop timing, voltage, current, load, and temperature.
+See the [phone-teleoperation guide](so101/phone_teleop/README.md) for ADB
+installation on macOS and Linux, phone controls, electrical diagnostics, and
+current motion limitations.
 
 ### Hardware safety
 

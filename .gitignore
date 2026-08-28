@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.playwright-cli/
 .mypy_cache/
 .cache/
 .env
@@ -21,8 +22,10 @@ dist/
 runs/
 checkpoints/
 rollouts/
+output/
 *.mp4
 *.png
+!so101/phone_teleop/docs/*.png
 *.npz
 !assets/checkpoints/
 !assets/checkpoints/**

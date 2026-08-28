@@ -1,11 +1,17 @@
 # SO-101 Android phone teleoperation
 
+![SO-101 phone teleoperation end-to-end flow](docs/so101-phone-teleop-end-to-end.png)
+
 Control an SO-101 follower using Android WebXR phone motion. The application
 maps the calibrated phone pose to end-effector targets, solves joint commands
 through inverse kinematics, and provides:
 
 - Android WebXR over USB with ADB port forwarding
-- Rerun visualization
+- One-Euro XYZ filtering, a 0.25 mm radial deadband, and synchronized Ruckig OTG
+- tracking-error fault latching with release-to-recover clutch semantics
+- a localhost Three.js console using the official articulated STL model
+- a hardware-free trajectory lab with raw, Kalman, quintic, and Ruckig comparisons
+- Rerun 3D actual/commanded robot tracking and motor telemetry
 - a terminal `B` shortcut for return-to-base and phone recalibration
 - per-motor voltage, current, load, and temperature telemetry
 - 30 Hz session logs and automatic pre-failure incident captures
@@ -16,9 +22,20 @@ through inverse kinematics, and provides:
 ```text
 so101/phone_teleop/
 ├── teleoperate.py              # Phone, IK, robot control, and base return
+├── control_stack.py            # One-Euro/Ruckig/profile/fault state
+├── filtering.py                # One-Euro and offline Kalman filters
+├── trajectory.py               # Simulation-only synchronized quintic OTG
+├── calibration.py              # handy_bot calibration ranges and metadata
+├── model_assets.py             # Official URDF/STL cache and validation
+├── simulator.py                # Hardware-free trajectory-lab entrypoint
 ├── flight_recorder.py          # Electrical telemetry and incident capture
+├── control_ui.py               # Thread-safe localhost desktop console
+├── visualization.py            # Rerun robot/end-effector 3D view and trail
+├── urdf_model.py               # Lightweight URDF forward kinematics
+├── dashboard/                  # Desktop UI HTML, CSS, and JavaScript
 ├── kinematics/
 │   └── so101_kinematics.urdf   # Self-contained kinematics model
+├── tests/                      # Hardware-independent safety/logging tests
 └── README.md
 ```
 
@@ -33,25 +50,48 @@ so101/phone_teleop/
 | Base position | `~/.cache/huggingface/lerobot/base_positions/robots/so_follower/handy_bot.json` |
 | Phone | Android WebXR |
 | Control rate | 30 Hz |
+| Phone-controlled axes | XYZ translation and gripper; roll/pitch/yaw disabled by the global switch |
+| Translation mapping | LeRobot Android default |
+| Translation gain | `0.5` per axis |
+| Cartesian step limit | `0.10 m` per control cycle |
+| Joint target validation | calibrated servo range ∩ official URDF range |
+| Gripper speed factor | `20.0` |
+| STS3215 acceleration | LeRobot default (`254`) |
+| Safe arm OTG limits | `[30,30,30,45,60]°/s`, `[90,90,90,135,180]°/s²`, `[450,450,450,675,900]°/s³` |
+| Smooth arm OTG limits | `[20,20,20,30,40]°/s`, `[60,60,60,90,120]°/s²`, `[180,180,180,270,360]°/s³` |
+| Safe gripper OTG limits | `25%/s`, `75%/s²`, `375%/s³` |
+| Smooth gripper OTG limits | `15%/s`, `45%/s²`, `180%/s³` |
+| Live One-Euro defaults | `1.0 Hz` minimum cutoff, `beta=2.0`, `1.0 Hz` derivative cutoff, `0.25 mm` deadband |
+| Desktop console | `http://127.0.0.1:8001` |
 | LeRobot version | `0.6.1` |
 
-These values are currently defined directly in `teleoperate.py`; the launcher
-does not yet expose command-line configuration flags.
+The translation mapping and motion values reproduce the LeRobot phone example.
+No custom X/Y remap is applied. The
+single global `ENABLE_PHONE_ORIENTATION` near the top of `teleoperate.py`
+selects the orientation behavior. It defaults to `False` for XYZ-only control;
+set it to `True` to restore roll, pitch, and yaw. The desktop console cannot
+change the mapping; its base-return control restarts phone calibration.
+
+The calibration pose defines the phone-to-robot translation frame. Lay the
+phone flat with its screen facing up and point its top edge straight forward,
+away from the robot base, before touching **Hold to move** to capture the pose.
+With that reference, moving the phone forward/back controls robot X,
+left/right controls robot Y, and lifting/lowering it controls robot Z.
+
+The motor calibration file contributes motor IDs, homing offsets, raw STS3215
+range endpoints, and the exact LeRobot normalized range. It does not replace
+the CAD limits: live commands use the intersection of calibrated travel and
+the official URDF range. The current saved base pose places `shoulder_lift`
+and `elbow_flex` slightly outside that intersection, so the launcher prints a
+warning. Re-capture the base pose inside the envelope before unloaded testing.
 
 ## Installation
 
-Use the repository's existing `.venv`. Install the phone and visualization
-extras if they are not already present:
+Use the repository's existing `.venv` and install the pinned phone, Rerun, and
+desktop-console dependencies:
 
 ```bash
-.venv/bin/python -m pip install 'lerobot[phone,viz]==0.6.1'
-```
-
-This branch uses `rerun-sdk 0.33.1`, which satisfies LeRobot 0.6.1's supported
-Rerun range:
-
-```bash
-.venv/bin/python -m pip install 'rerun-sdk==0.33.1'
+.venv/bin/python -m pip install -r so101/phone_teleop/requirements.txt
 ```
 
 ### Install ADB
@@ -154,7 +194,9 @@ From the repository root, run:
 .venv/bin/python -m so101.phone_teleop.teleoperate
 ```
 
-The launcher starts the phone server before opening the servo bus. On Android:
+The launcher always starts in **Safe**. Select **Smooth** in the desktop console
+while Hold is released for the conservative tuning above. The launcher starts
+the phone server before opening the servo bus. On Android:
 
 1. Open `https://127.0.0.1:4443` in Chrome.
 2. Accept the local certificate warning if shown.
@@ -164,7 +206,38 @@ The launcher starts the phone server before opening the servo bus. On Android:
 5. Release **Hold to move** before the robot connects.
 6. Wait for `Starting teleop loop` before commanding motion.
 
-Rerun opens automatically after phone calibration.
+The desktop console opens automatically at <http://127.0.0.1:8001>. It is
+available during phone calibration and throughout teleoperation. Rerun opens
+automatically after phone calibration. If the browser does not open, visit the
+desktop-console address manually.
+
+Phone translation controls the end-effector while roll, pitch, and yaw deltas
+are zeroed. The end-effector keeps the orientation captured when **Hold to
+move** establishes the latched phone and robot references. To enable rotation,
+change this global before starting the process:
+
+```python
+ENABLE_PHONE_ORIENTATION = True
+```
+
+## Start the hardware-free trajectory lab
+
+Populate or repair the official SO-101 model cache and launch the simulator:
+
+```bash
+.venv/bin/python -m so101.phone_teleop.simulator
+```
+
+The first launch synchronizes `hf://buckets/lerobot/robot-urdfs/so101` into
+`~/.cache/huggingface/lerobot/robot-urdfs/so101`. A completion marker is written
+only after `so101_new_calib.urdf` and all 13 referenced STL files validate.
+Subsequent launches are offline-capable; Three.js, OrbitControls, STLLoader,
+and URDFLoader are pinned and bundled in `dashboard/vendor/`.
+
+The lab has four synthetic experiments plus JSONL replay. It animates measured
+motion as a solid robot and the selected command as a translucent ghost, and
+plots position, velocity, acceleration, jerk, phone XYZ, current, voltage, and
+tracking error. It contains no robot, motor-bus, serial-port, or phone object.
 
 ## Phone controls
 
@@ -179,6 +252,27 @@ Rerun opens automatically after phone calibration.
 The phone's **B** button controls the gripper. It is different from pressing
 `B` in the terminal.
 
+## Desktop control console
+
+The console runs in a background web-server thread and never talks to the
+servo bus directly. The 30 Hz teleoperation thread remains the only owner of
+the serial connection and the phone processor.
+
+It provides:
+
+- an orbit/pan/zoom renderer using the official visual URDF and 13 STL assets
+- solid measured geometry and an optional translucent commanded ghost
+- actual/commanded joint position and live voltage, current, load, and
+  temperature for every servo
+- loop time, Cartesian tracking error, minimum bus voltage, and summed current
+- active filter, OTG, profile, clutch, warning, and fault state
+- Smooth/Safe/Balanced/Responsive profile selection while Hold is released
+- bounded live One-Euro filter settings while Hold is released
+- **Return to base + recalibrate**, equivalent to terminal `B`
+
+There are no live joint sliders. Settings requests receive HTTP `409` while
+Hold is active and every hardware launch begins in Safe.
+
 ## Return to base and recalibrate
 
 Focus the launching terminal and press `B`; Enter is not required. One keypress
@@ -192,7 +286,7 @@ runs the complete reset sequence:
 5. Release **Hold to move** once more.
 6. The next press starts motion from a fresh IK reference at base.
 
-Base return uses a 30°/s arm-joint command trajectory and a 25%/s gripper
+Base return preserves its separate 40°/s arm-joint command trajectory and a 25%/s gripper
 trajectory. Completion tolerances are 2° for arm joints and 3% for the gripper.
 A 15° following-error limit stops a blocked base return.
 
@@ -200,9 +294,22 @@ Before exiting, use terminal `B` to return to base. Then press `Ctrl+C`. If the
 bus has already failed, software may be unable to disable torque; switch off
 motor power before touching the arm.
 
-## Visualization and flight-recorder logs
+## 3D visualization and flight-recorder logs
 
-Rerun displays phone/action values and these per-motor signals:
+Rerun opens with a synchronized 3D robot and end-effector view:
+
+- green/orange link skeletons: measured and commanded URDF poses
+- green marker and trail: measured end-effector position from forward kinematics
+- RGB arrows: measured end-effector orientation axes
+- orange marker: commanded end-effector position
+- red line: Cartesian difference between measured and commanded positions
+- plots: actual/target XYZ and Cartesian error in millimeters
+
+The measured 3D pose is a forward-kinematics estimate derived from the joint
+encoders. It does not measure structural flex, gripper deflection, backlash, or
+external displacement with a camera.
+
+The same Rerun session displays phone/action values and these per-motor signals:
 
 - voltage in volts
 - estimated current in milliamps
@@ -215,10 +322,15 @@ Every run writes:
 logs/phone_teleop/session_<timestamp>.jsonl
 ```
 
-The session log contains measured positions, generated joint commands, phone
-state, control-loop timing, and the latest electrical readings at 30 Hz.
-Voltage and current are sampled from the servo bus at 5 Hz; load and temperature
-are sampled at 1 Hz.
+The session log contains measured positions, requested raw IK commands, commands
+sent to the robot, actual/target Cartesian positions, Cartesian error, phone
+state, raw/filtered/deadband XYZ, estimated velocity and cutoff, Ruckig
+position/velocity/acceleration/jerk, profile constraints, OTG result, clutch,
+tracking warning/fault state, control-loop timing, and electrical readings at 30 Hz.
+When the arm and quick-stop OTG are stationary, voltage and current are sampled
+from the servo bus at up to 5 Hz and load and temperature at up to 1 Hz. During
+active Hold and quick stopping, the logger repeats the last cached electrical
+sample instead of blocking the 30 Hz command loop.
 
 When an exception occurs, the final approximately 20 seconds are copied into:
 
@@ -226,9 +338,10 @@ When an exception occurs, the final approximately 20 seconds are copied into:
 logs/phone_teleop/incident_<timestamp>_<number>.json
 ```
 
-The incident includes the exact control phase, exception, traceback, commands,
-positions, phone inputs, and last valid electrical samples. A second incident
-is written when torque-disable also fails during shutdown.
+The incident includes the exact control phase, exception, traceback, requested
+and sent commands, joint and Cartesian positions, phone inputs, and last valid
+electrical samples. A second incident is written when torque-disable also fails
+during shutdown.
 
 The terminal prints the generated paths and a once-per-second summary:
 
@@ -240,20 +353,56 @@ The servo telemetry cannot measure the minimum of a sub-200 ms voltage
 transient after the bus stops responding. Use an oscilloscope or power analyzer
 for the true rail minimum.
 
-## Current safety limitation
+## LeRobot control mapping and safe use
 
-The retained upstream example still maps IK output directly to joint targets.
-It currently uses:
+The live control order is:
 
-- 0.5 m/m end-effector translation scaling in the Python pipeline
-- a 10 cm Cartesian step limit
-- no accumulating joint-command slew limiter during phone motion
-- LeRobot's default maximum servo acceleration
+1. `OneEuroXYZFilter` filters calibrated `phone.pos` from monotonic timestamps
+   with the live `1.0 Hz`, `beta=2.0` defaults and applies a 0.25 mm radial
+   deadband. This keeps the output continuous enough for online retargeting
+   without passing the full static phone noise.
+2. `MapPhoneActionToRobotAction` applies the official Android axis map.
+3. When `ENABLE_PHONE_ORIENTATION` is `False`, one stateless filter zeros only
+   `target_wx`, `target_wy`, and `target_wz`.
+4. `EEReferenceAndDelta`, `EEBoundsAndSafety`, `GripperVelocityToJoint`, and
+   `InverseKinematicsEEToJoints` preserve LeRobot's gain, step, and gripper values.
+5. Non-finite or out-of-envelope IK targets are rejected while the last valid
+   target is retained.
+6. A bounded, low-pass joint-target velocity is estimated from successive valid
+   IK targets. Five-axis synchronized arm Ruckig and separate one-axis gripper
+   Ruckig receive the moving target state and propagate their commanded state
+   every 30 Hz cycle.
 
-Flight-recorder analysis identified single-frame target changes above 20°,
-following errors above 40°, and a servo-rail drop from approximately 5.2 V to
-4.5 V before all six motors stopped replying. Until trajectory limiting and
-lower acceleration are implemented:
+On Hold release, the OTG is immediately retargeted to a bounded stopping point.
+An arm following error over 10° warns; over 15° for three cycles faults. A
+gripper error over 10% faults immediately. A fault resets OTG from measured
+state and remains paused until Hold is released.
+
+## How the educational quintic retargeter works
+
+`trajectory.py` is deliberately readable and simulation-only. For each joint,
+`QuinticSegment.from_boundary_conditions` solves the final three coefficients
+of `p(t) = c0 + c1 t + … + c5 t⁵` after setting `c0`, `c1`, and `c2` directly
+from the current position, velocity, and acceleration. The endpoint is the
+requested position with zero velocity and acceleration.
+
+`synchronized_quintic` estimates a duration from velocity, acceleration, and
+jerk limits, analytically checks derivative extrema, enlarges any infeasible
+duration, and rebuilds every joint using the longest duration. Therefore all
+joints arrive together. `OnlineQuinticRetargeter.retarget` first samples the
+active segment, then uses that exact position, velocity, and acceleration as
+the new initial boundary. Segment boundaries are C² continuous. Jerk is bounded
+inside a segment but may change discontinuously at a retarget; this is one key
+difference from Ruckig's jerk-limited online algorithm.
+
+The phone should still be used as a clutch: hold **Move**, make a small motion,
+release it, reposition the phone, and engage it again. Keep phone **Scale** at
+`0.25` or below until voltage and following behavior are validated.
+
+Previous flight-recorder analysis identified single-frame target changes above
+20°, following errors above 40°, and a servo-rail drop from approximately
+5.2 V to 4.5 V before all six motors stopped replying. Because the restored
+mapping is more responsive, use it cautiously and validate the power path:
 
 - keep phone **Scale** at `0.25` or below
 - move slowly and avoid sudden direction reversals
@@ -264,6 +413,14 @@ lower acceleration are implemented:
 Repeated `There is no status packet` errors for all IDs indicate a bus-wide
 power or communication loss, not an individual IK failure. After such an error,
 do not assume the shutdown torque-disable command succeeded.
+
+The Waveshare Bus Servo Adapter (A) passes the input motor voltage through
+without regulation and is specified for a maximum of 5 A. Use a correctly
+rated external servo supply and keep the power path short. Do not disable the
+servo's voltage or current protection. See the
+[Waveshare adapter FAQ](https://docs.waveshare.com/Bus_Servo_Adapter_A/FAQ),
+[LeRobot phone example](https://github.com/huggingface/lerobot/blob/main/examples/phone_to_so100/teleoperate.py),
+and [SO follower configuration](https://github.com/huggingface/lerobot/blob/main/src/lerobot/robots/so_follower/config_so_follower.py).
 
 ## Troubleshooting
 
@@ -310,3 +467,13 @@ Check, in order:
 5. Whether another process attempted to use the bus.
 
 Do not solve a bus-wide power dropout by only increasing serial retry counts.
+
+## Tests
+
+The filter, trajectories, Ruckig, replay, simulator API, calibration, model,
+recorder, desktop API, URDF, and Cartesian tests do not
+require hardware:
+
+```bash
+.venv/bin/python -m pytest -q so101/phone_teleop/tests
+```

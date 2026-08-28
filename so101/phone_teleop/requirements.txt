@@ -1,0 +1,6 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+lerobot[phone,viz]==0.6.1
+rerun-sdk==0.33.1
+ruckig==0.19.4
+huggingface-hub>=1.4,<2
