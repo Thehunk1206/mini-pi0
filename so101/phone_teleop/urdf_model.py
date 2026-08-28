@@ -76,6 +76,8 @@ class URDFJoint:
     origin_xyz: np.ndarray
     origin_rpy: np.ndarray
     axis: np.ndarray
+    lower: float | None
+    upper: float | None
 
 
 class URDFKinematicModel:
@@ -106,6 +108,7 @@ class URDFKinematicModel:
                 raise ValueError(f"URDF joint has no parent or child: {element.attrib}")
             origin_element = element.find("origin")
             axis_element = element.find("axis")
+            limit_element = element.find("limit")
             parent = parent_element.attrib["link"]
             child = child_element.attrib["link"]
             child_links.add(child)
@@ -126,6 +129,16 @@ class URDFKinematicModel:
                     axis=_vector(
                         axis_element.attrib.get("xyz") if axis_element is not None else None,
                         default=(1.0, 0.0, 0.0),
+                    ),
+                    lower=(
+                        float(limit_element.attrib["lower"])
+                        if limit_element is not None and "lower" in limit_element.attrib
+                        else None
+                    ),
+                    upper=(
+                        float(limit_element.attrib["upper"])
+                        if limit_element is not None and "upper" in limit_element.attrib
+                        else None
                     ),
                 )
             )
@@ -150,6 +163,16 @@ class URDFKinematicModel:
         if len(ordered) != len(parsed_joints):
             raise ValueError("URDF contains disconnected joints or a kinematic cycle")
         return cls(root.attrib.get("name", path.stem), root_link, ordered)
+
+    def revolute_limits_degrees(self) -> dict[str, tuple[float, float]]:
+        """Return finite URDF revolute limits converted from radians to degrees."""
+        return {
+            joint.name: (math.degrees(joint.lower), math.degrees(joint.upper))
+            for joint in self.joints
+            if joint.joint_type == "revolute"
+            and joint.lower is not None
+            and joint.upper is not None
+        }
 
     def link_transforms(self, joint_positions_deg: dict[str, float]) -> dict[str, np.ndarray]:
         transforms = {self.root_link: np.eye(4, dtype=float)}

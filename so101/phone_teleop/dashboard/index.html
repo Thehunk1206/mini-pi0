@@ -1,90 +1,127 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0a0d0c" />
-    <link rel="icon" href="data:," />
-    <title>SO-101 Phone Teleoperation</title>
-    <link rel="stylesheet" href="/static/styles.css?v=4" />
-  </head>
-  <body>
-    <main class="shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">HANDY BOT · LIVE CONTROL</p>
-          <h1>SO-101 teleoperation console</h1>
-          <p class="subtitle">Configurable phone orientation with encoder-derived URDF tracking.</p>
-        </div>
-        <div class="status-stack">
-          <div id="robotStatus" class="status offline"><span></span>Offline</div>
-          <div id="phoneStatus" class="status neutral"><span></span>Phone released</div>
-        </div>
-      </header>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SO-101 Trajectory Lab</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/static/vendor/three/three.module.min.js",
+        "three/examples/jsm/controls/OrbitControls.js": "/static/vendor/three/examples/jsm/controls/OrbitControls.js",
+        "three/examples/jsm/loaders/STLLoader.js": "/static/vendor/three/examples/jsm/loaders/STLLoader.js",
+        "three/examples/jsm/loaders/ColladaLoader.js": "/static/vendor/three/examples/jsm/loaders/ColladaLoader.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark">SO</div>
+    <div>
+      <p class="eyebrow">KINEMATIC CONTROL WORKBENCH</p>
+      <h1>SO-101 <span>Trajectory Lab</span></h1>
+    </div>
+    <div class="topbar-status">
+      <span id="modeBadge" class="badge">CONNECTING</span>
+      <span id="phaseBadge" class="badge neutral">PAUSED</span>
+      <div class="profile-readout"><small>PROFILE</small><strong id="profileLabel">Safe ×1.0</strong></div>
+    </div>
+  </header>
 
-      <section class="metrics" aria-label="Live metrics">
-        <article><span>Loop</span><strong id="loopMetric">—</strong><small>target 33.3 ms</small></article>
-        <article><span>Cartesian error</span><strong id="errorMetric">—</strong><small>FK target vs actual</small></article>
-        <article><span>Minimum voltage</span><strong id="voltageMetric">—</strong><small>across six servos</small></article>
-        <article><span>Total current</span><strong id="currentMetric">—</strong><small>estimated draw</small></article>
-      </section>
+  <main>
+    <section class="workspace">
+      <div class="viewer-card panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">OFFICIAL SO-101 DIGITAL TWIN</p><h2>Articulated model</h2></div>
+          <div class="viewer-tools">
+            <label class="toggle"><input id="ghostToggle" type="checkbox" checked><span></span>Command ghost</label>
+            <button id="fitButton" class="quiet">Auto-fit</button>
+            <button id="resetCameraButton" class="quiet">Reset camera</button>
+          </div>
+        </div>
+        <div id="viewer" class="viewer" aria-label="Interactive SO-101 3D model">
+          <div id="modelStatus" class="model-status"><i></i>Loading 13 official mesh assets…</div>
+          <div class="viewer-legend"><span><i class="solid-dot"></i>Measured</span><span><i class="ghost-dot"></i>Selected command</span></div>
+          <div class="axis-key"><b>Z</b><span>↑</span><small>drag orbit · right-drag pan · wheel zoom</small></div>
+        </div>
+        <div id="liveMetrics" class="metrics-strip"></div>
+      </div>
 
-      <div class="main-grid">
-        <section class="panel renderer-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">URDF LIVE VIEW</p>
-              <h2 id="robotName">SO-101</h2>
-            </div>
-            <span class="hint">Drag to orbit · scroll to zoom</span>
-          </div>
-          <canvas id="robotCanvas" aria-label="Interactive SO-101 URDF visualization"></canvas>
-          <div class="legend">
-            <span><i class="actual"></i>Measured pose</span>
-            <span><i class="target"></i>Commanded pose</span>
-            <span><i class="trail"></i>End-effector trail</span>
-          </div>
-          <p class="model-note">Kinematic skeleton rendered from the checked-in URDF. The URDF contains no visual meshes.</p>
+      <aside class="control-column">
+        <section id="simControls" class="panel controls-panel">
+          <div class="panel-heading"><div><p class="eyebrow">EXPERIMENT</p><h2>Scenario</h2></div></div>
+          <label class="field">Scenario<select id="scenarioSelect"></select></label>
+          <label id="recordingField" class="field hidden">Recorded JSONL path<input id="recordingPath" type="text" placeholder="/absolute/path/session.jsonl"></label>
+          <div id="targetEditor" class="target-grid"></div>
+          <div class="button-row"><button id="loadScenarioButton" class="primary">Load experiment</button></div>
+          <p id="scenarioHint" class="hint">Choose a scenario, then compare the same target through every motion method.</p>
         </section>
 
         <section class="panel controls-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">CONTROL MAPPING</p>
-              <h2>LeRobot-based mapping</h2>
-            </div>
-            <span id="orientationMode" class="settings-state">XYZ ONLY</span>
+          <div class="panel-heading"><div><p class="eyebrow">MOTION OUTPUT</p><h2>Streams</h2></div></div>
+          <label class="field">Animate<select id="selectedStream">
+            <option value="raw_ik">Raw IK target</option><option value="one_euro">One-Euro target</option>
+            <option value="kalman">Kalman target</option><option value="quintic">Custom quintic</option>
+            <option value="ruckig" selected>Ruckig</option><option value="measured">Measured</option>
+          </select></label>
+          <div id="streamChecks" class="check-grid"></div>
+          <label class="field">Motion profile<select id="profileSelect">
+            <option>Smooth</option><option>Safe</option><option>Balanced</option><option>Responsive</option>
+          </select></label>
+          <div id="advancedSettings" class="advanced-grid">
+            <label>Min cutoff <input id="minCutoff" type="number" min="0.1" max="10" step="0.05" value="1"></label>
+            <label>Beta <input id="beta" type="number" min="0" max="10" step="0.1" value="2"></label>
+            <label>Derivative cutoff <input id="derivativeCutoff" type="number" min="0.1" max="10" step="0.1" value="1"></label>
+            <label>Deadband mm <input id="deadband" type="number" min="0" max="10" step="0.05" value="0.25"></label>
           </div>
-          <p id="mappingNote" class="mapping-note">The active control mode is loaded from the teleoperation process.</p>
-          <dl class="mapping-grid">
-            <div><dt>Controlled pose</dt><dd id="controlledPose">—</dd></div>
-            <div><dt>Robot axis map</dt><dd id="axisMapping">—</dd></div>
-            <div><dt>Translation gain</dt><dd id="translationGain">—</dd></div>
-            <div><dt>Cartesian step</dt><dd id="cartesianStep">—</dd></div>
-            <div><dt>Gripper speed</dt><dd id="gripperSpeed">—</dd></div>
-            <div><dt>Joint clamp</dt><dd>LeRobot default (off)</dd></div>
-            <div><dt>Servo acceleration</dt><dd>LeRobot default (254)</dd></div>
-          </dl>
-          <div class="button-row single">
-            <button id="baseButton" class="button base" type="button">Return to base + recalibrate</button>
-          </div>
-          <p id="controlMessage" class="control-message" role="alert"></p>
+          <button id="applySettingsButton" class="secondary">Apply while Hold is released</button>
+          <p id="settingsMessage" class="hint"></p>
         </section>
-      </div>
 
-      <section class="panel motor-panel">
-        <div class="section-heading">
-          <div><p class="eyebrow">SERVO BUS</p><h2>Joint telemetry</h2></div>
-          <span id="phaseLabel" class="hint">startup</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Joint</th><th>Actual</th><th>Command</th><th>Voltage</th><th>Current</th><th>Load</th><th>Temp</th></tr></thead>
-            <tbody id="motorRows"></tbody>
-          </table>
-        </div>
-      </section>
-    </main>
-    <script src="/static/app.js?v=5" defer></script>
-  </body>
+        <section id="liveControls" class="panel controls-panel hidden">
+          <div class="panel-heading"><div><p class="eyebrow">HARDWARE</p><h2>Live control</h2></div></div>
+          <button id="baseButton" class="danger">Return to base</button>
+          <p class="hint">Release Hold before base return or settings changes.</p>
+        </section>
+      </aside>
+    </section>
+
+    <section id="timelinePanel" class="panel timeline-panel">
+      <div class="transport">
+        <button id="restartButton" aria-label="Restart">↺</button>
+        <button id="playButton" class="primary" aria-label="Play">▶</button>
+        <button id="stepButton" aria-label="Single step">▸|</button>
+        <span id="timeLabel" class="mono">0.00 / 6.00 s</span>
+        <input id="timeline" type="range" min="0" max="6" value="0" step="0.001" aria-label="Timeline">
+        <label class="speed">Speed<select id="speedSelect"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+      </div>
+    </section>
+
+    <section class="plots-section">
+      <div class="section-heading"><div><p class="eyebrow">TRAJECTORY EVIDENCE</p><h2>State and limits over time</h2></div><label class="field compact">Joint<select id="plotJoint"></select></label></div>
+      <div class="plot-grid">
+        <article class="plot-card panel"><h3>Position <span>deg / %</span></h3><canvas id="positionPlot"></canvas></article>
+        <article class="plot-card panel"><h3>Velocity <span>deg/s / %/s</span></h3><canvas id="velocityPlot"></canvas></article>
+        <article class="plot-card panel"><h3>Acceleration <span>deg/s² / %/s²</span></h3><canvas id="accelerationPlot"></canvas></article>
+        <article class="plot-card panel"><h3>Jerk <span>deg/s³ / %/s³</span></h3><canvas id="jerkPlot"></canvas></article>
+      </div>
+    </section>
+
+    <section class="plots-section split-plots">
+      <article class="plot-card panel large"><div><p class="eyebrow">PHONE INPUT</p><h2>Raw vs filtered XYZ</h2></div><canvas id="phonePlot"></canvas></article>
+      <article class="plot-card panel large"><div><p class="eyebrow">HARDWARE / REPLAY</p><h2>Electrical and tracking</h2></div><canvas id="telemetryPlot"></canvas></article>
+    </section>
+
+    <section class="panel joint-panel">
+      <div class="panel-heading"><div><p class="eyebrow">CURRENT SAMPLE</p><h2>Six articulated joints</h2></div><span id="otgResult" class="mono muted">OTG —</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Joint</th><th>Measured</th><th>Command</th><th>Error</th><th>Velocity</th><th>Current</th><th>Voltage</th></tr></thead><tbody id="jointRows"></tbody></table></div>
+    </section>
+  </main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
 </html>

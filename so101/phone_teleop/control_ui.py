@@ -5,14 +5,23 @@ from __future__ import annotations
 import copy
 import threading
 import webbrowser
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+from .control_stack import PROFILE_NAMES
+from .filtering import (
+    DEFAULT_PHONE_FILTER_SETTINGS,
+    PHONE_FILTER_SETTING_BOUNDS,
+    validated_phone_filter_settings,
+)
+from .model_assets import DEFAULT_MODEL_CACHE, MODEL_FILENAME
 
 
 class RuntimeControlState:
@@ -21,6 +30,9 @@ class RuntimeControlState:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._return_base_requested = False
+        self._settings_requested: dict[str, Any] | None = None
+        self._history: deque[dict[str, Any]] = deque(maxlen=1800)
+        self._history_sequence = 0
         self._live: dict[str, Any] = {
             "connected": False,
             "phase": "startup",
@@ -30,13 +42,16 @@ class RuntimeControlState:
             "commands": {},
             "electrical": {},
             "cartesian": {},
+            "control": {},
+            "active_profile": "Safe",
+            "filter_settings": dict(DEFAULT_PHONE_FILTER_SETTINGS),
+            "calibration": {},
             "control_mapping": {
                 "orientation_enabled": False,
                 "translation_gain": None,
                 "max_ee_step_m": None,
                 "gripper_speed_factor": None,
-                "translation_axis_map": {},
-                "translation_axis_signs": {},
+                "translation_mapping": "LeRobot Android default",
             },
             "robot": {
                 "name": "SO-101",
@@ -64,12 +79,92 @@ class RuntimeControlState:
             self._return_base_requested = False
             return requested
 
+    def request_settings(self, settings: dict[str, Any]) -> None:
+        with self._lock:
+            if bool(self._live.get("phone_enabled", False)):
+                raise RuntimeError("Release Hold before changing motion settings")
+            profile = settings.get("profile", self._live.get("active_profile", "Safe"))
+            if profile not in PROFILE_NAMES:
+                raise ValueError(f"Unknown motion profile: {profile}")
+            filter_updates = {
+                name: value
+                for name, value in settings.items()
+                if name in PHONE_FILTER_SETTING_BOUNDS
+            }
+            unknown = set(settings) - {"profile", *PHONE_FILTER_SETTING_BOUNDS}
+            if unknown:
+                raise ValueError(f"Unsupported live setting(s): {', '.join(sorted(unknown))}")
+            filter_settings = validated_phone_filter_settings(
+                filter_updates,
+                base=self._live.get(
+                    "filter_settings", DEFAULT_PHONE_FILTER_SETTINGS
+                ),
+            )
+            self._settings_requested = {
+                "profile": profile,
+                "filter_settings": filter_settings,
+            }
+
+    def consume_settings(self) -> dict[str, Any] | None:
+        with self._lock:
+            requested = self._settings_requested
+            self._settings_requested = None
+            return copy.deepcopy(requested)
+
+    def history(self, after_sequence: int | None = None) -> dict[str, Any]:
+        """Return a full or incremental immutable snapshot of plot history.
+
+        History entries are deep-copied when they enter the deque and are never
+        mutated afterward.  Taking only a shallow list snapshot here keeps the
+        HTTP thread from holding the control-loop lock while copying an
+        ever-growing nested payload.
+        """
+        with self._lock:
+            samples = list(self._history)
+            latest_sequence = self._history_sequence
+
+        oldest_sequence = samples[0]["sequence"] if samples else latest_sequence + 1
+        reset = (
+            after_sequence is not None
+            and after_sequence < oldest_sequence - 1
+        )
+        if after_sequence is not None and not reset:
+            samples = [
+                sample
+                for sample in samples
+                if sample["sequence"] > after_sequence
+            ]
+        return {
+            "samples": samples,
+            "latest_sequence": latest_sequence,
+            "reset": reset,
+        }
+
     def publish(self, **values: Any) -> None:
         with self._lock:
             self._live.update(copy.deepcopy(values))
+            if "positions" in values or "commands" in values:
+                self._history_sequence += 1
+                self._history.append(
+                    {
+                        "sequence": self._history_sequence,
+                        **{
+                            key: copy.deepcopy(self._live.get(key))
+                            for key in (
+                                "loop_ms", "positions", "commands", "electrical",
+                                "cartesian", "control", "active_profile",
+                            )
+                        },
+                    }
+                )
 
 
-def create_app(state: RuntimeControlState, ready_event: threading.Event) -> FastAPI:
+def create_app(
+    state: RuntimeControlState,
+    ready_event: threading.Event,
+    *,
+    model_cache: Path = DEFAULT_MODEL_CACHE,
+) -> FastAPI:
     static_dir = Path(__file__).parent / "dashboard"
 
     @asynccontextmanager
@@ -92,20 +187,58 @@ def create_app(state: RuntimeControlState, ready_event: threading.Event) -> Fast
                 status_code=403,
                 content={"detail": "SO-101 teleoperation controls are restricted to localhost"},
             )
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(static_dir / "index.html")
 
+    @app.get("/api/meta")
+    def get_meta() -> dict[str, Any]:
+        return {
+            "mode": "live",
+            "model_url": f"/model/{MODEL_FILENAME}",
+            "joint_names": [
+                "shoulder_pan", "shoulder_lift", "elbow_flex",
+                "wrist_flex", "wrist_roll", "gripper",
+            ],
+        }
+
     @app.get("/api/state")
     def get_state() -> dict[str, Any]:
         return state.snapshot()
+
+    @app.get("/api/history")
+    def get_history(after_sequence: int | None = None) -> dict[str, Any]:
+        return state.history(after_sequence)
 
     @app.post("/api/return-to-base")
     def return_to_base() -> dict[str, Any]:
         state.request_base_return()
         return state.snapshot()
+
+    @app.put("/api/settings")
+    @app.post("/api/settings")
+    def update_settings(settings: dict[str, Any]) -> dict[str, Any]:
+        try:
+            state.request_settings(settings)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"accepted": True, "settings": settings}
+
+    @app.get("/model/{asset_path:path}", include_in_schema=False)
+    def model_asset(asset_path: str) -> FileResponse:
+        root = Path(model_cache).resolve()
+        requested = (root / asset_path).resolve()
+        if not requested.is_relative_to(root) or not requested.is_file():
+            raise HTTPException(status_code=404, detail="SO-101 model asset not found")
+        media_type = "application/xml" if requested.suffix.lower() == ".urdf" else "model/stl"
+        return FileResponse(requested, media_type=media_type)
 
     return app
 

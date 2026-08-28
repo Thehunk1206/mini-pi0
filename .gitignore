@@ -22,8 +22,10 @@ dist/
 runs/
 checkpoints/
 rollouts/
+output/
 *.mp4
 *.png
+!so101/phone_teleop/docs/*.png
 *.npz
 !assets/checkpoints/
 !assets/checkpoints/**

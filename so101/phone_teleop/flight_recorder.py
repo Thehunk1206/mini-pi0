@@ -44,8 +44,16 @@ class ElectricalTelemetrySampler:
         self._temperature_c: dict[str, int] = {}
         self.latest: dict[str, dict[str, float | int]] = {}
 
-    def maybe_read(self, bus, *, force: bool = False) -> dict[str, dict[str, float | int]]:
+    def maybe_read(
+        self,
+        bus,
+        *,
+        force: bool = False,
+        allow_bus_read: bool = True,
+    ) -> dict[str, dict[str, float | int]]:
         now = time.monotonic()
+        if not force and not allow_bus_read:
+            return self.latest
         if not force and now < self.next_sample_at:
             return self.latest
 
@@ -136,6 +144,7 @@ class FlightRecorder:
         phone_action: dict[str, Any] | None = None,
         electrical: dict[str, dict[str, float | int]] | None = None,
         cartesian: dict[str, Any] | None = None,
+        control: dict[str, Any] | None = None,
         loop_ms: float | None = None,
         event: str | None = None,
     ) -> dict[str, Any]:
@@ -163,6 +172,7 @@ class FlightRecorder:
             "cartesian": _json_value(cartesian or {}),
             "phone": _json_value(phone_action or {}),
             "electrical": _json_value(electrical or {}),
+            "control": _json_value(control or {}),
         }
         self._ring.append(sample)
         self._stream.write(json.dumps(sample, separators=(",", ":")) + "\n")
