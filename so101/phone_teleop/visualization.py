@@ -1,4 +1,4 @@
-"""Rerun 3D visualization for measured and commanded SO-101 motion."""
+"""SO-101 Cartesian/URDF snapshots with optional Rerun visualization."""
 
 from __future__ import annotations
 
@@ -83,17 +83,24 @@ class EndEffector3DVisualizer:
         joint_names: list[str],
         urdf_model: URDFKinematicModel,
         trail_length: int = 900,
+        *,
+        rerun_enabled: bool = False,
     ) -> None:
         if trail_length < 2:
             raise ValueError("3D trail length must be at least 2")
         self.kinematics = kinematics
         self.joint_names = list(joint_names)
         self.urdf_model = urdf_model
+        self.rerun_enabled = bool(rerun_enabled)
         self._trail: deque[list[float]] = deque(maxlen=trail_length)
         self._initialized = False
 
     def initialize(self) -> None:
         """Install a Rerun layout containing the 3D view and telemetry plots."""
+        if not self.rerun_enabled:
+            self._initialized = True
+            return
+
         import rerun as rr
         import rerun.blueprint as rrb
 
@@ -142,8 +149,6 @@ class EndEffector3DVisualizer:
         if not self._initialized:
             raise RuntimeError("End-effector visualizer has not been initialized")
 
-        import rerun as rr
-
         snapshot, actual_transform, _target_transform = calculate_cartesian_snapshot(
             self.kinematics, self.joint_names, observation, action
         )
@@ -166,6 +171,11 @@ class EndEffector3DVisualizer:
             actual_links_m=actual_links,
             target_links_m=target_links,
         )
+
+        if not self.rerun_enabled:
+            return snapshot, urdf_snapshot
+
+        import rerun as rr
 
         actual_segments = [
             [actual_links[edge["parent"]], actual_links[edge["child"]]]

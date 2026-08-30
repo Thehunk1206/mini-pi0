@@ -16,6 +16,7 @@
 
 """LeRobot's phone-to-SO100 example, configured for this SO-101 and Android."""
 
+import argparse
 import json
 import math
 import select
@@ -43,7 +44,6 @@ from lerobot.teleoperators.phone import Phone, PhoneConfig
 from lerobot.teleoperators.phone.config_phone import PhoneOS
 from lerobot.teleoperators.phone.phone_processor import MapPhoneActionToRobotAction
 from lerobot.utils.robot_utils import precise_sleep
-from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 from .calibration import effective_joint_limits, load_motor_calibration, positions_outside_limits
 from .control_ui import DesktopControlServer, RuntimeControlState
@@ -188,6 +188,40 @@ def build_phone_processor(
     )
 
 
+def reset_phone_pipeline_on_hold_rising(
+    pipeline: RobotProcessorPipeline,
+    *,
+    hold_active: bool,
+    previous_hold_active: bool,
+) -> bool:
+    """Relatch Cartesian state when the phone clutch is re-engaged.
+
+    While Hold is released, Ruckig may stop before reaching the last requested
+    Cartesian target. Resetting the stateful LeRobot steps on the next rising
+    edge prevents ``EEBoundsAndSafety`` from comparing the newly latched,
+    measured pose with that stale target and reporting a false EE jump.
+    """
+    if not hold_active or previous_hold_active:
+        return False
+    pipeline.reset()
+    return True
+
+
+def phone_gripper_direction(phone_action: dict | None) -> int:
+    """Return ``+1`` for Android A/open, ``-1`` for B/close, or zero."""
+    raw_inputs = (phone_action or {}).get("phone.raw_inputs", {})
+    if not isinstance(raw_inputs, dict):
+        return 0
+    open_pressed = bool(raw_inputs.get("reservedButtonA", False))
+    close_pressed = bool(raw_inputs.get("reservedButtonB", False))
+    return int(open_pressed) - int(close_pressed)
+
+
+def phone_gripper_button_active(phone_action: dict | None) -> bool:
+    """Return whether exactly one Android gripper button is pressed."""
+    return phone_gripper_direction(phone_action) != 0
+
+
 def return_to_base(
     robot: SO100Follower,
     base: dict[str, float],
@@ -196,6 +230,8 @@ def return_to_base(
     telemetry_sampler: ElectricalTelemetrySampler,
     visualizer: EndEffector3DVisualizer,
     runtime_state: RuntimeControlState,
+    *,
+    rerun_enabled: bool = False,
 ) -> None:
     """Move all joints together to the captured base pose with rate/error limits."""
     print("Returning to base position. Release Hold to move...")
@@ -247,7 +283,10 @@ def return_to_base(
             event="return_to_base",
         )
         recorder.record_electrical_summary(telemetry_sampler)
-        log_rerun_data(observation=observation, action=sent_action)
+        if rerun_enabled:
+            from lerobot.utils.visualization_utils import log_rerun_data
+
+            log_rerun_data(observation=observation, action=sent_action)
         runtime_state.publish(
             connected=True,
             phase="return_to_base",
@@ -289,7 +328,7 @@ def wait_for_phone_release(teleop_device: Phone) -> None:
         precise_sleep(0.02)
 
 
-def main():
+def main(*, enable_rerun: bool = False) -> None:
     # Initialize the robot and teleoperator. "handy_bot" selects the existing
     # ~/.cache/huggingface/lerobot/calibration/robots/so_follower/handy_bot.json.
     robot_config = SO100FollowerConfig(
@@ -320,16 +359,22 @@ def main():
     verify_kinematic_urdf(urdf_path, DEFAULT_MODEL_CACHE / model_metadata["urdf"])
 
     # Build pipeline to convert phone action to EE pose action to joint action.
+    orientation_enabled = ENABLE_PHONE_ORIENTATION
     phone_to_robot_joints_processor = build_phone_processor(
         teleop_config.phone_os,
         kinematics_solver,
         joint_names,
-        enable_orientation=ENABLE_PHONE_ORIENTATION,
+        enable_orientation=orientation_enabled,
     )
 
     recorder = FlightRecorder(LOG_DIR, joint_names, fps=FPS)
     telemetry_sampler = ElectricalTelemetrySampler(joint_names, frequency_hz=5.0)
-    visualizer = EndEffector3DVisualizer(kinematics_solver, joint_names, urdf_model)
+    visualizer = EndEffector3DVisualizer(
+        kinematics_solver,
+        joint_names,
+        urdf_model,
+        rerun_enabled=enable_rerun,
+    )
     runtime_state = RuntimeControlState()
     joint_limits = effective_joint_limits(
         urdf_model.revolute_limits_degrees(), motor_calibration
@@ -337,14 +382,15 @@ def main():
     control_stack = PhoneControlStack(joint_names, cycle_s=1.0 / FPS, joint_limits=joint_limits)
     desktop_ui = DesktopControlServer(runtime_state, port=DESKTOP_UI_PORT)
     zero_links = urdf_model.link_positions(dict.fromkeys(joint_names, 0.0))
+    control_mapping = {
+        "orientation_enabled": orientation_enabled,
+        "translation_gain": PHONE_TRANSLATION_GAIN,
+        "max_ee_step_m": MAX_EE_STEP_M,
+        "gripper_speed_factor": GRIPPER_SPEED_FACTOR,
+        "translation_mapping": "LeRobot Android default",
+    }
     runtime_state.publish(
-        control_mapping={
-            "orientation_enabled": ENABLE_PHONE_ORIENTATION,
-            "translation_gain": PHONE_TRANSLATION_GAIN,
-            "max_ee_step_m": MAX_EE_STEP_M,
-            "gripper_speed_factor": GRIPPER_SPEED_FACTOR,
-            "translation_mapping": "LeRobot Android default",
-        },
+        control_mapping=control_mapping,
         active_profile=control_stack.profile,
         filter_settings=control_stack.phone_filter_settings,
         control=control_stack.latest,
@@ -373,7 +419,7 @@ def main():
         )
     print(
         "Phone mapping: "
-        f"{'XYZ plus orientation' if ENABLE_PHONE_ORIENTATION else 'XYZ only'}, "
+        f"{'XYZ plus orientation' if orientation_enabled else 'XYZ only'}, "
         f"translation gain={PHONE_TRANSLATION_GAIN}, "
         f"EE step={MAX_EE_STEP_M:.2f}m, "
         f"gripper speed={GRIPPER_SPEED_FACTOR:.1f}, "
@@ -383,13 +429,19 @@ def main():
         recorder.set_phase("desktop_ui.start")
         desktop_ui.start()
         print(f"Desktop control UI: {desktop_ui.url}")
-        # Calibrate the phone and spawn Rerun before opening the servo bus. This
-        # avoids leaving the serial connection idle during phone calibration.
+        # Calibrate the phone before opening the servo bus. This avoids leaving
+        # the serial connection idle during phone calibration.
         recorder.set_phase("phone.connect_and_calibrate")
         print_phone_reference_pose()
         teleop_device.connect()
-        recorder.set_phase("rerun.start")
-        init_rerun(session_name="phone_so101_teleop")
+        if enable_rerun:
+            recorder.set_phase("rerun.start")
+            from lerobot.utils.visualization_utils import init_rerun
+
+            init_rerun(session_name="phone_so101_teleop")
+            print("Rerun visualization enabled.")
+        else:
+            print("Rerun visualization disabled (start with --rerun to enable it).")
         visualizer.initialize()
         recorder.set_phase("robot.connect")
         robot.connect()
@@ -416,9 +468,20 @@ def main():
                     control_stack.set_filter_settings(
                         requested_settings["filter_settings"]
                     )
+                    requested_orientation = requested_settings["orientation_enabled"]
+                    if requested_orientation != orientation_enabled:
+                        orientation_enabled = requested_orientation
+                        phone_to_robot_joints_processor = build_phone_processor(
+                            teleop_config.phone_os,
+                            kinematics_solver,
+                            joint_names,
+                            enable_orientation=orientation_enabled,
+                        )
+                        control_mapping["orientation_enabled"] = orientation_enabled
                     runtime_state.publish(
                         active_profile=control_stack.profile,
                         filter_settings=control_stack.phone_filter_settings,
+                        control_mapping=control_mapping,
                     )
 
                 if keyboard.poll() == "b" or runtime_state.consume_base_return():
@@ -431,6 +494,7 @@ def main():
                             telemetry_sampler,
                             visualizer,
                             runtime_state,
+                            rerun_enabled=enable_rerun,
                         )
                     except TimeoutError as exc:
                         # A timeout is recoverable: keep holding the last base
@@ -473,6 +537,18 @@ def main():
                 hold_active = bool(
                     phone_obs and phone_obs.get("phone.enabled", False)
                 )
+                gripper_direction = phone_gripper_direction(phone_obs)
+                gripper_active = gripper_direction != 0
+
+                # The phone client zeros translation when Hold rises. Reset the
+                # matching LeRobot Cartesian/IK state at that same boundary so
+                # its jump checker does not retain the target from before the
+                # clutch was released.
+                reset_phone_pipeline_on_hold_rising(
+                    phone_to_robot_joints_processor,
+                    hold_active=hold_active,
+                    previous_hold_active=control_stack.hold_active,
+                )
 
                 measured_positions = {
                     joint: float(robot_obs[f"{joint}.pos"]) for joint in joint_names
@@ -503,6 +579,8 @@ def main():
                         measured_positions,
                         raw_joint_action,
                         hold_active=hold_active,
+                        gripper_active=gripper_active,
+                        gripper_direction=gripper_direction,
                     )
 
                 # Send action to robot.
@@ -524,15 +602,22 @@ def main():
                 # cannot stall the 30 Hz command loop.
                 electrical = telemetry_sampler.maybe_read(
                     robot.bus,
-                    allow_bus_read=not hold_active and not otg_is_moving,
+                    allow_bus_read=(
+                        not hold_active
+                        and not gripper_active
+                        and not otg_is_moving
+                    ),
                 )
                 # Visualize.
                 recorder.set_phase("teleop.visualize")
                 cartesian, urdf_render = visualizer.log(robot_obs, sent_action)
-                log_rerun_data(
-                    observation={**phone_obs, **telemetry_sampler.rerun_scalars()},
-                    action=sent_action,
-                )
+                if enable_rerun:
+                    from lerobot.utils.visualization_utils import log_rerun_data
+
+                    log_rerun_data(
+                        observation={**phone_obs, **telemetry_sampler.rerun_scalars()},
+                        action=sent_action,
+                    )
                 loop_ms = (time.perf_counter() - t0) * 1000.0
                 recorder.set_phase("teleop")
                 recorder.record(
@@ -603,4 +688,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help="open the optional Rerun visualization application",
+    )
+    main(enable_rerun=parser.parse_args().rerun)

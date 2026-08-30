@@ -43,9 +43,9 @@ class PhoneControlStackTest(unittest.TestCase):
             accelerations.append(list(ruckig["acceleration"].values()))
             jerks.append(list(ruckig["jerk"].values()))
         constraints = stack.latest["constraints"]
-        vmax = np.r_[constraints["arm_velocity"], constraints["gripper_velocity"]]
-        amax = np.r_[constraints["arm_acceleration"], constraints["gripper_acceleration"]]
-        jmax = np.r_[constraints["arm_jerk"], constraints["gripper_jerk"]]
+        vmax = np.asarray(constraints["arm_velocity"])
+        amax = np.asarray(constraints["arm_acceleration"])
+        jmax = np.asarray(constraints["arm_jerk"])
         self.assertTrue(np.all(np.max(np.abs(velocities), axis=0) <= vmax + 1e-8))
         self.assertTrue(np.all(np.max(np.abs(accelerations), axis=0) <= amax + 1e-8))
         self.assertTrue(np.all(np.max(np.abs(jerks), axis=0) <= jmax + 1e-8))
@@ -112,6 +112,22 @@ class PhoneControlStackTest(unittest.TestCase):
         np.testing.assert_allclose(constraints["gripper_acceleration"], [45])
         np.testing.assert_allclose(constraints["gripper_jerk"], [180])
 
+    def test_responsive_profile_is_twenty_five_percent_more_aggressive(self):
+        stack = PhoneControlStack(JOINTS)
+        stack.set_profile("Responsive")
+        constraints = stack.commissioning_limits.scaled(stack.profile)
+
+        np.testing.assert_allclose(
+            constraints["arm_velocity"], [75, 75, 75, 112.5, 150]
+        )
+        np.testing.assert_allclose(
+            constraints["arm_acceleration"], [225, 225, 225, 337.5, 450]
+        )
+        np.testing.assert_allclose(
+            constraints["arm_jerk"], [1125, 1125, 1125, 1687.5, 2250]
+        )
+        np.testing.assert_allclose(constraints["gripper_velocity"], [62.5])
+
     def test_filter_settings_can_only_change_with_hold_released(self):
         stack = PhoneControlStack(JOINTS)
         stack.set_filter_settings({"beta": 1.5})
@@ -164,9 +180,9 @@ class PhoneControlStackTest(unittest.TestCase):
             jerks.append(list(ruckig["jerk"].values()))
 
         constraints = stack.latest["constraints"]
-        vmax = np.r_[constraints["arm_velocity"], constraints["gripper_velocity"]]
-        amax = np.r_[constraints["arm_acceleration"], constraints["gripper_acceleration"]]
-        jmax = np.r_[constraints["arm_jerk"], constraints["gripper_jerk"]]
+        vmax = np.asarray(constraints["arm_velocity"])
+        amax = np.asarray(constraints["arm_acceleration"])
+        jmax = np.asarray(constraints["arm_jerk"])
         self.assertTrue(np.all(np.max(np.abs(velocities), axis=0) <= vmax + 1e-8))
         self.assertTrue(
             np.all(np.max(np.abs(accelerations), axis=0) <= amax + 1e-8)
@@ -178,6 +194,60 @@ class PhoneControlStackTest(unittest.TestCase):
         measured = positions([0, -108.7, 0, 0, 0, 0])
         command = stack.step(measured, target([0, -108.7, 0, 0, 0, 0]), hold_active=False)
         self.assertAlmostEqual(command["shoulder_lift.pos"], -108.7)
+
+    def test_gripper_button_tracks_without_moving_released_arm(self):
+        stack = PhoneControlStack(JOINTS)
+        measured = positions(np.zeros(6))
+        request = target([40, 30, 20, 10, 5, 20])
+
+        command = stack.step(
+            measured,
+            request,
+            hold_active=False,
+            gripper_active=True,
+            gripper_direction=1,
+        )
+
+        np.testing.assert_allclose(
+            [command[f"{name}.pos"] for name in JOINTS[:5]],
+            np.zeros(5),
+            atol=1e-12,
+        )
+        self.assertEqual(command["gripper.pos"], 20.0)
+        self.assertNotIn("gripper", stack.latest["ruckig"]["position"])
+        self.assertEqual(
+            stack.latest["gripper_direct"]["status"], "direct_button"
+        )
+
+        released = stack.step(
+            measured,
+            target([0, 0, 0, 0, 0, 0]),
+            hold_active=False,
+            gripper_active=False,
+            gripper_direction=0,
+        )
+        self.assertEqual(released["gripper.pos"], 20.0)
+        self.assertEqual(
+            stack.latest["gripper_direct"]["status"], "direct_hold"
+        )
+
+    def test_direct_gripper_command_is_not_paused_by_following_error(self):
+        stack = PhoneControlStack(JOINTS)
+        measured = positions([0, 0, 0, 0, 0, 30])
+        close_request = target([0, 0, 0, 0, 0, 10])
+
+        command = stack.step(
+            measured,
+            close_request,
+            hold_active=False,
+            gripper_active=True,
+            gripper_direction=-1,
+        )
+
+        self.assertEqual(command["gripper.pos"], 10.0)
+        self.assertFalse(stack.latest["tracking"]["fault"])
+        self.assertFalse(stack.latest["tracking"]["paused"])
+        self.assertEqual(stack.latest["tracking"]["errors"]["gripper"], 20.0)
 
 
 if __name__ == "__main__":

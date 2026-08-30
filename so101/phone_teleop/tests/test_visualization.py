@@ -1,11 +1,14 @@
 import unittest
+from pathlib import Path
 
 import numpy as np
 
 from so101.phone_teleop.visualization import (
+    EndEffector3DVisualizer,
     calculate_cartesian_snapshot,
     ordered_joint_positions,
 )
+from so101.phone_teleop.urdf_model import URDFKinematicModel
 
 
 JOINTS = [
@@ -55,6 +58,29 @@ class CartesianVisualizationTest(unittest.TestCase):
         incomplete.pop("gripper.pos")
         with self.assertRaisesRegex(ValueError, "gripper.pos"):
             ordered_joint_positions(incomplete, JOINTS)
+
+    def test_snapshots_work_with_rerun_disabled(self):
+        urdf_path = (
+            Path(__file__).resolve().parents[1]
+            / "kinematics"
+            / "so101_kinematics.urdf"
+        )
+        visualizer = EndEffector3DVisualizer(
+            FakeKinematics(),
+            JOINTS,
+            URDFKinematicModel.from_file(urdf_path),
+            rerun_enabled=False,
+        )
+        visualizer.initialize()
+
+        snapshot, render = visualizer.log(
+            joint_dict([0, 0, 0, 0, 0, 0]),
+            joint_dict([1, 2, 3, 4, 5, 6]),
+        )
+
+        self.assertEqual(snapshot.target_position_m, [1.0, 2.0, 3.0])
+        self.assertEqual(render.name, "so101_new_calib")
+        self.assertGreaterEqual(len(render.edges), 6)
 
 
 if __name__ == "__main__":

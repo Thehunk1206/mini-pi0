@@ -91,7 +91,19 @@ class RuntimeControlState:
                 for name, value in settings.items()
                 if name in PHONE_FILTER_SETTING_BOUNDS
             }
-            unknown = set(settings) - {"profile", *PHONE_FILTER_SETTING_BOUNDS}
+            orientation_enabled = settings.get(
+                "orientation_enabled",
+                self._live.get("control_mapping", {}).get(
+                    "orientation_enabled", False
+                ),
+            )
+            if not isinstance(orientation_enabled, bool):
+                raise ValueError("orientation_enabled must be true or false")
+            unknown = set(settings) - {
+                "profile",
+                "orientation_enabled",
+                *PHONE_FILTER_SETTING_BOUNDS,
+            }
             if unknown:
                 raise ValueError(f"Unsupported live setting(s): {', '.join(sorted(unknown))}")
             filter_settings = validated_phone_filter_settings(
@@ -103,6 +115,7 @@ class RuntimeControlState:
             self._settings_requested = {
                 "profile": profile,
                 "filter_settings": filter_settings,
+                "orientation_enabled": orientation_enabled,
             }
 
     def consume_settings(self) -> dict[str, Any] | None:

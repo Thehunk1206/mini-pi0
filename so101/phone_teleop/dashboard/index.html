@@ -71,6 +71,9 @@
           <label class="field">Motion profile<select id="profileSelect">
             <option>Smooth</option><option>Safe</option><option>Balanced</option><option>Responsive</option>
           </select></label>
+          <label id="orientationField" class="toggle hidden">
+            <input id="orientationEnabled" type="checkbox"><span></span>Enable phone orientation
+          </label>
           <div id="advancedSettings" class="advanced-grid">
             <label>Min cutoff <input id="minCutoff" type="number" min="0.1" max="10" step="0.05" value="1"></label>
             <label>Beta <input id="beta" type="number" min="0" max="10" step="0.1" value="2"></label>

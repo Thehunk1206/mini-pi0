@@ -5,7 +5,7 @@ import URDFLoader from "/static/vendor/urdf-loader/URDFLoader.js";
 const STREAMS = ["raw_ik", "one_euro", "kalman", "quintic", "ruckig", "measured"];
 const STREAM_LABELS = { raw_ik: "Raw IK", one_euro: "One-Euro", kalman: "Kalman", quintic: "Custom quintic", ruckig: "Ruckig", measured: "Measured" };
 const COLORS = { raw_ik: "#ff6b62", one_euro: "#61c9e8", kalman: "#aa8dff", quintic: "#f1b84b", ruckig: "#5cdf8b", measured: "#dfe8e3" };
-const PROFILE_LABEL = { Smooth: "tuned", Safe: "×1.0", Balanced: "×1.5", Responsive: "×2.0" };
+const PROFILE_LABEL = { Smooth: "tuned", Safe: "×1.0", Balanced: "×1.5", Responsive: "×2.5" };
 const GRIPPER_RANGE = [-0.174533, 1.74533];
 
 const $ = (id) => document.getElementById(id);
@@ -13,6 +13,7 @@ const elements = Object.fromEntries([
   "modeBadge", "phaseBadge", "profileLabel", "viewer", "modelStatus", "ghostToggle", "fitButton", "resetCameraButton",
   "liveMetrics", "simControls", "liveControls", "timelinePanel", "scenarioSelect", "recordingField", "recordingPath", "targetEditor", "loadScenarioButton",
   "selectedStream", "streamChecks", "profileSelect", "advancedSettings", "minCutoff", "beta", "derivativeCutoff", "deadband", "applySettingsButton",
+  "orientationField", "orientationEnabled",
   "settingsMessage", "baseButton", "restartButton", "playButton", "stepButton", "timeLabel", "timeline", "speedSelect",
   "plotJoint", "positionPlot", "velocityPlot", "accelerationPlot", "jerkPlot", "phonePlot", "telemetryPlot", "jointRows", "otgResult", "toast"
 ].map((id) => [id, $(id)]));
@@ -195,7 +196,7 @@ function updateState(state){
   app.state=state; elements.modeBadge.textContent=state.mode==="simulation"?"HARDWARE FREE":"LIVE HARDWARE";elements.phaseBadge.textContent=(state.phase||"unknown").toUpperCase();
   const profile=state.active_profile||"Safe";elements.profileLabel.textContent=`${profile} ${PROFILE_LABEL[profile]||""}`;
   const filter=state.filter_settings||state.control?.filter_settings||{};
-  if(!app.settingsDirty){elements.profileSelect.value=profile;[[elements.minCutoff,"min_cutoff_hz",1],[elements.beta,"beta",1],[elements.derivativeCutoff,"derivative_cutoff_hz",1],[elements.deadband,"deadband_m",1000]].forEach(([input,key,scale])=>{if(Number.isFinite(Number(filter[key])))input.value=Number(filter[key])*scale;});}
+  if(!app.settingsDirty){elements.profileSelect.value=profile;elements.orientationEnabled.checked=Boolean(state.control_mapping?.orientation_enabled);[[elements.minCutoff,"min_cutoff_hz",1],[elements.beta,"beta",1],[elements.derivativeCutoff,"derivative_cutoff_hz",1],[elements.deadband,"deadband_m",1000]].forEach(([input,key,scale])=>{if(Number.isFinite(Number(filter[key])))input.value=Number(filter[key])*scale;});}
   elements.applySettingsButton.disabled=Boolean(state.phone_enabled);
   if(app.settingsDirty)elements.settingsMessage.textContent=state.phone_enabled?"Release Hold to enable Apply.":"Ready to apply while Hold is released.";
   if (state.mode === "simulation" && [...elements.scenarioSelect.options].some(option => option.value === state.scenario)) elements.scenarioSelect.value = state.scenario;
@@ -232,7 +233,7 @@ elements.speedSelect.addEventListener("change",()=>{if(app.state?.playing)playba
 elements.selectedStream.addEventListener("change",async()=>{if(app.meta.mode==="simulation"){try{updateState(await api("/api/streams",{method:"PUT",body:JSON.stringify({selected:elements.selectedStream.value,visible:checkedStreams()})}));}catch(error){toast(error.message,true);}}});
 elements.streamChecks.addEventListener("change",async(event)=>{const visible=checkedStreams();if(!visible.length){event.target.checked=true;return;}if(app.meta.mode==="simulation"){try{updateState(await api("/api/streams",{method:"PUT",body:JSON.stringify({selected:elements.selectedStream.value,visible})}));app.state.visible_streams=visible;redrawPlots();}catch(error){toast(error.message,true);}}});
 elements.plotJoint.addEventListener("change",redrawPlots);
-[elements.profileSelect,elements.minCutoff,elements.beta,elements.derivativeCutoff,elements.deadband].forEach((input) => {
+[elements.profileSelect,elements.orientationEnabled,elements.minCutoff,elements.beta,elements.derivativeCutoff,elements.deadband].forEach((input) => {
   ["input", "change"].forEach((eventName) => input.addEventListener(eventName, () => {
     app.settingsDirty = true;
     if (app.state) updateState(app.state);
@@ -241,7 +242,7 @@ elements.plotJoint.addEventListener("change",redrawPlots);
 function updateScenarioFields(){const recorded=elements.scenarioSelect.value==="recorded_session";elements.recordingField.classList.toggle("hidden",!recorded);elements.targetEditor.classList.toggle("hidden",recorded);}
 elements.scenarioSelect.addEventListener("change",updateScenarioFields);
 elements.loadScenarioButton.addEventListener("click",async()=>{const target=[...elements.targetEditor.querySelectorAll("input")].map(input=>Number(input.value));const payload={name:elements.scenarioSelect.value,target};if(payload.name==="recorded_session")payload.recording=elements.recordingPath.value;elements.loadScenarioButton.disabled=true;elements.loadScenarioButton.textContent="Generating…";elements.settingsMessage.textContent="";try{updateState(await api("/api/scenario",{method:"POST",body:JSON.stringify(payload)}));await refreshHistory();toast("Experiment regenerated from identical target conditions.");}catch(error){toast(error.message,true);}finally{elements.loadScenarioButton.disabled=false;elements.loadScenarioButton.textContent="Load experiment";}});
-elements.applySettingsButton.addEventListener("click",async()=>{const payload={profile:elements.profileSelect.value,min_cutoff_hz:Number(elements.minCutoff.value),beta:Number(elements.beta.value),derivative_cutoff_hz:Number(elements.derivativeCutoff.value),deadband_m:Number(elements.deadband.value)/1000};try{await api("/api/settings",{method:"PUT",body:JSON.stringify(payload)});app.settingsDirty=false;if(app.meta.mode==="live"){await new Promise(resolve=>setTimeout(resolve,100));updateState(await api("/api/state"));}elements.settingsMessage.textContent=app.meta.mode==="simulation"?"Applied. Scenario reset to t = 0.":"Applied to live control.";await refreshHistory();}catch(error){elements.settingsMessage.textContent=error.message;toast(error.message,error.status!==409);}});
+elements.applySettingsButton.addEventListener("click",async()=>{const payload={profile:elements.profileSelect.value,min_cutoff_hz:Number(elements.minCutoff.value),beta:Number(elements.beta.value),derivative_cutoff_hz:Number(elements.derivativeCutoff.value),deadband_m:Number(elements.deadband.value)/1000};if(app.meta.mode==="live")payload.orientation_enabled=elements.orientationEnabled.checked;try{await api("/api/settings",{method:"PUT",body:JSON.stringify(payload)});app.settingsDirty=false;if(app.meta.mode==="live"){await new Promise(resolve=>setTimeout(resolve,100));updateState(await api("/api/state"));}elements.settingsMessage.textContent=app.meta.mode==="simulation"?"Applied. Scenario reset to t = 0.":"Applied to live control.";await refreshHistory();}catch(error){elements.settingsMessage.textContent=error.message;toast(error.message,error.status!==409);}});
 elements.baseButton.addEventListener("click",async()=>{try{updateState(await api("/api/return-to-base",{method:"POST"}));toast("Base return queued. Release Hold.");}catch(error){toast(error.message,true);}});
 
 async function init(){
@@ -249,7 +250,7 @@ async function init(){
     app.meta=await api("/api/meta");elements.plotJoint.innerHTML=app.meta.joint_names.map(name=>`<option value="${name}">${name.replaceAll("_"," ")}</option>`).join("");makeStreamChecks();
     if(app.meta.mode==="simulation"){
       const scenarios=await api("/api/scenarios");elements.scenarioSelect.innerHTML=scenarios.scenarios.map(name=>`<option value="${name}">${name.replaceAll("_"," ")}</option>`).join("");app.target=scenarios.default_target;makeTargetEditor(app.meta.joint_names,app.target);updateScenarioFields();
-    }else{elements.simControls.classList.add("hidden");elements.liveControls.classList.remove("hidden");elements.timelinePanel.classList.add("hidden");}
+    }else{elements.simControls.classList.add("hidden");elements.liveControls.classList.remove("hidden");elements.orientationField.classList.remove("hidden");elements.timelinePanel.classList.add("hidden");}
     const state=await api("/api/state");updateState(state);elements.selectedStream.value=state.selected_stream||"ruckig";await Promise.all([loadModels(app.meta.model_url),refreshHistory()]);
     window.setInterval(async()=>{try{updateState(await api("/api/state"));}catch(error){elements.phaseBadge.textContent="OFFLINE";}},app.meta.mode==="simulation"?80:180);
     if(app.meta.mode==="live")window.setInterval(()=>refreshHistory().catch(()=>{}),1000);

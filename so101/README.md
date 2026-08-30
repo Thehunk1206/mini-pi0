@@ -9,7 +9,7 @@ exclusively while it is running.
 | Directory | Purpose | Entry point |
 | --- | --- | --- |
 | [`joint_ui/`](joint_ui/README.md) | Local six-joint dashboard, telemetry, base pose, and safety controls | `python -m so101.joint_ui.app` |
-| [`phone_teleop/`](phone_teleop/README.md) | Android WebXR control, telemetry/URDF console, Rerun, and incident capture | `python -m so101.phone_teleop.teleoperate` |
+| [`phone_teleop/`](phone_teleop/README.md) | Android WebXR control, telemetry/URDF console, optional Rerun, and incident capture | `python -m so101.phone_teleop.teleoperate` |
 | [`deployment/`](deployment/README.md) | Legacy physical-policy deployment prototype | No supported SO-101 entry point |
 
 ## Shared robot data
