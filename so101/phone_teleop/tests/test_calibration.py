@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from so101.phone_teleop.calibration import (
+    calibrated_joint_limits,
     effective_joint_limits,
     load_motor_calibration,
     positions_outside_limits,
@@ -54,6 +55,27 @@ class CalibrationDataTest(unittest.TestCase):
             {name: (-108.7 if name == "shoulder_lift" else 0.0) for name in JOINTS}, limits
         )
         self.assertEqual(set(outside), {"shoulder_lift"})
+
+    def test_calibrated_limits_preserve_recorded_motor_envelope(self):
+        payload = {
+            name: {
+                "id": index + 1,
+                "drive_mode": 0,
+                "homing_offset": 0,
+                "range_min": 0,
+                "range_max": 4095,
+            }
+            for index, name in enumerate(JOINTS)
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handy_bot.json"
+            path.write_text(json.dumps(payload))
+            calibration = load_motor_calibration(path, JOINTS)
+
+        limits = calibrated_joint_limits(calibration)
+
+        self.assertEqual(limits["wrist_roll"], (-180.0, 180.0))
+        self.assertEqual(limits["gripper"], (0.0, 100.0))
 
 
 if __name__ == "__main__":

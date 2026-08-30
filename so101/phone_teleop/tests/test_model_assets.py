@@ -4,6 +4,7 @@ from pathlib import Path
 
 from so101.phone_teleop.model_assets import (
     EXPECTED_STL_COUNT,
+    KINEMATIC_URDF_PATH,
     MODEL_FILENAME,
     lerobot_to_urdf_radians,
     validate_model_cache,
@@ -41,8 +42,7 @@ class OfficialModelAssetTest(unittest.TestCase):
         official = Path.home() / ".cache/huggingface/lerobot/robot-urdfs/so101" / MODEL_FILENAME
         if not official.is_file():
             self.skipTest("official model cache is not populated")
-        local = Path(__file__).resolve().parents[1] / "kinematics/so101_kinematics.urdf"
-        verify_kinematic_urdf(local, official)
+        verify_kinematic_urdf(KINEMATIC_URDF_PATH, official)
 
 
 if __name__ == "__main__":

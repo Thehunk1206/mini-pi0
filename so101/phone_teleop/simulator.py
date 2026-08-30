@@ -22,23 +22,24 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .control_stack import (
+from so101.teleop.control_stack import (
     CommissioningLimits,
     DEFAULT_JOINT_LIMITS_DEG,
     PROFILE_NAMES,
-    PhoneControlStack,
+    SO101ControlStack,
+)
+from so101.teleop.model_assets import (
+    DEFAULT_MODEL_CACHE,
+    KINEMATIC_URDF_PATH,
+    MODEL_FILENAME,
+    ensure_model_cache,
+    verify_kinematic_urdf,
 )
 from .filtering import (
     DEFAULT_PHONE_FILTER_SETTINGS,
     ConstantVelocityKalmanXYZ,
     OneEuroXYZFilter,
     validated_phone_filter_settings,
-)
-from .model_assets import (
-    DEFAULT_MODEL_CACHE,
-    MODEL_FILENAME,
-    ensure_model_cache,
-    verify_kinematic_urdf,
 )
 from .trajectory import OnlineQuinticRetargeter
 
@@ -166,7 +167,7 @@ class SimulationEngine:
             state = quintic.sample(float(time_s))
             quintic_state[index] = [state.position, state.velocity, state.acceleration, state.jerk]
 
-        ruckig_stack = PhoneControlStack(JOINT_NAMES)
+        ruckig_stack = SO101ControlStack(JOINT_NAMES)
         ruckig_stack.set_profile(self.profile)
         measured = _joint_dict(HOME)
         ruckig_state = np.zeros((len(times), 4, len(JOINT_NAMES)))
@@ -569,8 +570,7 @@ def main() -> None:
         parser.error("The SO-101 simulator may only bind to localhost")
 
     metadata = ensure_model_cache()
-    kinematic = Path(__file__).parent / "kinematics" / "so101_kinematics.urdf"
-    verify_kinematic_urdf(kinematic, DEFAULT_MODEL_CACHE / metadata["urdf"])
+    verify_kinematic_urdf(KINEMATIC_URDF_PATH, DEFAULT_MODEL_CACHE / metadata["urdf"])
     app = create_app(model_cache=DEFAULT_MODEL_CACHE)
     url = f"http://{args.host}:{args.port}"
     if not args.no_browser:

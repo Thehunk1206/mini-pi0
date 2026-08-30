@@ -4,13 +4,33 @@ This directory contains the repository's physical SO-101 utilities. They share
 the same LeRobot calibration and servo bus, but each application owns the bus
 exclusively while it is running.
 
+Phone and gamepad teleoperation share calibration limits, Cartesian/IK helpers,
+base return, visualization, and flight recording in [`teleop/`](teleop/).
+Phone control uses Ruckig; gamepad control uses validated direct joint updates.
+
 ## Applications
 
 | Directory | Purpose | Entry point |
 | --- | --- | --- |
 | [`joint_ui/`](joint_ui/README.md) | Local six-joint dashboard, telemetry, base pose, and safety controls | `python -m so101.joint_ui.app` |
 | [`phone_teleop/`](phone_teleop/README.md) | Android WebXR control, telemetry/URDF console, optional Rerun, and incident capture | `python -m so101.phone_teleop.teleoperate` |
+| [`gamepad_teleop/`](gamepad_teleop/README.md) | Xbox-style articulated velocity control through wrist-pivot IK and direct joint commands | `python -m so101.gamepad_teleop.teleoperate` |
 | [`deployment/`](deployment/README.md) | Legacy physical-policy deployment prototype | No supported SO-101 entry point |
+
+Start with the hardware-free gamepad/Rerun path before opening the servo bus:
+
+```bash
+.venv/bin/python -m so101.gamepad_teleop.simulator --pan-mode velocity
+```
+
+The matching hardware entry point is:
+
+```bash
+.venv/bin/python -m so101.gamepad_teleop.teleoperate --pan-mode velocity
+```
+
+See the [gamepad guide](gamepad_teleop/README.md) for the complete controls,
+absolute-pan option, calibration behavior, logging, and safety checks.
 
 ## Shared robot data
 
