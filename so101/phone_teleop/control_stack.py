@@ -54,13 +54,13 @@ PROFILE_LIMIT_SCALES = {
             "arm_velocity", "arm_acceleration", "arm_jerk",
             "gripper_velocity", "gripper_acceleration", "gripper_jerk",
         ),
-        2.0,
+        2.5,
     ),
 }
 PROFILE_NAMES = tuple(PROFILE_LIMIT_SCALES)
 TARGET_VELOCITY_TIME_CONSTANT_S = 0.12
 TARGET_VELOCITY_LIMIT_FRACTION = 0.8
-TARGET_VELOCITY_LIMIT_MARGIN = np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+TARGET_VELOCITY_LIMIT_MARGIN = np.array([10.0, 10.0, 10.0, 10.0, 10.0])
 
 
 @dataclass(frozen=True)
@@ -226,16 +226,16 @@ class PhoneControlStack:
         self.target_velocity_time_constant_s = float(target_velocity_time_constant_s)
         self.target_velocity_limit_fraction = float(target_velocity_limit_fraction)
         self._arm = _RuckigGroup(5, self.cycle_s)
-        self._gripper = _RuckigGroup(1, self.cycle_s)
         self._previous_hold = False
         self.hold_active = False
         self.paused_fault = False
         self._arm_fault_cycles = 0
         self._last_valid_target: np.ndarray | None = None
-        self._stop_target: np.ndarray | None = None
+        self._arm_stop_target: np.ndarray | None = None
+        self._gripper_command: float | None = None
         self._last_filter_sample: PhoneFilterSample | None = None
         self._previous_velocity_target: np.ndarray | None = None
-        self._filtered_target_velocity = np.zeros(len(self.joint_names), dtype=float)
+        self._filtered_target_velocity = np.zeros(len(self.arm_joint_names), dtype=float)
         self.latest: dict[str, Any] = self._empty_snapshot()
 
     def _empty_snapshot(self) -> dict[str, Any]:
@@ -250,7 +250,18 @@ class PhoneControlStack:
             "active_profile": self.profile,
             "filter_settings": dict(self.phone_filter_settings),
             "constraints": self.commissioning_limits.scaled(self.profile),
-            "clutch": {"active": False, "previous_active": False},
+            "clutch": {
+                "active": False,
+                "previous_active": False,
+                "gripper_active": False,
+                "gripper_direction": 0,
+            },
+            "gripper_direct": {
+                "position": None,
+                "requested_position": None,
+                "direction": 0,
+                "status": "uninitialized",
+            },
             "tracking": {"errors": {}, "warning": False, "fault": False, "paused": False},
             "target_valid": False,
             "target_rejection": None,
@@ -264,13 +275,14 @@ class PhoneControlStack:
         self.paused_fault = False
         self._arm_fault_cycles = 0
         self._last_valid_target = None
-        self._stop_target = None
+        self._arm_stop_target = None
+        self._gripper_command = None
         self._previous_velocity_target = None
         self._filtered_target_velocity.fill(0.0)
         if measured is not None:
             vector = self._measured_vector(measured)
             self._arm.reset(vector[:5])
-            self._gripper.reset(vector[5:])
+            self._gripper_command = float(vector[5])
             self._last_valid_target = vector.copy()
         self.latest = self._empty_snapshot()
         self.latest["ruckig"]["status"] = f"reset:{reason}"
@@ -330,9 +342,13 @@ class PhoneControlStack:
         return values, None
 
     def _command_vector(self) -> np.ndarray:
-        return np.r_[self._arm.position, self._gripper.position]
+        gripper = 0.0 if self._gripper_command is None else self._gripper_command
+        return np.r_[self._arm.position, gripper]
 
-    def _tracking_state(self, measured: np.ndarray) -> tuple[np.ndarray, bool, bool]:
+    def _tracking_state(
+        self,
+        measured: np.ndarray,
+    ) -> tuple[np.ndarray, bool, bool]:
         errors = np.abs(self._command_vector() - measured)
         arm_peak = float(np.max(errors[:5]))
         warning = arm_peak > 10.0
@@ -340,16 +356,16 @@ class PhoneControlStack:
             self._arm_fault_cycles += 1
         else:
             self._arm_fault_cycles = 0
-        fault = self._arm_fault_cycles >= 3 or float(errors[5]) > 10.0
-        return errors, warning, fault
+        arm_fault = self._arm_fault_cycles >= 3
+        return errors, warning, arm_fault
 
     def _quick_stop_target(self) -> np.ndarray:
         limits = self.commissioning_limits.scaled(self.profile)
-        position = self._command_vector()
-        velocity = np.r_[self._arm.velocity, self._gripper.velocity]
-        acceleration_limits = np.r_[limits["arm_acceleration"], limits["gripper_acceleration"]]
+        position = self._arm.position
+        velocity = self._arm.velocity
+        acceleration_limits = np.asarray(limits["arm_acceleration"], dtype=float)
         target = position + np.sign(velocity) * velocity**2 / (2.0 * acceleration_limits)
-        for index, name in enumerate(self.joint_names):
+        for index, name in enumerate(self.arm_joint_names):
             lower, upper = self.joint_limits[name]
             # A measured pose can already be outside a newly tightened model
             # envelope (for example, an old saved base pose). Releasing Hold
@@ -372,9 +388,7 @@ class PhoneControlStack:
             self._filtered_target_velocity.fill(0.0)
         else:
             raw_velocity = (target - self._previous_velocity_target) / self.cycle_s
-            max_velocity = np.r_[
-                active_limits["arm_velocity"], active_limits["gripper_velocity"]
-            ]
+            max_velocity = np.asarray(active_limits["arm_velocity"], dtype=float)
             bounded_velocity = np.clip(
                 raw_velocity,
                 -max_velocity * self.target_velocity_limit_fraction,
@@ -388,7 +402,7 @@ class PhoneControlStack:
             )
 
         # Do not request an outward terminal velocity close to a joint limit.
-        for index, name in enumerate(self.joint_names):
+        for index, name in enumerate(self.arm_joint_names):
             lower, upper = self.joint_limits[name]
             margin = TARGET_VELOCITY_LIMIT_MARGIN[index]
             if target[index] >= upper - margin and self._filtered_target_velocity[index] > 0:
@@ -409,6 +423,8 @@ class PhoneControlStack:
         raw_joint_target: dict[str, Any],
         *,
         hold_active: bool,
+        gripper_active: bool = False,
+        gripper_direction: int = 0,
     ) -> dict[str, float]:
         measured_vector = self._measured_vector(measured)
         if not self._arm.initialized:
@@ -416,30 +432,8 @@ class PhoneControlStack:
 
         previous_hold = self._previous_hold
         self.hold_active = bool(hold_active)
-        errors, warning, fault = self._tracking_state(measured_vector)
-        status = "tracking"
-        rejection: str | None = None
-
-        if fault:
-            self.paused_fault = True
-            self.phone_filter.reset()
-            self._arm.reset(measured_vector[:5])
-            self._gripper.reset(measured_vector[5:])
-            self._last_valid_target = measured_vector.copy()
-            self._stop_target = measured_vector.copy()
-            status = "paused_tracking_fault"
-
-        if self.paused_fault:
-            if not self.hold_active:
-                self.paused_fault = False
-                self._arm_fault_cycles = 0
-                self._arm.reset(measured_vector[:5])
-                self._gripper.reset(measured_vector[5:])
-                self._last_valid_target = measured_vector.copy()
-                self._stop_target = measured_vector.copy()
-                status = "fault_recovered_after_release"
-            else:
-                status = "paused_tracking_fault"
+        gripper_direction = int(np.sign(gripper_direction))
+        gripper_button_active = bool(gripper_active) or gripper_direction != 0
 
         target, rejection = self._target_vector(raw_joint_target)
         target_valid = target is not None
@@ -450,17 +444,61 @@ class PhoneControlStack:
                 name: raw_joint_target.get(f"{name}.pos") for name in self.joint_names
             }
 
+        requested_gripper: float | None = None
+        try:
+            candidate = float(raw_joint_target[f"{GRIPPER_JOINT_NAME}.pos"])
+            lower, upper = self.joint_limits[GRIPPER_JOINT_NAME]
+            if math.isfinite(candidate) and lower <= candidate <= upper:
+                requested_gripper = candidate
+        except (KeyError, TypeError, ValueError):
+            pass
+
+        # The gripper intentionally bypasses Ruckig. LeRobot converts A/B into
+        # a bounded position target, which is sent directly to the servo. With
+        # neither button pressed, retain the last commanded position.
+        if gripper_button_active and requested_gripper is not None:
+            self._gripper_command = requested_gripper
+            gripper_status = "direct_button"
+        elif gripper_button_active:
+            gripper_status = "invalid_target_hold"
+        else:
+            gripper_status = "direct_hold"
+        if self._gripper_command is None:
+            self._gripper_command = float(measured_vector[5])
+
+        errors, warning, arm_fault = self._tracking_state(measured_vector)
+        status = "tracking"
+
+        if arm_fault:
+            self.paused_fault = True
+            self.phone_filter.reset()
+            self._arm.reset(measured_vector[:5])
+            self._last_valid_target = measured_vector.copy()
+            self._arm_stop_target = measured_vector[:5].copy()
+            status = "paused_tracking_fault"
+
+        if self.paused_fault:
+            if not self.hold_active:
+                self.paused_fault = False
+                self._arm_fault_cycles = 0
+                self._arm.reset(measured_vector[:5])
+                self._last_valid_target = measured_vector.copy()
+                self._arm_stop_target = measured_vector[:5].copy()
+                status = "fault_recovered_after_release"
+            else:
+                status = "paused_tracking_fault"
+
+        active_limits = self.commissioning_limits.scaled(self.profile)
         if not self.paused_fault:
-            active_limits = self.commissioning_limits.scaled(self.profile)
             if self.hold_active:
                 if target is not None:
                     self._last_valid_target = target.copy()
                 target_to_use = (
-                    self._last_valid_target.copy()
+                    self._last_valid_target[:5].copy()
                     if self._last_valid_target is not None
-                    else measured_vector.copy()
+                    else measured_vector[:5].copy()
                 )
-                self._stop_target = None
+                self._arm_stop_target = None
                 target_velocity = self._moving_target_velocity(
                     target_to_use,
                     active_limits,
@@ -468,61 +506,68 @@ class PhoneControlStack:
                 )
                 status = "tracking" if target_valid else "holding_last_valid_target"
             else:
-                if previous_hold or self._stop_target is None:
-                    self._stop_target = self._quick_stop_target()
-                target_to_use = self._stop_target.copy()
-                target_velocity = np.zeros(len(self.joint_names), dtype=float)
+                if previous_hold or self._arm_stop_target is None:
+                    self._arm_stop_target = self._quick_stop_target()
+                target_to_use = self._arm_stop_target.copy()
+                target_velocity = np.zeros(len(self.arm_joint_names), dtype=float)
                 self._previous_velocity_target = None
                 self._filtered_target_velocity.fill(0.0)
                 status = "quick_stop" if previous_hold else "released_hold"
 
             arm_result = self._arm.step(
-                target_to_use[:5],
+                target_to_use,
                 active_limits["arm_velocity"],
                 active_limits["arm_acceleration"],
                 active_limits["arm_jerk"],
-                target_velocity=target_velocity[:5],
-            )
-            gripper_result = self._gripper.step(
-                target_to_use[5:],
-                active_limits["gripper_velocity"],
-                active_limits["gripper_acceleration"],
-                active_limits["gripper_jerk"],
-                target_velocity=target_velocity[5:],
+                target_velocity=target_velocity,
             )
         else:
             arm_result = Result.Finished
-            gripper_result = Result.Finished
-            active_limits = self.commissioning_limits.scaled(self.profile)
-            target_velocity = np.zeros(len(self.joint_names), dtype=float)
+            target_velocity = np.zeros(len(self.arm_joint_names), dtype=float)
 
         command = self._command_vector()
-        velocity = np.r_[self._arm.velocity, self._gripper.velocity]
-        acceleration = np.r_[self._arm.acceleration, self._gripper.acceleration]
-        jerk = np.r_[self._arm.jerk, self._gripper.jerk]
-        result_name = f"arm={self._result_name(arm_result)},gripper={self._result_name(gripper_result)}"
         self.latest = {
             "phone_filter": self._last_filter_sample.to_dict() if self._last_filter_sample else {},
             "raw_ik_joint_target": raw_target_payload,
             "ruckig": {
-                "position": dict(zip(self.joint_names, command.tolist(), strict=True)),
-                "velocity": dict(zip(self.joint_names, velocity.tolist(), strict=True)),
-                "acceleration": dict(zip(self.joint_names, acceleration.tolist(), strict=True)),
-                "jerk": dict(zip(self.joint_names, jerk.tolist(), strict=True)),
-                "target_velocity": dict(
-                    zip(self.joint_names, target_velocity.tolist(), strict=True)
+                "position": dict(
+                    zip(self.arm_joint_names, self._arm.position.tolist(), strict=True)
                 ),
-                "result": result_name,
+                "velocity": dict(
+                    zip(self.arm_joint_names, self._arm.velocity.tolist(), strict=True)
+                ),
+                "acceleration": dict(
+                    zip(self.arm_joint_names, self._arm.acceleration.tolist(), strict=True)
+                ),
+                "jerk": dict(
+                    zip(self.arm_joint_names, self._arm.jerk.tolist(), strict=True)
+                ),
+                "target_velocity": dict(
+                    zip(self.arm_joint_names, target_velocity.tolist(), strict=True)
+                ),
+                "result": f"arm={self._result_name(arm_result)}",
                 "status": status,
+            },
+            "gripper_direct": {
+                "position": self._gripper_command,
+                "requested_position": requested_gripper,
+                "direction": gripper_direction,
+                "status": gripper_status,
             },
             "active_profile": self.profile,
             "filter_settings": dict(self.phone_filter_settings),
             "constraints": active_limits,
-            "clutch": {"active": self.hold_active, "previous_active": previous_hold},
+            "clutch": {
+                "active": self.hold_active,
+                "previous_active": previous_hold,
+                "gripper_active": gripper_button_active,
+                "gripper_direction": gripper_direction,
+            },
             "tracking": {
                 "errors": dict(zip(self.joint_names, errors.tolist(), strict=True)),
                 "warning": warning,
-                "fault": fault,
+                "fault": arm_fault,
+                "arm_fault": arm_fault,
                 "arm_fault_cycles": self._arm_fault_cycles,
                 "paused": self.paused_fault,
             },

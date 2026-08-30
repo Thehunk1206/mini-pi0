@@ -19,6 +19,9 @@ from so101.phone_teleop.teleoperate import (
     ENABLE_PHONE_ORIENTATION,
     JOINT_SPEED_DEG_S,
     build_phone_processor,
+    phone_gripper_button_active,
+    phone_gripper_direction,
+    reset_phone_pipeline_on_hold_rising,
 )
 
 
@@ -106,6 +109,44 @@ class OfficialPhonePipelineTest(unittest.TestCase):
         self.assertEqual(gripper.speed_factor, 20.0)
         self.assertEqual(JOINT_SPEED_DEG_S, 40.0)
 
+    def test_hold_rising_resets_stale_cartesian_safety_reference(self):
+        pipeline = self.build(enable_orientation=False)
+        reference = next(
+            step for step in pipeline.steps if isinstance(step, EEReferenceAndDelta)
+        )
+        safety = next(
+            step for step in pipeline.steps if isinstance(step, EEBoundsAndSafety)
+        )
+        reference.reference_ee_pose = np.eye(4)
+        safety._last_pos = np.array([0.3, -0.2, 0.1])
+
+        reset = reset_phone_pipeline_on_hold_rising(
+            pipeline,
+            hold_active=True,
+            previous_hold_active=False,
+        )
+
+        self.assertTrue(reset)
+        self.assertIsNone(reference.reference_ee_pose)
+        self.assertIsNone(safety._last_pos)
+
+    def test_continuous_hold_preserves_cartesian_safety_reference(self):
+        pipeline = self.build(enable_orientation=False)
+        safety = next(
+            step for step in pipeline.steps if isinstance(step, EEBoundsAndSafety)
+        )
+        last_position = np.array([0.1, 0.2, 0.3])
+        safety._last_pos = last_position.copy()
+
+        reset = reset_phone_pipeline_on_hold_rising(
+            pipeline,
+            hold_active=True,
+            previous_hold_active=True,
+        )
+
+        self.assertFalse(reset)
+        np.testing.assert_array_equal(safety._last_pos, last_position)
+
     def test_android_translation_uses_lerobot_default_mapping(self):
         action = {
             "phone.enabled": True,
@@ -119,6 +160,40 @@ class OfficialPhonePipelineTest(unittest.TestCase):
         self.assertEqual(
             [result[key] for key in ("target_x", "target_y", "target_z")],
             [0.1, 0.2, 0.3],
+        )
+
+    def test_android_a_and_b_buttons_activate_gripper_independently(self):
+        self.assertTrue(
+            phone_gripper_button_active(
+                {"phone.raw_inputs": {"reservedButtonA": True}}
+            )
+        )
+        self.assertTrue(
+            phone_gripper_button_active(
+                {"phone.raw_inputs": {"reservedButtonB": True}}
+            )
+        )
+        self.assertFalse(
+            phone_gripper_button_active(
+                {
+                    "phone.raw_inputs": {
+                        "reservedButtonA": True,
+                        "reservedButtonB": True,
+                    }
+                }
+            )
+        )
+        self.assertEqual(
+            phone_gripper_direction(
+                {"phone.raw_inputs": {"reservedButtonA": True}}
+            ),
+            1,
+        )
+        self.assertEqual(
+            phone_gripper_direction(
+                {"phone.raw_inputs": {"reservedButtonB": True}}
+            ),
+            -1,
         )
 
     def test_xyz_only_filter_preserves_translation_and_zeros_rotation(self):

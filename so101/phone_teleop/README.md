@@ -7,11 +7,11 @@ maps the calibrated phone pose to end-effector targets, solves joint commands
 through inverse kinematics, and provides:
 
 - Android WebXR over USB with ADB port forwarding
-- One-Euro XYZ filtering, a 0.25 mm radial deadband, and synchronized Ruckig OTG
+- One-Euro XYZ filtering, a 0.25 mm radial deadband, and synchronized arm Ruckig OTG
 - tracking-error fault latching with release-to-recover clutch semantics
 - a localhost Three.js console using the official articulated STL model
 - a hardware-free trajectory lab with raw, Kalman, quintic, and Ruckig comparisons
-- Rerun 3D actual/commanded robot tracking and motor telemetry
+- optional Rerun 3D actual/commanded robot tracking and motor telemetry
 - a terminal `B` shortcut for return-to-base and phone recalibration
 - per-motor voltage, current, load, and temperature telemetry
 - 30 Hz session logs and automatic pre-failure incident captures
@@ -50,7 +50,7 @@ so101/phone_teleop/
 | Base position | `~/.cache/huggingface/lerobot/base_positions/robots/so_follower/handy_bot.json` |
 | Phone | Android WebXR |
 | Control rate | 30 Hz |
-| Phone-controlled axes | XYZ translation and gripper; roll/pitch/yaw disabled by the global switch |
+| Phone-controlled axes | XYZ translation and gripper; roll/pitch/yaw disabled by default and selectable in the console |
 | Translation mapping | LeRobot Android default |
 | Translation gain | `0.5` per axis |
 | Cartesian step limit | `0.10 m` per control cycle |
@@ -66,11 +66,8 @@ so101/phone_teleop/
 | LeRobot version | `0.6.1` |
 
 The translation mapping and motion values reproduce the LeRobot phone example.
-No custom X/Y remap is applied. The
-single global `ENABLE_PHONE_ORIENTATION` near the top of `teleoperate.py`
-selects the orientation behavior. It defaults to `False` for XYZ-only control;
-set it to `True` to restore roll, pitch, and yaw. The desktop console cannot
-change the mapping; its base-return control restarts phone calibration.
+No custom X/Y remap is applied. Orientation defaults to off (XYZ-only) and can
+be enabled from the desktop console while Hold is released.
 
 The calibration pose defines the phone-to-robot translation frame. Lay the
 phone flat with its screen facing up and point its top edge straight forward,
@@ -207,18 +204,23 @@ the phone server before opening the servo bus. On Android:
 6. Wait for `Starting teleop loop` before commanding motion.
 
 The desktop console opens automatically at <http://127.0.0.1:8001>. It is
-available during phone calibration and throughout teleoperation. Rerun opens
-automatically after phone calibration. If the browser does not open, visit the
-desktop-console address manually.
+available during phone calibration and throughout teleoperation. Rerun is off
+by default; enable it when needed with:
+
+```bash
+.venv/bin/python -m so101.phone_teleop.teleoperate --rerun
+```
+
+If the browser does not open, visit the desktop-console address manually.
 
 Phone translation controls the end-effector while roll, pitch, and yaw deltas
 are zeroed. The end-effector keeps the orientation captured when **Hold to
-move** establishes the latched phone and robot references. To enable rotation,
-change this global before starting the process:
-
-```python
-ENABLE_PHONE_ORIENTATION = True
-```
+move** establishes the latched phone and robot references. Use **Enable phone
+orientation** in the console to change this behavior while Hold is released.
+A and B open and close the gripper independently of the arm Hold clutch. The
+LeRobot gripper position target bypasses Ruckig and is sent directly to the
+servo while a button is pressed. Releasing both buttons retains the last
+commanded gripper position.
 
 ## Start the hardware-free trajectory lab
 
@@ -266,8 +268,10 @@ It provides:
   temperature for every servo
 - loop time, Cartesian tracking error, minimum bus voltage, and summed current
 - active filter, OTG, profile, clutch, warning, and fault state
-- Smooth/Safe/Balanced/Responsive profile selection while Hold is released
+- Smooth/Safe/Balanced/Responsive profile selection while Hold is released;
+  Responsive uses a `2.5×` commissioning-limit multiplier
 - bounded live One-Euro filter settings while Hold is released
+- live phone-orientation enable/disable while Hold is released
 - **Return to base + recalibrate**, equivalent to terminal `B`
 
 There are no live joint sliders. Settings requests receive HTTP `409` while
@@ -296,7 +300,7 @@ motor power before touching the arm.
 
 ## 3D visualization and flight-recorder logs
 
-Rerun opens with a synchronized 3D robot and end-effector view:
+With `--rerun`, Rerun opens with a synchronized 3D robot and end-effector view:
 
 - green/orange link skeletons: measured and commanded URDF poses
 - green marker and trail: measured end-effector position from forward kinematics
@@ -362,21 +366,23 @@ The live control order is:
    deadband. This keeps the output continuous enough for online retargeting
    without passing the full static phone noise.
 2. `MapPhoneActionToRobotAction` applies the official Android axis map.
-3. When `ENABLE_PHONE_ORIENTATION` is `False`, one stateless filter zeros only
+3. When phone orientation is disabled, one stateless filter zeros only
    `target_wx`, `target_wy`, and `target_wz`.
 4. `EEReferenceAndDelta`, `EEBoundsAndSafety`, `GripperVelocityToJoint`, and
    `InverseKinematicsEEToJoints` preserve LeRobot's gain, step, and gripper values.
-5. Non-finite or out-of-envelope IK targets are rejected while the last valid
-   target is retained.
+5. Non-finite or out-of-envelope arm IK targets are rejected while the last
+   valid arm target is retained.
 6. A bounded, low-pass joint-target velocity is estimated from successive valid
-   IK targets. Five-axis synchronized arm Ruckig and separate one-axis gripper
-   Ruckig receive the moving target state and propagate their commanded state
-   every 30 Hz cycle.
+   IK targets. Five-axis synchronized arm Ruckig receives the moving target
+   state and propagates its commanded state every 30 Hz cycle.
+7. The gripper bypasses trajectory generation: A/B update its direct position
+   command and button release holds the last command.
 
 On Hold release, the OTG is immediately retargeted to a bounded stopping point.
-An arm following error over 10° warns; over 15° for three cycles faults. A
-gripper error over 10% faults immediately. A fault resets OTG from measured
-state and remains paused until Hold is released.
+An arm following error over 10° warns; over 15° for three cycles faults. A fault
+resets arm OTG from measured state and remains paused until Hold is released.
+Gripper following error remains visible in telemetry but does not pause or
+retrigger the direct button command.
 
 ## How the educational quintic retargeter works
 

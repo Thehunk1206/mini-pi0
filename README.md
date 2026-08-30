@@ -97,7 +97,7 @@ All physical SO-101 utilities are organized in [`so101/`](so101/README.md):
 - [`joint_ui/`](so101/joint_ui/README.md) provides bounded per-joint sliders,
   live telemetry, base-position controls, and emergency torque release.
 - [`phone_teleop/`](so101/phone_teleop/README.md) provides Android phone-motion
-  control, a live desktop telemetry/URDF console, Rerun visualization, base
+  control, a live desktop telemetry/URDF console, optional Rerun visualization, base
   return/recalibration, and incident logs.
 - [`deployment/`](so101/deployment/README.md) contains an experimental legacy
   policy-deployment prototype; it is not validated for calibrated SO-101 use.

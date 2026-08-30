@@ -44,6 +44,7 @@ class DesktopControlAPITest(unittest.TestCase):
             {
                 "profile": "Balanced",
                 "filter_settings": DEFAULT_PHONE_FILTER_SETTINGS,
+                "orientation_enabled": False,
             },
         )
 
@@ -63,6 +64,24 @@ class DesktopControlAPITest(unittest.TestCase):
 
         invalid = self.client.put("/api/settings", json={"deadband_m": 0.5})
         self.assertEqual(invalid.status_code, 422)
+
+    def test_phone_orientation_toggle_is_boolean_and_requires_released_hold(self):
+        response = self.client.put(
+            "/api/settings", json={"orientation_enabled": True}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.state.consume_settings()["orientation_enabled"])
+
+        invalid = self.client.put(
+            "/api/settings", json={"orientation_enabled": "true"}
+        )
+        self.assertEqual(invalid.status_code, 422)
+
+        self.state.publish(phone_enabled=True)
+        conflict = self.client.put(
+            "/api/settings", json={"orientation_enabled": False}
+        )
+        self.assertEqual(conflict.status_code, 409)
 
     def test_base_return_is_queued_once(self):
         response = self.client.post("/api/return-to-base")

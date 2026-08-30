@@ -174,19 +174,37 @@ class SimulationEngine:
         simulated_measured = HOME.copy()
         ruckig_results: list[str] = []
         for index, requested in enumerate(one_euro_targets):
+            control_active = bool(times[index] >= 0.5)
+            gripper_direction = int(np.sign(requested[5] - simulated_measured[5]))
             command = ruckig_stack.step(
                 measured,
                 {f"{joint}.pos": float(value) for joint, value in zip(JOINT_NAMES, requested, strict=True)},
-                hold_active=bool(times[index] >= 0.5),
+                hold_active=control_active,
+                gripper_active=control_active,
+                gripper_direction=gripper_direction,
             )
             snapshot = ruckig_stack.latest["ruckig"]
-            command_vector = np.asarray(list(snapshot["position"].values()))
+            command_vector = np.asarray(
+                [command[f"{joint}.pos"] for joint in JOINT_NAMES], dtype=float
+            )
             simulated_measured += 0.72 * (command_vector - simulated_measured)
             measured_positions[index] = simulated_measured
             measured = _joint_dict(simulated_measured)
-            for derivative_index, field in enumerate(("position", "velocity", "acceleration", "jerk")):
-                ruckig_state[index, derivative_index] = list(snapshot[field].values())
+            ruckig_state[index, 0] = command_vector
+            for derivative_index, field in enumerate(
+                ("velocity", "acceleration", "jerk"), start=1
+            ):
+                ruckig_state[index, derivative_index, :5] = list(
+                    snapshot[field].values()
+                )
             ruckig_results.append(snapshot["result"])
+
+        # The sixth axis is deliberately direct rather than Ruckig-generated;
+        # numerical derivatives make its discontinuities visible in the lab.
+        for derivative_index in range(1, 4):
+            ruckig_state[:, derivative_index, 5] = np.gradient(
+                ruckig_state[:, derivative_index - 1, 5], 1.0 / FPS
+            )
 
         streams = {
             "raw_ik": _derivative_stream(raw_targets, 1.0 / FPS),
@@ -205,7 +223,11 @@ class SimulationEngine:
 
         samples: list[dict[str, Any]] = []
         for index, time_s in enumerate(times):
-            speed_fraction = np.abs(ruckig_state[index, 1]) / np.maximum(vmax, 1e-9)
+            speed_fraction = np.clip(
+                np.abs(ruckig_state[index, 1]) / np.maximum(vmax, 1e-9),
+                0.0,
+                1.0,
+            )
             electrical = {
                 joint: {
                     "voltage_v": 7.4 - 0.08 * float(speed_fraction[joint_index]),
