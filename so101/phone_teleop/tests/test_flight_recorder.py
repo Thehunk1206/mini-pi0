@@ -37,12 +37,14 @@ class FlightRecorderTest(unittest.TestCase):
                 requested_action={"shoulder_pan.pos": 8.0, "gripper.pos": 9.0},
                 action={"shoulder_pan.pos": 4.0, "gripper.pos": 5.0},
                 cartesian={"error_m": 0.01},
+                gamepad_action={"deadman": True, "left_x": 0.25},
             )
             recorder.close()
 
             self.assertEqual(sample["requested_commands"]["shoulder_pan"], 8.0)
             self.assertEqual(sample["commands"]["shoulder_pan"], 4.0)
             self.assertEqual(sample["cartesian"]["error_m"], 0.01)
+            self.assertEqual(sample["gamepad"]["left_x"], 0.25)
             persisted = json.loads(recorder.session_path.read_text().strip())
             self.assertEqual(persisted["cartesian"], {"error_m": 0.01})
 

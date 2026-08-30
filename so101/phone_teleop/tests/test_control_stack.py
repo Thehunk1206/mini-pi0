@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import Mock
 
 import numpy as np
+from ruckig import RuckigError
 
 from so101.phone_teleop.control_stack import HoldActiveError, PhoneControlStack
 
@@ -71,6 +73,40 @@ class PhoneControlStackTest(unittest.TestCase):
         stack.step(measured, bad, hold_active=True)
         self.assertFalse(stack.latest["target_valid"])
         self.assertEqual(stack.latest["ruckig"]["status"], "holding_last_valid_target")
+
+    def test_multi_limit_ik_saturation_is_rejected(self):
+        stack = PhoneControlStack(JOINTS)
+        measured = positions(np.zeros(6))
+        saturated = target([109.9999, -100.00004, -13.0, -94.9998, 0.0, 35.0])
+        stack.step(measured, saturated, hold_active=True)
+        self.assertFalse(stack.latest["target_valid"])
+        self.assertIn("saturates multiple joint limits", stack.latest["target_rejection"])
+
+    def test_configured_ik_target_jump_is_rejected(self):
+        stack = PhoneControlStack(
+            JOINTS,
+            max_target_step_deg=(12.0, 15.0, 18.0, 18.0, 25.0),
+        )
+        stack.step(positions(np.zeros(6)), target([50, 0, 0, 0, 0, 0]), hold_active=True)
+        self.assertFalse(stack.latest["target_valid"])
+        self.assertIn("IK target jump rejected", stack.latest["target_rejection"])
+
+    def test_unrecoverable_ruckig_error_pauses_instead_of_crashing(self):
+        stack = PhoneControlStack(JOINTS)
+        measured = positions(np.zeros(6))
+        stack.step(measured, target(np.zeros(6)), hold_active=True)
+        stack._arm.step = Mock(
+            side_effect=[RuckigError("primary"), RuckigError("retry")]
+        )
+
+        command = stack.step(measured, target([5, 0, 0, 0, 0, 0]), hold_active=True)
+
+        self.assertEqual(stack.latest["ruckig"]["status"], "paused_otg_error")
+        self.assertTrue(stack.latest["tracking"]["otg_fault"])
+        self.assertTrue(stack.latest["tracking"]["paused"])
+        np.testing.assert_allclose(
+            [command[f"{name}.pos"] for name in JOINTS[:5]], np.zeros(5)
+        )
 
     def test_tracking_fault_latches_until_hold_is_released(self):
         stack = PhoneControlStack(JOINTS)

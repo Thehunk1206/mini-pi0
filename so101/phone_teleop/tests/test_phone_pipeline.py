@@ -1,6 +1,4 @@
 import unittest
-from pathlib import Path
-
 import numpy as np
 
 from lerobot.model.kinematics import RobotKinematics
@@ -15,6 +13,7 @@ from lerobot.teleoperators.phone.phone_processor import MapPhoneActionToRobotAct
 from lerobot.utils.rotation import Rotation
 
 from so101.phone_teleop.phone_control import DisablePhoneOrientation
+from so101.teleop.model_assets import KINEMATIC_URDF_PATH
 from so101.phone_teleop.teleoperate import (
     ENABLE_PHONE_ORIENTATION,
     JOINT_SPEED_DEG_S,
@@ -33,9 +32,7 @@ JOINTS = [
     "wrist_roll",
     "gripper",
 ]
-URDF_PATH = (
-    Path(__file__).resolve().parents[1] / "kinematics" / "so101_kinematics.urdf"
-)
+URDF_PATH = KINEMATIC_URDF_PATH
 
 
 class OfficialPhonePipelineTest(unittest.TestCase):

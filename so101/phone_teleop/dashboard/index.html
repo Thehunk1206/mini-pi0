@@ -68,7 +68,7 @@
             <option value="ruckig" selected>Ruckig</option><option value="measured">Measured</option>
           </select></label>
           <div id="streamChecks" class="check-grid"></div>
-          <label class="field">Motion profile<select id="profileSelect">
+          <label id="profileField" class="field">Motion profile<select id="profileSelect">
             <option>Smooth</option><option>Safe</option><option>Balanced</option><option>Responsive</option>
           </select></label>
           <label id="orientationField" class="toggle hidden">
@@ -87,7 +87,7 @@
         <section id="liveControls" class="panel controls-panel hidden">
           <div class="panel-heading"><div><p class="eyebrow">HARDWARE</p><h2>Live control</h2></div></div>
           <button id="baseButton" class="danger">Return to base</button>
-          <p class="hint">Release Hold before base return or settings changes.</p>
+          <p id="liveControlHint" class="hint">Release Hold before base return or settings changes.</p>
         </section>
       </aside>
     </section>
@@ -114,7 +114,7 @@
     </section>
 
     <section class="plots-section split-plots">
-      <article class="plot-card panel large"><div><p class="eyebrow">PHONE INPUT</p><h2>Raw vs filtered XYZ</h2></div><canvas id="phonePlot"></canvas></article>
+      <article class="plot-card panel large"><div><p id="inputPlotEyebrow" class="eyebrow">PHONE INPUT</p><h2 id="inputPlotTitle">Raw vs filtered XYZ</h2></div><canvas id="phonePlot"></canvas></article>
       <article class="plot-card panel large"><div><p class="eyebrow">HARDWARE / REPLAY</p><h2>Electrical and tracking</h2></div><canvas id="telemetryPlot"></canvas></article>
     </section>
 

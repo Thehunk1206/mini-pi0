@@ -17,67 +17,60 @@
 """LeRobot's phone-to-SO100 example, configured for this SO-101 and Android."""
 
 import argparse
-import json
-import math
-import select
-import sys
-import termios
 import time
-import tty
 from pathlib import Path
 
-from lerobot.lerobot_types import RobotAction, RobotObservation
 from lerobot.model.kinematics import RobotKinematics
-from lerobot.processor import (
-    RobotProcessorPipeline,
-    robot_action_observation_to_transition,
-    transition_to_robot_action,
-)
+from lerobot.processor import RobotProcessorPipeline
 from lerobot.robots.so_follower import SO100Follower, SO100FollowerConfig
-from lerobot.robots.so_follower.robot_kinematic_processor import (
-    EEBoundsAndSafety,
-    EEReferenceAndDelta,
-    GripperVelocityToJoint,
-    InverseKinematicsEEToJoints,
-)
 from lerobot.teleoperators.phone import Phone, PhoneConfig
 from lerobot.teleoperators.phone.config_phone import PhoneOS
 from lerobot.teleoperators.phone.phone_processor import MapPhoneActionToRobotAction
 from lerobot.utils.robot_utils import precise_sleep
 
-from .calibration import effective_joint_limits, load_motor_calibration, positions_outside_limits
-from .control_ui import DesktopControlServer, RuntimeControlState
+from so101.teleop.cartesian import build_cartesian_ik_processor
+from so101.teleop.calibration import (
+    effective_joint_limits,
+    load_motor_calibration,
+    positions_outside_limits,
+)
+from so101.teleop.flight_recorder import ElectricalTelemetrySampler, FlightRecorder
+from so101.teleop.control_ui import DesktopControlServer, RuntimeControlState
+from so101.teleop.model_assets import (
+    DEFAULT_MODEL_CACHE,
+    KINEMATIC_URDF_PATH,
+    ensure_model_cache,
+    verify_kinematic_urdf,
+)
+from so101.teleop.runtime import (
+    BASE_POSITION_PATH,
+    DEFAULT_ROBOT_PORT,
+    DESKTOP_UI_PORT,
+    FPS,
+    JOINT_SPEED_DEG_S,
+    MOTOR_CALIBRATION_PATH,
+    TerminalKeyReader,
+    load_base_position,
+    return_to_base,
+)
+from so101.teleop.urdf_model import URDFKinematicModel
+from so101.teleop.visualization import (
+    EndEffector3DVisualizer,
+    configure_rerun_batching,
+)
+
 from .control_stack import PhoneControlStack
-from .flight_recorder import ElectricalTelemetrySampler, FlightRecorder
-from .model_assets import DEFAULT_MODEL_CACHE, ensure_model_cache, verify_kinematic_urdf
 from .phone_control import DisablePhoneOrientation
-from .urdf_model import URDFKinematicModel
-from .visualization import EndEffector3DVisualizer
 
 
-FPS = 30
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = REPO_ROOT / "logs" / "phone_teleop"
-BASE_POSITION_PATH = (
-    Path.home()
-    / ".cache/huggingface/lerobot/base_positions/robots/so_follower/handy_bot.json"
-)
-MOTOR_CALIBRATION_PATH = (
-    Path.home()
-    / ".cache/huggingface/lerobot/calibration/robots/so_follower/handy_bot.json"
-)
-JOINT_SPEED_DEG_S = 40.0
-GRIPPER_SPEED_PERCENT_S = 25.0
-MAX_FOLLOWING_ERROR = 15.0
-BASE_MOVE_TIMEOUT_S = 20.0
-BASE_JOINT_TOLERANCE_DEG = 2.0
-BASE_GRIPPER_TOLERANCE_PERCENT = 3.0
 PHONE_TRANSLATION_GAIN = 0.5
 MAX_EE_STEP_M = 0.10
 GRIPPER_SPEED_FACTOR = 20.0
-DESKTOP_UI_PORT = 8001
 # Set to True to restore roll/pitch/yaw from the LeRobot phone example.
 ENABLE_PHONE_ORIENTATION = False
+RERUN_LOG_EVERY_N_FRAMES = 3
 
 
 def print_phone_reference_pose() -> None:
@@ -90,52 +83,6 @@ def print_phone_reference_pose() -> None:
         "After capture: phone forward/back -> robot forward/back; "
         "left/right -> robot left/right.\n"
     )
-
-
-class TerminalKeyReader:
-    """Read single keys from the launching terminal without blocking the control loop."""
-
-    def __init__(self) -> None:
-        self._fd: int | None = None
-        self._original_attributes: list | None = None
-
-    def __enter__(self):
-        if sys.stdin.isatty():
-            self._fd = sys.stdin.fileno()
-            self._original_attributes = termios.tcgetattr(self._fd)
-            tty.setcbreak(self._fd)
-        else:
-            print("Keyboard shortcut disabled because stdin is not a terminal.")
-        return self
-
-    def poll(self) -> str | None:
-        if self._fd is None:
-            return None
-        readable, _, _ = select.select([self._fd], [], [], 0)
-        return sys.stdin.read(1).lower() if readable else None
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        if self._fd is not None and self._original_attributes is not None:
-            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._original_attributes)
-
-
-def load_base_position(path: Path, joint_names: list[str]) -> dict[str, float]:
-    payload = json.loads(path.read_text())
-    positions = payload.get("positions") if isinstance(payload, dict) else None
-    if not isinstance(positions, dict) or set(positions) != set(joint_names):
-        raise ValueError(f"Invalid six-joint base-position file: {path}")
-
-    base = {joint: float(positions[joint]) for joint in joint_names}
-    if not all(math.isfinite(value) for value in base.values()):
-        raise ValueError(f"Base-position file contains a non-finite value: {path}")
-    return base
-
-
-def bounded_step(current: float, target: float, maximum_step: float) -> float:
-    delta = target - current
-    if abs(delta) <= maximum_step:
-        return target
-    return current + math.copysign(maximum_step, delta)
 
 
 def build_phone_processor(
@@ -152,39 +99,17 @@ def build_phone_processor(
     steps = [MapPhoneActionToRobotAction(platform=phone_os)]
     if not enable_orientation:
         steps.append(DisablePhoneOrientation())
-    steps.extend(
-        [
-            EEReferenceAndDelta(
-                kinematics=kinematics_solver,
-                end_effector_step_sizes={
-                    "x": PHONE_TRANSLATION_GAIN,
-                    "y": PHONE_TRANSLATION_GAIN,
-                    "z": PHONE_TRANSLATION_GAIN,
-                },
-                motor_names=joint_names,
-                use_latched_reference=True,
-            ),
-            EEBoundsAndSafety(
-                end_effector_bounds={
-                    "min": [-1.0, -1.0, -1.0],
-                    "max": [1.0, 1.0, 1.0],
-                },
-                max_ee_step_m=MAX_EE_STEP_M,
-            ),
-            GripperVelocityToJoint(speed_factor=GRIPPER_SPEED_FACTOR),
-            InverseKinematicsEEToJoints(
-                kinematics=kinematics_solver,
-                motor_names=joint_names,
-                initial_guess_current_joints=True,
-            ),
-        ]
-    )
-    return RobotProcessorPipeline[
-        tuple[RobotAction, RobotObservation], RobotAction
-    ](
-        steps=steps,
-        to_transition=robot_action_observation_to_transition,
-        to_output=transition_to_robot_action,
+    return build_cartesian_ik_processor(
+        kinematics_solver,
+        joint_names,
+        input_steps=steps,
+        end_effector_step_sizes={
+            "x": PHONE_TRANSLATION_GAIN,
+            "y": PHONE_TRANSLATION_GAIN,
+            "z": PHONE_TRANSLATION_GAIN,
+        },
+        max_ee_step_m=MAX_EE_STEP_M,
+        gripper_speed_factor=GRIPPER_SPEED_FACTOR,
     )
 
 
@@ -222,104 +147,6 @@ def phone_gripper_button_active(phone_action: dict | None) -> bool:
     return phone_gripper_direction(phone_action) != 0
 
 
-def return_to_base(
-    robot: SO100Follower,
-    base: dict[str, float],
-    joint_names: list[str],
-    recorder: FlightRecorder,
-    telemetry_sampler: ElectricalTelemetrySampler,
-    visualizer: EndEffector3DVisualizer,
-    runtime_state: RuntimeControlState,
-    *,
-    rerun_enabled: bool = False,
-) -> None:
-    """Move all joints together to the captured base pose with rate/error limits."""
-    print("Returning to base position. Release Hold to move...")
-    recorder.set_phase("base.get_initial_observation")
-    observation = robot.get_observation()
-    command = {joint: float(observation[f"{joint}.pos"]) for joint in joint_names}
-    period = 1.0 / FPS
-    started = time.monotonic()
-
-    while time.monotonic() - started < BASE_MOVE_TIMEOUT_S:
-        command = {
-            joint: bounded_step(
-                command[joint],
-                base[joint],
-                (GRIPPER_SPEED_PERCENT_S if joint == "gripper" else JOINT_SPEED_DEG_S) / FPS,
-            )
-            for joint in joint_names
-        }
-        action = {f"{joint}.pos": value for joint, value in command.items()}
-        recorder.set_phase("base.send_action")
-        sent_action = robot.send_action(action)
-        precise_sleep(period)
-        recorder.set_phase("base.get_observation")
-        observation = robot.get_observation()
-        recorder.set_phase("base.read_electrical")
-        electrical = telemetry_sampler.maybe_read(robot.bus)
-        following_errors = {
-            joint: abs(
-                float(sent_action[f"{joint}.pos"])
-                - float(observation[f"{joint}.pos"])
-            )
-            for joint in joint_names
-        }
-        worst_joint = max(following_errors, key=following_errors.get)
-        if following_errors[worst_joint] > MAX_FOLLOWING_ERROR:
-            raise RuntimeError(
-                "Base return stopped because "
-                f"{worst_joint} is not following its command "
-                f"({following_errors[worst_joint]:.1f} error)."
-            )
-
-        cartesian, urdf_render = visualizer.log(observation, sent_action)
-        recorder.record(
-            observation=observation,
-            action=sent_action,
-            requested_action=action,
-            electrical=electrical,
-            cartesian=cartesian.to_dict(),
-            event="return_to_base",
-        )
-        recorder.record_electrical_summary(telemetry_sampler)
-        if rerun_enabled:
-            from lerobot.utils.visualization_utils import log_rerun_data
-
-            log_rerun_data(observation=observation, action=sent_action)
-        runtime_state.publish(
-            connected=True,
-            phase="return_to_base",
-            phone_enabled=False,
-            positions={joint: float(observation[f"{joint}.pos"]) for joint in joint_names},
-            commands={joint: float(sent_action[f"{joint}.pos"]) for joint in joint_names},
-            electrical=electrical,
-            cartesian=cartesian.to_dict(),
-            robot=urdf_render.to_dict(),
-        )
-        reached = all(
-            abs(float(observation[f"{joint}.pos"]) - base[joint])
-            <= (
-                BASE_GRIPPER_TOLERANCE_PERCENT
-                if joint == "gripper"
-                else BASE_JOINT_TOLERANCE_DEG
-            )
-            for joint in joint_names
-        )
-        if reached:
-            print("Base position reached. Phone control is paused until Hold to move is released.")
-            return
-
-    residuals = {
-        joint: abs(float(observation[f"{joint}.pos"]) - base[joint]) for joint in joint_names
-    }
-    residual_text = ", ".join(f"{joint}={error:.1f}" for joint, error in residuals.items())
-    raise TimeoutError(
-        f"Base return did not complete within {BASE_MOVE_TIMEOUT_S:.0f} seconds. "
-        f"Residual errors: {residual_text}"
-    )
-
-
 def wait_for_phone_release(teleop_device: Phone) -> None:
     while True:
         phone_action = teleop_device.get_action()
@@ -332,7 +159,7 @@ def main(*, enable_rerun: bool = False) -> None:
     # Initialize the robot and teleoperator. "handy_bot" selects the existing
     # ~/.cache/huggingface/lerobot/calibration/robots/so_follower/handy_bot.json.
     robot_config = SO100FollowerConfig(
-        port="/dev/cu.usbmodem5B610338651",
+        port=DEFAULT_ROBOT_PORT,
         id="handy_bot",
         use_degrees=True,
         # Keep retries bounded so a corrupted status packet cannot turn one
@@ -347,7 +174,7 @@ def main(*, enable_rerun: bool = False) -> None:
     base_position = load_base_position(BASE_POSITION_PATH, joint_names)
     motor_calibration = load_motor_calibration(MOTOR_CALIBRATION_PATH, joint_names)
 
-    urdf_path = Path(__file__).resolve().parent / "kinematics" / "so101_kinematics.urdf"
+    urdf_path = KINEMATIC_URDF_PATH
     # This is the calibrated SO-101 URDF already checked into this branch.
     kinematics_solver = RobotKinematics(
         urdf_path=str(urdf_path),
@@ -374,6 +201,7 @@ def main(*, enable_rerun: bool = False) -> None:
         joint_names,
         urdf_model,
         rerun_enabled=enable_rerun,
+        rerun_log_every_n_frames=RERUN_LOG_EVERY_N_FRAMES,
     )
     runtime_state = RuntimeControlState()
     joint_limits = effective_joint_limits(
@@ -438,6 +266,7 @@ def main(*, enable_rerun: bool = False) -> None:
             recorder.set_phase("rerun.start")
             from lerobot.utils.visualization_utils import init_rerun
 
+            configure_rerun_batching()
             init_rerun(session_name="phone_so101_teleop")
             print("Rerun visualization enabled.")
         else:
@@ -458,6 +287,7 @@ def main(*, enable_rerun: bool = False) -> None:
         print(
             "Press B in this terminal to return to base and restart phone calibration."
         )
+        rerun_frame_index = 0
         with TerminalKeyReader() as keyboard:
             while True:
                 t0 = time.perf_counter()
@@ -611,13 +441,17 @@ def main(*, enable_rerun: bool = False) -> None:
                 # Visualize.
                 recorder.set_phase("teleop.visualize")
                 cartesian, urdf_render = visualizer.log(robot_obs, sent_action)
-                if enable_rerun:
+                if (
+                    enable_rerun
+                    and rerun_frame_index % RERUN_LOG_EVERY_N_FRAMES == 0
+                ):
                     from lerobot.utils.visualization_utils import log_rerun_data
 
                     log_rerun_data(
                         observation={**phone_obs, **telemetry_sampler.rerun_scalars()},
                         action=sent_action,
                     )
+                rerun_frame_index += 1
                 loop_ms = (time.perf_counter() - t0) * 1000.0
                 recorder.set_phase("teleop")
                 recorder.record(

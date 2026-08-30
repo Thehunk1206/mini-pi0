@@ -31,6 +31,8 @@ class SimRegistryTests(unittest.TestCase):
                 or "torch" in str(e).lower()
                 or "render" in str(e).lower()
                 or "device" in str(e).lower()
+                or "driver" in str(e).lower()
+                or "vulkan" in str(e).lower()
                 or "name not found" in str(e).lower()
             )
             return

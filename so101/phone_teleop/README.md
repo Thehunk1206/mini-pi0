@@ -20,21 +20,25 @@ through inverse kinematics, and provides:
 ## Project layout
 
 ```text
+so101/teleop/                    # Shared by phone and gamepad
+├── cartesian.py                # Authoritative Cartesian/IK pipeline
+├── control_stack.py            # Ruckig/profile/tracking-fault state
+├── runtime.py                  # Base return and terminal/runtime helpers
+├── calibration.py              # handy_bot calibration ranges and metadata
+├── flight_recorder.py          # Electrical telemetry and incident capture
+├── model_assets.py             # Official URDF/STL cache and validation
+├── urdf_model.py               # Lightweight URDF forward kinematics
+├── visualization.py            # Rerun robot/end-effector 3D view and trail
+└── kinematics/
+    └── so101_kinematics.urdf   # Shared self-contained kinematics model
+
 so101/phone_teleop/
-├── teleoperate.py              # Phone, IK, robot control, and base return
-├── control_stack.py            # One-Euro/Ruckig/profile/fault state
+├── teleoperate.py              # Android input adapter and hardware loop
+├── control_stack.py            # Phone-only One-Euro adapter over shared OTG
 ├── filtering.py                # One-Euro and offline Kalman filters
 ├── trajectory.py               # Simulation-only synchronized quintic OTG
-├── calibration.py              # handy_bot calibration ranges and metadata
-├── model_assets.py             # Official URDF/STL cache and validation
 ├── simulator.py                # Hardware-free trajectory-lab entrypoint
-├── flight_recorder.py          # Electrical telemetry and incident capture
-├── control_ui.py               # Thread-safe localhost desktop console
-├── visualization.py            # Rerun robot/end-effector 3D view and trail
-├── urdf_model.py               # Lightweight URDF forward kinematics
 ├── dashboard/                  # Desktop UI HTML, CSS, and JavaScript
-├── kinematics/
-│   └── so101_kinematics.urdf   # Self-contained kinematics model
 ├── tests/                      # Hardware-independent safety/logging tests
 └── README.md
 ```

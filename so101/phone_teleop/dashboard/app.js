@@ -12,8 +12,8 @@ const $ = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   "modeBadge", "phaseBadge", "profileLabel", "viewer", "modelStatus", "ghostToggle", "fitButton", "resetCameraButton",
   "liveMetrics", "simControls", "liveControls", "timelinePanel", "scenarioSelect", "recordingField", "recordingPath", "targetEditor", "loadScenarioButton",
-  "selectedStream", "streamChecks", "profileSelect", "advancedSettings", "minCutoff", "beta", "derivativeCutoff", "deadband", "applySettingsButton",
-  "orientationField", "orientationEnabled",
+  "selectedStream", "streamChecks", "profileField", "profileSelect", "advancedSettings", "minCutoff", "beta", "derivativeCutoff", "deadband", "applySettingsButton",
+  "orientationField", "orientationEnabled", "liveControlHint", "inputPlotEyebrow", "inputPlotTitle",
   "settingsMessage", "baseButton", "restartButton", "playButton", "stepButton", "timeLabel", "timeline", "speedSelect",
   "plotJoint", "positionPlot", "velocityPlot", "accelerationPlot", "jerkPlot", "phonePlot", "telemetryPlot", "jointRows", "otgResult", "toast"
 ].map((id) => [id, $(id)]));
@@ -121,13 +121,14 @@ function makeStreamChecks() {
 function format(value, digits = 1) { return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "—"; }
 function renderMetrics(state) {
   const control = state.control || {}; const filter = control.phone_filter || {};
+  const isGamepad = state.control_source === "gamepad";
   const cutoff = filter.cutoff_hz ? `${format(Math.max(...filter.cutoff_hz), 2)} Hz` : "1.00 Hz";
   const errorValues = Object.values(state.tracking_error || control.tracking?.errors || {});
   const peakError = errorValues.length ? Math.max(...errorValues.map(Number)) : 0;
   const metrics = [
     ["TIME", state.mode === "simulation" ? `${format(state.playback_time_s, 2)} s` : `${format(state.loop_ms, 1)} ms loop`],
-    ["CLUTCH", state.phone_enabled ? "HOLD ACTIVE" : "RELEASED"],
-    ["FILTER CUTOFF", cutoff],
+    [isGamepad ? "GAMEPAD" : "CLUTCH", isGamepad ? "ALWAYS ACTIVE" : (state.phone_enabled ? "HOLD ACTIVE" : "RELEASED")],
+    [isGamepad ? "INPUT SHAPING" : "FILTER CUTOFF", isGamepad ? `expo ${format(control.gamepad?.settings?.expo, 2)}` : cutoff],
     ["PEAK ERROR", `${format(peakError, 2)}${peakError ? "° / %" : ""}`],
     ["STREAM", STREAM_LABELS[state.selected_stream] || "Ruckig command"],
   ];
@@ -194,11 +195,23 @@ function redrawPlots(){plotTrajectoryField(elements.positionPlot,"position");plo
 function checkedStreams(){return [...elements.streamChecks.querySelectorAll("input:checked")].map(input=>input.value);}
 function updateState(state){
   app.state=state; elements.modeBadge.textContent=state.mode==="simulation"?"HARDWARE FREE":"LIVE HARDWARE";elements.phaseBadge.textContent=(state.phase||"unknown").toUpperCase();
+  const isGamepad=state.control_source==="gamepad";
+  if(app.meta?.mode==="live"){
+    elements.advancedSettings.classList.toggle("hidden",isGamepad);
+    elements.profileField.classList.toggle("hidden",isGamepad);
+    elements.orientationField.classList.toggle("hidden",isGamepad);
+    elements.applySettingsButton.classList.toggle("hidden",isGamepad);
+    elements.applySettingsButton.textContent="Apply while Hold is released";
+    elements.liveControlHint.textContent=isGamepad?"Gamepad commands are immediately active; there is no clutch or motion profile.":"Release Hold before base return or settings changes.";
+    elements.inputPlotEyebrow.textContent=isGamepad?"GAMEPAD INPUT":"PHONE INPUT";
+    elements.inputPlotTitle.textContent=isGamepad?"Raw vs shaped XYZ":"Raw vs filtered XYZ";
+  }
   const profile=state.active_profile||"Safe";elements.profileLabel.textContent=`${profile} ${PROFILE_LABEL[profile]||""}`;
   const filter=state.filter_settings||state.control?.filter_settings||{};
   if(!app.settingsDirty){elements.profileSelect.value=profile;elements.orientationEnabled.checked=Boolean(state.control_mapping?.orientation_enabled);[[elements.minCutoff,"min_cutoff_hz",1],[elements.beta,"beta",1],[elements.derivativeCutoff,"derivative_cutoff_hz",1],[elements.deadband,"deadband_m",1000]].forEach(([input,key,scale])=>{if(Number.isFinite(Number(filter[key])))input.value=Number(filter[key])*scale;});}
-  elements.applySettingsButton.disabled=Boolean(state.phone_enabled);
-  if(app.settingsDirty)elements.settingsMessage.textContent=state.phone_enabled?"Release Hold to enable Apply.":"Ready to apply while Hold is released.";
+  elements.applySettingsButton.disabled=isGamepad||Boolean(state.phone_enabled);
+  if(isGamepad)elements.settingsMessage.textContent="Direct gamepad mode has no Ruckig motion profile.";
+  else if(app.settingsDirty)elements.settingsMessage.textContent=state.phone_enabled?"Release Hold to enable Apply.":"Ready to apply while Hold is released.";
   if (state.mode === "simulation" && [...elements.scenarioSelect.options].some(option => option.value === state.scenario)) elements.scenarioSelect.value = state.scenario;
   elements.playButton.textContent=state.playing?"Ⅱ":"▶";
   if(state.mode==="simulation"&&!app.draggingTimeline){elements.timeline.max=state.duration_s;elements.timeline.value=state.playback_time_s;elements.timeLabel.textContent=`${format(state.playback_time_s,2)} / ${format(state.duration_s,2)} s`;}
@@ -213,7 +226,7 @@ async function refreshHistory(){
     const suffix=incremental?`?after_sequence=${app.historySequence}`:"";
     const history=await api(`/api/history${suffix}`);
     if(app.meta.mode==="live"){
-      const incoming=(history.samples||[]).map(sample=>({sequence:Number(sample.sequence),streams:{ruckig:{position:sample.commands||{},velocity:sample.control?.ruckig?.velocity||{},acceleration:sample.control?.ruckig?.acceleration||{},jerk:sample.control?.ruckig?.jerk||{}},measured:{position:sample.positions||{},velocity:{},acceleration:{},jerk:{}}},phone:{raw_xyz_m:sample.control?.phone_filter?.raw_position_m||[0,0,0],filtered_xyz_m:sample.control?.phone_filter?.filtered_position_m||[0,0,0]},electrical:sample.electrical||{},tracking_error:sample.control?.tracking?.errors||{}}));
+      const incoming=(history.samples||[]).map(sample=>{const raw=sample.control?.gamepad?.raw_axes;const shaped=sample.control?.gamepad?.shaped_axes;return {sequence:Number(sample.sequence),streams:{ruckig:{position:sample.commands||{},velocity:sample.control?.ruckig?.velocity||{},acceleration:sample.control?.ruckig?.acceleration||{},jerk:sample.control?.ruckig?.jerk||{}},measured:{position:sample.positions||{},velocity:{},acceleration:{},jerk:{}}},phone:{raw_xyz_m:raw?[-Number(raw.left_y||0),-Number(raw.left_x||0),-Number(raw.right_y||0)]:(sample.control?.phone_filter?.raw_position_m||[0,0,0]),filtered_xyz_m:shaped?[Number(shaped.x||0),Number(shaped.y||0),Number(shaped.z||0)]:(sample.control?.phone_filter?.filtered_position_m||[0,0,0])},electrical:sample.electrical||{},tracking_error:sample.control?.tracking?.errors||{}};});
       const existing=incremental&&!history.reset?(app.history?.samples||[]):[];
       const samples=[...existing,...incoming].slice(-1800);
       const firstSequence=samples[0]?.sequence??0;
@@ -242,7 +255,7 @@ elements.plotJoint.addEventListener("change",redrawPlots);
 function updateScenarioFields(){const recorded=elements.scenarioSelect.value==="recorded_session";elements.recordingField.classList.toggle("hidden",!recorded);elements.targetEditor.classList.toggle("hidden",recorded);}
 elements.scenarioSelect.addEventListener("change",updateScenarioFields);
 elements.loadScenarioButton.addEventListener("click",async()=>{const target=[...elements.targetEditor.querySelectorAll("input")].map(input=>Number(input.value));const payload={name:elements.scenarioSelect.value,target};if(payload.name==="recorded_session")payload.recording=elements.recordingPath.value;elements.loadScenarioButton.disabled=true;elements.loadScenarioButton.textContent="Generating…";elements.settingsMessage.textContent="";try{updateState(await api("/api/scenario",{method:"POST",body:JSON.stringify(payload)}));await refreshHistory();toast("Experiment regenerated from identical target conditions.");}catch(error){toast(error.message,true);}finally{elements.loadScenarioButton.disabled=false;elements.loadScenarioButton.textContent="Load experiment";}});
-elements.applySettingsButton.addEventListener("click",async()=>{const payload={profile:elements.profileSelect.value,min_cutoff_hz:Number(elements.minCutoff.value),beta:Number(elements.beta.value),derivative_cutoff_hz:Number(elements.derivativeCutoff.value),deadband_m:Number(elements.deadband.value)/1000};if(app.meta.mode==="live")payload.orientation_enabled=elements.orientationEnabled.checked;try{await api("/api/settings",{method:"PUT",body:JSON.stringify(payload)});app.settingsDirty=false;if(app.meta.mode==="live"){await new Promise(resolve=>setTimeout(resolve,100));updateState(await api("/api/state"));}elements.settingsMessage.textContent=app.meta.mode==="simulation"?"Applied. Scenario reset to t = 0.":"Applied to live control.";await refreshHistory();}catch(error){elements.settingsMessage.textContent=error.message;toast(error.message,error.status!==409);}});
+elements.applySettingsButton.addEventListener("click",async()=>{const gamepad=app.state?.control_source==="gamepad";const payload={profile:elements.profileSelect.value};if(!gamepad){Object.assign(payload,{min_cutoff_hz:Number(elements.minCutoff.value),beta:Number(elements.beta.value),derivative_cutoff_hz:Number(elements.derivativeCutoff.value),deadband_m:Number(elements.deadband.value)/1000});if(app.meta.mode==="live")payload.orientation_enabled=elements.orientationEnabled.checked;}try{await api("/api/settings",{method:"PUT",body:JSON.stringify(payload)});app.settingsDirty=false;if(app.meta.mode==="live"){await new Promise(resolve=>setTimeout(resolve,100));updateState(await api("/api/state"));}elements.settingsMessage.textContent=app.meta.mode==="simulation"?"Applied. Scenario reset to t = 0.":"Applied to live control.";await refreshHistory();}catch(error){elements.settingsMessage.textContent=error.message;toast(error.message,error.status!==409);}});
 elements.baseButton.addEventListener("click",async()=>{try{updateState(await api("/api/return-to-base",{method:"POST"}));toast("Base return queued. Release Hold.");}catch(error){toast(error.message,true);}});
 
 async function init(){

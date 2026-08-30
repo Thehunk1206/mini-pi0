@@ -37,9 +37,9 @@ mini-pi0 = "mini_pi0.cli.main:main"
 include = ["mini_pi0*", "so101*"]
 
 [tool.setuptools.package-data]
+"so101.teleop" = ["kinematics/*.urdf"]
 "so101.joint_ui" = ["static/*"]
 "so101.phone_teleop" = [
-  "kinematics/*.urdf",
   "dashboard/*",
   "dashboard/vendor/*",
   "dashboard/vendor/three/*",

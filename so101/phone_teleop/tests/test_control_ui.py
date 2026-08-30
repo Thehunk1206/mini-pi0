@@ -8,6 +8,18 @@ from so101.phone_teleop.filtering import DEFAULT_PHONE_FILTER_SETTINGS
 
 
 class DesktopControlAPITest(unittest.TestCase):
+    def test_gamepad_direct_mode_rejects_motion_settings(self):
+        state = RuntimeControlState()
+        state.publish(control_source="gamepad", phone_enabled=True)
+        with self.assertRaisesRegex(ValueError, "no Ruckig motion profile"):
+            state.request_settings({"profile": "Balanced"})
+
+        state.publish(phone_enabled=False)
+        with self.assertRaisesRegex(ValueError, "no Ruckig motion profile"):
+            state.request_settings({"profile": "Balanced"})
+        with self.assertRaisesRegex(ValueError, "no Ruckig motion profile"):
+            state.request_settings({"profile": "Safe", "beta": 2.0})
+
     def setUp(self):
         self.state = RuntimeControlState()
         self.client = TestClient(create_app(self.state, threading.Event()))

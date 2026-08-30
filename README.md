@@ -63,6 +63,8 @@ Click a preview to open the MP4.
   controls, base-pose handling, and live motor telemetry.
 - Smooth Android phone teleoperation for the calibrated SO-101 follower, with
   filtered Cartesian control, jerk-limited motion, and a digital-twin console.
+- Xbox-style SO-101 gamepad teleoperation with calibrated wrist-pivot IK,
+  direct gripper control, Rerun visualization, and dataset episode markers.
 
 ## Repository Layout
 
@@ -87,6 +89,8 @@ examples/configs/
 so101/
   joint_ui/       # Local calibrated browser dashboard
   phone_teleop/   # Android WebXR -> IK -> SO-101 control
+  gamepad_teleop/ # Xbox controller -> calibrated IK/direct SO-101 control
+  teleop/         # Shared calibration, model, logging, and visualization code
   deployment/     # Experimental physical-policy deployment code
 ```
 
@@ -99,6 +103,8 @@ All physical SO-101 utilities are organized in [`so101/`](so101/README.md):
 - [`phone_teleop/`](so101/phone_teleop/README.md) provides Android phone-motion
   control, a live desktop telemetry/URDF console, optional Rerun visualization, base
   return/recalibration, and incident logs.
+- [`gamepad_teleop/`](so101/gamepad_teleop/README.md) provides hardware and
+  hardware-free Xbox-style control with the articulated SO-101 mesh in Rerun.
 - [`deployment/`](so101/deployment/README.md) contains an experimental legacy
   policy-deployment prototype; it is not validated for calibrated SO-101 use.
 
@@ -150,6 +156,13 @@ jerk-limited motion, live hardware visualization, and a hardware-free
 trajectory lab. Start with the [`so101/` hardware-tools overview](so101/README.md),
 then follow the dedicated [phone-teleoperation guide](so101/phone_teleop/README.md)
 for setup, commands, profiles, calibration, simulation, and safety guidance.
+
+### Gamepad teleoperation
+
+Gamepad control uses pygame, calibrated wrist-pivot IK, direct bounded joint
+commands, and the shared SO-101 Rerun model. Follow the dedicated
+[gamepad-teleoperation guide](so101/gamepad_teleop/README.md) for controller
+mapping, the hardware-free simulator, pan modes, dataset buttons, and safety.
 
 ### Hardware safety
 
