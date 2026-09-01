@@ -35,14 +35,24 @@ def _json_value(value: Any) -> Any:
 class ElectricalTelemetrySampler:
     """Poll slower electrical registers without loading the bus every control frame."""
 
-    def __init__(self, joint_names: list[str], frequency_hz: float = 5.0) -> None:
+    def __init__(
+        self,
+        joint_names: list[str],
+        frequency_hz: float = 5.0,
+        *,
+        include_velocity: bool = False,
+        fast_load: bool = False,
+    ) -> None:
         self.joint_names = joint_names
+        self.include_velocity = bool(include_velocity)
+        self.fast_load = bool(fast_load)
         self.interval_s = 1.0 / frequency_hz
         self.next_sample_at = 0.0
         self.next_slow_sample_at = 0.0
         self._load_raw: dict[str, int] = {}
         self._temperature_c: dict[str, int] = {}
         self.latest: dict[str, dict[str, float | int]] = {}
+        self.latest_sample_at: float | None = None
 
     def maybe_read(
         self,
@@ -59,13 +69,24 @@ class ElectricalTelemetrySampler:
 
         voltage_raw = bus.sync_read("Present_Voltage", normalize=False, num_retry=2)
         current_raw = bus.sync_read("Present_Current", normalize=False, num_retry=2)
-        if force or now >= self.next_slow_sample_at or not self._load_raw:
+        velocity_raw = (
+            bus.sync_read("Present_Velocity", normalize=False, num_retry=2)
+            if self.include_velocity
+            else {}
+        )
+        if (
+            self.fast_load
+            or force
+            or now >= self.next_slow_sample_at
+            or not self._load_raw
+        ):
             self._load_raw = {
                 joint: int(value)
                 for joint, value in bus.sync_read(
                     "Present_Load", normalize=False, num_retry=2
                 ).items()
             }
+        if force or now >= self.next_slow_sample_at or not self._temperature_c:
             self._temperature_c = {
                 joint: int(value)
                 for joint, value in bus.sync_read(
@@ -86,14 +107,26 @@ class ElectricalTelemetrySampler:
             }
             for joint in self.joint_names
         }
+        if self.include_velocity:
+            for joint in self.joint_names:
+                self.latest[joint]["velocity_raw"] = int(velocity_raw[joint])
+        self.latest_sample_at = now
         self.next_sample_at = now + self.interval_s
         return self.latest
+
+    def sample_age_s(self, now: float | None = None) -> float:
+        """Return the age of the last successful bus sample."""
+
+        if self.latest_sample_at is None:
+            return 0.0
+        current = time.monotonic() if now is None else float(now)
+        return max(0.0, current - self.latest_sample_at)
 
     def rerun_scalars(self) -> dict[str, float]:
         scalars: dict[str, float] = {}
         for joint, values in self.latest.items():
-            for name in ("voltage_v", "current_ma", "load_percent", "temperature_c"):
-                scalars[f"telemetry.{joint}.{name}"] = float(values[name])
+            for name, value in values.items():
+                scalars[f"telemetry.{joint}.{name}"] = float(value)
         return scalars
 
     def summary(self) -> str:

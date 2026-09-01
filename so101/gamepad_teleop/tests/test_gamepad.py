@@ -101,6 +101,8 @@ class AxisShapingTest(unittest.TestCase):
         self.assertEqual(layout.right_trigger_axis, 5)
         self.assertEqual(layout.rerecord_button, 4)
         self.assertEqual(layout.base_button, 1)
+        self.assertEqual(layout.record_button, 0)
+        self.assertEqual(layout.stop_recording_button, 6)
         self.assertFalse(hasattr(layout, "open_button"))
         self.assertFalse(hasattr(layout, "close_button"))
         self.assertFalse(hasattr(layout, "deadman_button"))
@@ -131,14 +133,20 @@ class AxisShapingTest(unittest.TestCase):
 
         axes[4] = 0.8
         buttons[1] = True
+        buttons[0] = True
+        buttons[6] = True
         left_trigger = gamepad.read(timestamp_s=1.0)
         self.assertEqual(left_trigger.gripper_direction, 1)
         self.assertTrue(left_trigger.return_to_base)
+        self.assertTrue(left_trigger.start_episode)
+        self.assertTrue(left_trigger.stop_recording)
 
         axes[4], axes[5] = 0.0, 0.9
         right_trigger = gamepad.read(timestamp_s=1.1)
         self.assertEqual(right_trigger.gripper_direction, -1)
         self.assertFalse(right_trigger.return_to_base)
+        self.assertFalse(right_trigger.start_episode)
+        self.assertFalse(right_trigger.stop_recording)
 
         axes[4] = 0.8
         both_triggers = gamepad.read(timestamp_s=1.2)

@@ -64,7 +64,8 @@ Click a preview to open the MP4.
 - Smooth Android phone teleoperation for the calibrated SO-101 follower, with
   filtered Cartesian control, jerk-limited motion, and a digital-twin console.
 - Xbox-style SO-101 gamepad teleoperation with calibrated wrist-pivot IK,
-  direct gripper control, Rerun visualization, and dataset episode markers.
+  direct gripper control, Rerun visualization, and gamepad-only multi-camera
+  LeRobotDataset recording/replay with six-position state and action vectors.
 
 ## Repository Layout
 
@@ -104,7 +105,8 @@ All physical SO-101 utilities are organized in [`so101/`](so101/README.md):
   control, a live desktop telemetry/URDF console, optional Rerun visualization, base
   return/recalibration, and incident logs.
 - [`gamepad_teleop/`](so101/gamepad_teleop/README.md) provides hardware and
-  hardware-free Xbox-style control with the articulated SO-101 mesh in Rerun.
+  hardware-free Xbox-style control plus Rerun-only LeRobotDataset recording
+  and replay from named, rotatable cameras.
 - [`deployment/`](so101/deployment/README.md) contains an experimental legacy
   policy-deployment prototype; it is not validated for calibrated SO-101 use.
 
@@ -162,7 +164,8 @@ for setup, commands, profiles, calibration, simulation, and safety guidance.
 Gamepad control uses pygame, calibrated wrist-pivot IK, direct bounded joint
 commands, and the shared SO-101 Rerun model. Follow the dedicated
 [gamepad-teleoperation guide](so101/gamepad_teleop/README.md) for controller
-mapping, the hardware-free simulator, pan modes, dataset buttons, and safety.
+mapping, the hardware-free simulator, pan modes, dataset controls, append or
+recoverable overwrite behavior, position-only training data, replay, and safety.
 
 ### Hardware safety
 

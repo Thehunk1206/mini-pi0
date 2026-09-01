@@ -10,7 +10,7 @@ import termios
 import time
 import tty
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from lerobot.robots.so_follower import SO100Follower
 from lerobot.utils.robot_utils import precise_sleep
@@ -92,6 +92,11 @@ def return_to_base(
     *,
     rerun_enabled: bool = False,
     clutch_label: str | None = "Hold",
+    frame_callback: Callable[
+        [dict[str, Any], dict[str, Any], dict[str, Any]],
+        None,
+    ]
+    | None = None,
 ) -> None:
     """Move all joints together to the captured base pose with rate/error limits."""
     if clutch_label is None:
@@ -146,6 +151,8 @@ def return_to_base(
             event="return_to_base",
         )
         recorder.record_electrical_summary(telemetry_sampler)
+        if frame_callback is not None:
+            frame_callback(observation, sent_action, electrical)
         if rerun_enabled:
             from lerobot.utils.visualization_utils import log_rerun_data
 

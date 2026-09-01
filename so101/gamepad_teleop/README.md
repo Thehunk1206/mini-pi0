@@ -48,6 +48,12 @@ References:
 | Back / View | Log episode rerecord request |
 | A / Start / RB | Currently unused; stick motion is immediately active |
 
+The dataset recorder assigns the otherwise-unused buttons to episode control:
+A starts an episode, Y saves it, X and Back discard it, and Start/Menu
+finalizes the dataset and exits. B only returns to base and does not save,
+discard, start, or stop an episode. If an episode is active, every base-return
+camera/state/action frame remains part of that episode.
+
 The default input settings are a `0.12` deadzone, `0.65` cubic expo blend, and
 a `250 ms` full-scale velocity ramp to remove abrupt starts and stops without
 using Ruckig. Maximum reach/height speeds are `0.12/0.12 m/s`; shoulder pan is
@@ -191,6 +197,97 @@ motor. To run without any graphical interface, use:
 For another servo device, pass `--robot-port /dev/your-device`. A controller
 read failure stops the loop and runs the existing robot disconnect/torque-off
 cleanup path.
+
+## Record a LeRobot dataset
+
+Install the dataset-enabled dependencies, then launch the dedicated Rerun-only
+recorder (it never starts the web UI):
+
+```bash
+.venv/bin/python -m pip install -r so101/gamepad_teleop/requirements.txt
+
+.venv/bin/python -m so101.gamepad_teleop.record \
+  --task "pick up the cube" \
+  --dataset-repo-id local/so101-pick-cube \
+  --dataset-root data/lerobot/so101_pick_cube \
+  --camera wrist=0:180
+```
+
+The default camera is also `wrist=0:180`, which corrects the currently
+upside-down wrist camera. Add as many named OpenCV cameras as needed by
+repeating the option and manually assigning each ID:
+
+```bash
+.venv/bin/python -m so101.gamepad_teleop.record \
+  --task "pick up the cube" \
+  --dataset-repo-id local/so101-pick-cube \
+  --dataset-root data/lerobot/so101_pick_cube \
+  --camera wrist=0:180 \
+  --camera overview=1:0 \
+  --camera side=2:90
+```
+
+Rotation is clockwise and accepts `0`, `90`, `180`, or `270`. Camera IDs,
+rotations, and actual output shapes are validated before the servo bus opens
+and shown in Rerun. If the output already exists, choose one explicit mode:
+
+```bash
+# Append episodes to a compatible dataset.
+.venv/bin/python -m so101.gamepad_teleop.record \
+  --task "pick up the cube" \
+  --dataset-repo-id local/so101-pick-cube \
+  --dataset-root data/lerobot/so101_pick_cube \
+  --camera wrist=0:180 \
+  --append
+
+# Start fresh. The previous directory is moved to a timestamped .backup path.
+.venv/bin/python -m so101.gamepad_teleop.record \
+  --task "pick up the cube" \
+  --dataset-repo-id local/so101-pick-cube \
+  --dataset-root data/lerobot/so101_pick_cube \
+  --camera wrist=0:180 \
+  --overwrite
+```
+
+Append requires the same camera names/shapes, video mode, and state schema.
+Overwrite is recoverable: it archives rather than deletes the previous data.
+
+Rerun places a small articulated measured/commanded SO-101 view in the
+upper-left, a measured/action joint-position plot to its right, and all live
+camera previews across the bottom. Previews are JPEG-compressed and decimated
+to 5 Hz to bound Rerun memory; the dataset still stores every 30 Hz frame as
+MP4 by default. The status panel keeps the live waiting/recording state, save
+and discard events, episode counts, task and output path visible together with
+the gamepad recording commands.
+
+Each LeRobotDataset frame contains:
+
+- `observation.state`: the six measured joint positions only;
+- `action`: the six position commands actually accepted by the robot;
+- one `observation.images.<name>` stream per configured camera; and
+- the natural-language task.
+
+Electrical telemetry remains available to the separate safety/incident flight
+recorder, but is deliberately excluded from the learning dataset. Camera
+videos are encoded sequentially to keep peak memory predictable. An unfinished
+episode is discarded on Start/Menu, Ctrl+C, an exception, or shutdown; only Y
+creates a dataset episode. The recorder writes locally and does not push to
+Hugging Face.
+
+Replay a finalized episode in the same hardware-free Rerun layout:
+
+```bash
+.venv/bin/python -m so101.gamepad_teleop.replay \
+  --dataset-repo-id local/so101-pick-cube \
+  --dataset-root data/lerobot/so101_pick_cube \
+  --episode-index 0
+```
+
+The replay view keeps the articulated measured/commanded mesh and saved camera
+streams, but the time-series panel contains only the six measured
+`state/<joint>.pos` and six commanded `action/<joint>.pos` channels. It never
+opens the controller, cameras, or servo bus. Do not replay an active recording;
+save the episode with Y and finalize it with Start/Menu first.
 
 JSONL flight-recorder sessions are written under `logs/gamepad_teleop/` with
 controller input, measured/requested/commanded joints, Cartesian error,

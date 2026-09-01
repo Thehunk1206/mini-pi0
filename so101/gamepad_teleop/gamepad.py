@@ -17,6 +17,8 @@ from typing import Any
 
 import numpy as np
 
+from lerobot.model.kinematics import RobotKinematics
+
 
 class GamepadConnectionError(RuntimeError):
     """Raised when SDL cannot provide the configured controller."""
@@ -38,6 +40,8 @@ class XboxLayout:
     dpad_down_button: int = 12
     rerecord_button: int = 4  # Back/View
     base_button: int = 1  # B
+    record_button: int = 0  # A
+    stop_recording_button: int = 6  # Start/Menu
 
 
 TRIGGER_ACTIVE_THRESHOLD = 0.12
@@ -51,7 +55,7 @@ PAN_CONTROL_MODES = ("velocity", "absolute")
 
 
 def find_elbow_singularity_deg(
-    kinematics: Any,
+    kinematics: RobotKinematics,
     joint_names: list[str] | tuple[str, ...],
     joint_limits_deg: dict[str, tuple[float, float]],
 ) -> float:
@@ -190,6 +194,8 @@ class GamepadSample:
     failure: bool = False
     rerecord: bool = False
     return_to_base: bool = False
+    start_episode: bool = False
+    stop_recording: bool = False
     raw_axes: tuple[float, ...] = field(default_factory=tuple)
     raw_buttons: tuple[bool, ...] = field(default_factory=tuple)
 
@@ -201,6 +207,10 @@ class GamepadSample:
             return "failure"
         if self.rerecord:
             return "rerecord"
+        if self.start_episode:
+            return "start"
+        if self.stop_recording:
+            return "finish"
         return None
 
     def to_dict(self) -> dict[str, Any]:
@@ -571,6 +581,8 @@ class PygameGamepad:
             failure=rising(self.layout.failure_button),
             rerecord=rising(self.layout.rerecord_button),
             return_to_base=rising(self.layout.base_button),
+            start_episode=rising(self.layout.record_button),
+            stop_recording=rising(self.layout.stop_recording_button),
             raw_axes=axes,
             raw_buttons=buttons,
         )
@@ -612,7 +624,7 @@ class GamepadTargetIntegrator:
 
     def __init__(
         self,
-        kinematics: Any,
+        kinematics: RobotKinematics,
         joint_names: list[str] | tuple[str, ...],
         settings: GamepadMotionSettings | None = None,
         *,

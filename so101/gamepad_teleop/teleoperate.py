@@ -56,6 +56,14 @@ from .pipeline import (
     apply_calibrated_ik_limits,
     build_gamepad_processor,
 )
+from .recording import (
+    CameraRig,
+    GamepadDatasetRecorder,
+    RecordingConfig,
+    RecordingRerunLogger,
+    install_recording_layout,
+    log_joint_positions,
+)
 
 
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "gamepad_teleop"
@@ -91,7 +99,11 @@ def configure_gamepad_servo_response(bus, joint_names: list[str]) -> dict[str, i
     return values
 
 
-def print_controls(settings: GamepadMotionSettings) -> None:
+def print_controls(
+    settings: GamepadMotionSettings,
+    *,
+    recording_enabled: bool = False,
+) -> None:
     print("\nGamepad controls:")
     print("  Left stick horizontal Shoulder pan left / right")
     print("  Left stick vertical   Planar reach forward / backward")
@@ -103,9 +115,17 @@ def print_controls(settings: GamepadMotionSettings) -> None:
         f"({GRIPPER_SPEED_PERCENT_S:.0f}%/s, no Ruckig)"
     )
     print("  B                     Return to saved base pose")
-    print("  Y / X                 Mark episode success / failure")
-    print("  Back                  Mark episode for rerecord")
-    print("  A / Start / RB        Unused")
+    if recording_enabled:
+        print("  A                     Start recording an episode")
+        print("  Y                     Save successful episode")
+        print("  X                     Discard failed episode")
+        print("  Back                  Discard episode for rerecording")
+        print("  Start/Menu            Finalize dataset and exit")
+        print("  RB                    Unused")
+    else:
+        print("  Y / X                 Mark episode success / failure")
+        print("  Back                  Mark episode for rerecord")
+        print("  A / Start / RB        Unused")
     pan_behavior = (
         "stick position -> calibrated span; center -> calibrated midpoint"
         if settings.pan_control_mode == "absolute"
@@ -128,7 +148,10 @@ def main(
     robot_port: str = DEFAULT_ROBOT_PORT,
     pan_control_mode: str = "velocity",
     pan_speed_deg_s: float = 45.0,
+    recording_config: RecordingConfig | None = None,
 ) -> None:
+    if recording_config is not None and not enable_rerun:
+        raise ValueError("gamepad dataset recording requires the Rerun interface")
     settings = GamepadMotionSettings(
         pan_control_mode=pan_control_mode,
         shoulder_pan_velocity_deg_s=pan_speed_deg_s,
@@ -173,7 +196,22 @@ def main(
         elbow_singularity_deg=elbow_singularity_deg,
     )
     recorder = FlightRecorder(LOG_DIR, joint_names, fps=FPS)
-    telemetry_sampler = ElectricalTelemetrySampler(joint_names, frequency_hz=5.0)
+    telemetry_sampler = ElectricalTelemetrySampler(
+        joint_names,
+        frequency_hz=5.0,
+    )
+    camera_rig = (
+        CameraRig(
+            recording_config.camera_specs,
+            fps=recording_config.fps,
+            width=recording_config.camera_width,
+            height=recording_config.camera_height,
+        )
+        if recording_config is not None
+        else None
+    )
+    dataset_recorder: GamepadDatasetRecorder | None = None
+    recording_rerun_logger: RecordingRerunLogger | None = None
     visualizer = EndEffector3DVisualizer(
         kinematics_solver,
         joint_names,
@@ -217,7 +255,30 @@ def main(
         recorder.set_phase("gamepad.connect")
         gamepad.connect()
         print(f"Detected controller: {gamepad.name}")
-        print_controls(settings)
+        print_controls(settings, recording_enabled=recording_config is not None)
+
+        # Camera and dataset failures are resolved before the servo bus opens.
+        if camera_rig is not None and recording_config is not None:
+            recorder.set_phase("cameras.connect")
+            camera_rig.connect()
+            print(
+                "Dataset cameras: "
+                + ", ".join(
+                    f"{spec.description} -> {camera_rig.frame_shapes[spec.name]}"
+                    for spec in recording_config.camera_specs
+                )
+            )
+            recorder.set_phase("dataset.open")
+            dataset_recorder = GamepadDatasetRecorder(
+                recording_config,
+                joint_names,
+                camera_rig.frame_shapes,
+            )
+            dataset_recorder.open()
+            recording_rerun_logger = RecordingRerunLogger(
+                control_fps=FPS,
+                camera_hz=recording_config.rerun_camera_hz,
+            )
 
         if enable_rerun:
             recorder.set_phase("rerun.start")
@@ -232,6 +293,8 @@ def main(
         else:
             print("Rerun visualization disabled by --no-rerun.")
         visualizer.initialize()
+        if recording_config is not None:
+            install_recording_layout(recording_config, controller_name=gamepad.name)
 
         # This is the first operation that opens the servo bus.
         recorder.set_phase("robot.connect")
@@ -270,6 +333,36 @@ def main(
 
         print("Starting direct gamepad teleoperation. Stick motion is immediately active.")
         rerun_frame_index = 0
+
+        def capture_base_return_frame(
+            observation: dict,
+            action: dict,
+            _electrical: dict,
+        ) -> None:
+            """Keep camera, state, and action capture continuous during B return."""
+
+            nonlocal rerun_frame_index
+            if (
+                camera_rig is None
+                or dataset_recorder is None
+                or recording_rerun_logger is None
+            ):
+                return
+            camera_frames = camera_rig.read()
+            recording_rerun_logger.log(
+                dataset_recorder,
+                camera_frames,
+                frame_index=rerun_frame_index,
+            )
+            if enable_rerun and rerun_frame_index % RERUN_LOG_EVERY_N_FRAMES == 0:
+                log_joint_positions(observation, action, joint_names)
+            dataset_recorder.add_frame(
+                observation,
+                action,
+                camera_frames,
+            )
+            rerun_frame_index += 1
+
         # Controller buttons own all runtime actions; there is no web or
         # terminal-key control surface in gamepad teleoperation.
         if gamepad.is_connected:
@@ -278,6 +371,13 @@ def main(
 
                 recorder.set_phase("teleop.get_gamepad_action")
                 gamepad_sample = gamepad.read()
+
+                if (
+                    dataset_recorder is not None
+                    and dataset_recorder.handle_gamepad(gamepad_sample)
+                ):
+                    print("Dataset finish requested. Stopping the arm safely.")
+                    break
 
                 if gamepad_sample.return_to_base:
                     if base_limit_violations:
@@ -305,6 +405,11 @@ def main(
                             None,
                             rerun_enabled=enable_rerun,
                             clutch_label=None,
+                            frame_callback=(
+                                capture_base_return_frame
+                                if dataset_recorder is not None
+                                else None
+                            ),
                         )
                     except TimeoutError as exc:
                         print(f"WARNING: {exc}")
@@ -325,6 +430,7 @@ def main(
 
                 recorder.set_phase("teleop.get_observation")
                 robot_obs = robot.get_observation()
+                camera_frames = camera_rig.read() if camera_rig is not None else {}
                 measured_positions = {
                     joint: float(robot_obs[f"{joint}.pos"]) for joint in joint_names
                 }
@@ -391,7 +497,11 @@ def main(
                 electrical = telemetry_sampler.maybe_read(
                     robot.bus,
                     allow_bus_read=(
-                        not arm_input_active and gamepad_sample.gripper_direction == 0
+                        recording_config is not None
+                        or (
+                            not arm_input_active
+                            and gamepad_sample.gripper_direction == 0
+                        )
                     ),
                 )
 
@@ -401,30 +511,47 @@ def main(
                     enable_rerun
                     and rerun_frame_index % RERUN_LOG_EVERY_N_FRAMES == 0
                 ):
-                    from lerobot.utils.visualization_utils import log_rerun_data
+                    if recording_config is not None:
+                        log_joint_positions(robot_obs, sent_action, joint_names)
+                    else:
+                        from lerobot.utils.visualization_utils import log_rerun_data
 
-                    gamepad_scalars = {
-                        f"gamepad.{name}": float(value)
-                        for name, value in integrated_gamepad_state.get(
-                            "shaped_axes", {}
-                        ).items()
-                    }
-                    gamepad_scalars.update(
-                        {
-                            "gamepad.left_trigger": gamepad_sample.left_trigger,
-                            "gamepad.right_trigger": gamepad_sample.right_trigger,
-                            "gamepad.gripper_direction": float(
-                                gamepad_sample.gripper_direction
-                            ),
+                        gamepad_scalars = {
+                            f"gamepad.{name}": float(value)
+                            for name, value in integrated_gamepad_state.get(
+                                "shaped_axes", {}
+                            ).items()
                         }
+                        gamepad_scalars.update(
+                            {
+                                "gamepad.left_trigger": gamepad_sample.left_trigger,
+                                "gamepad.right_trigger": gamepad_sample.right_trigger,
+                                "gamepad.gripper_direction": float(
+                                    gamepad_sample.gripper_direction
+                                ),
+                            }
+                        )
+                        log_rerun_data(
+                            observation={
+                                **robot_obs,
+                                **gamepad_scalars,
+                                **telemetry_sampler.rerun_scalars(),
+                            },
+                            action=sent_action,
+                        )
+                if (
+                    dataset_recorder is not None
+                    and recording_rerun_logger is not None
+                ):
+                    recording_rerun_logger.log(
+                        dataset_recorder,
+                        camera_frames,
+                        frame_index=rerun_frame_index,
                     )
-                    log_rerun_data(
-                        observation={
-                            **robot_obs,
-                            **gamepad_scalars,
-                            **telemetry_sampler.rerun_scalars(),
-                        },
-                        action=sent_action,
+                    dataset_recorder.add_frame(
+                        robot_obs,
+                        sent_action,
+                        camera_frames,
                     )
                 rerun_frame_index += 1
 
@@ -471,6 +598,19 @@ def main(
                         robot.bus.disconnect(disable_torque=False)
                     except Exception as close_exc:
                         print(f"WARNING: Could not close servo port cleanly: {close_exc}")
+        if dataset_recorder is not None:
+            recorder.set_phase("shutdown.dataset_finalize")
+            try:
+                dataset_recorder.finalize()
+            except Exception as exc:
+                incident_path = recorder.capture_incident(
+                    exc,
+                    during="dataset_finalize",
+                )
+                print(f"DATASET FINALIZE FAILURE CAPTURED: {incident_path}")
+                raise
+        if camera_rig is not None:
+            camera_rig.disconnect()
         gamepad.disconnect()
         recorder.close()
 
