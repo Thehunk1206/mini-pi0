@@ -13,9 +13,11 @@ from so101.gamepad_teleop.recording import (
     CameraSpec,
     GamepadDatasetRecorder,
     RecordingConfig,
+    apply_camera_output_sizes,
     build_dataset_features,
     build_observation_values,
     build_recording_blueprint,
+    center_crop_and_resize,
     parse_camera_spec,
     parse_camera_specs,
     recording_controls_markdown,
@@ -137,6 +139,40 @@ class CameraSpecTest(unittest.TestCase):
             CameraSpec("overview", Path("/dev/video4"), 90),
         )
 
+    def test_camera_specific_fps_is_parsed_and_described(self):
+        spec = parse_camera_spec("wrist=0:180@25")
+        self.assertEqual(spec, CameraSpec("wrist", 0, 180, 25))
+        self.assertEqual(spec.description, "wrist=0:180@25")
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            parse_camera_spec("wrist=0@fast")
+
+    def test_camera_output_sizes_are_applied_by_name(self):
+        specs = apply_camera_output_sizes(
+            (CameraSpec("wrist", 0, 180, 25), CameraSpec("base", 1, 0, 30)),
+            ("wrist=480x480", "base=640x360"),
+        )
+        self.assertEqual(
+            specs,
+            (
+                CameraSpec("wrist", 0, 180, 25, 480, 480),
+                CameraSpec("base", 1, 0, 30, 640, 360),
+            ),
+        )
+        self.assertIn("-> 480x480", specs[0].description)
+        with self.assertRaisesRegex(ValueError, "unknown camera"):
+            apply_camera_output_sizes(specs, ("room=320x240",))
+
+    def test_square_output_is_center_cropped_without_stretching(self):
+        frame = np.zeros((4, 8, 3), dtype=np.uint8)
+        frame[:, :2, 0] = 255
+        frame[:, 6:, 2] = 255
+        frame[:, 2:6, 1] = 255
+        resized = center_crop_and_resize(frame, 2, 2)
+        self.assertEqual(resized.shape, (2, 2, 3))
+        self.assertTrue(np.all(resized[:, :, 0] == 0))
+        self.assertTrue(np.all(resized[:, :, 1] == 255))
+        self.assertTrue(np.all(resized[:, :, 2] == 0))
+
     def test_default_is_upside_down_wrist_camera_and_duplicates_are_rejected(self):
         self.assertEqual(parse_camera_specs(None), (CameraSpec("wrist", 0, 180),))
         with self.assertRaisesRegex(ValueError, "names must be unique"):
@@ -145,6 +181,8 @@ class CameraSpecTest(unittest.TestCase):
             parse_camera_specs(("wrist=0", "room=0"))
 
     def test_camera_rig_supports_multiple_frames(self):
+        requested_profiles = {}
+
         class Camera:
             def __init__(self, frame):
                 self.frame = frame
@@ -163,19 +201,61 @@ class CameraSpecTest(unittest.TestCase):
             "wrist": np.zeros((6, 8, 3), dtype=np.uint8),
             "room": np.zeros((8, 6, 3), dtype=np.uint8),
         }
+
+        def camera_factory(spec, _fps, width, height):
+            requested_profiles[spec.name] = (_fps, width, height)
+            return Camera(frames[spec.name])
+
         rig = CameraRig(
-            (CameraSpec("wrist", 0, 180), CameraSpec("room", 1, 90)),
+            (
+                CameraSpec("wrist", 0, 180, None, 4, 4),
+                CameraSpec("room", 1, 90, 25, 3, 4),
+            ),
             fps=30,
             width=8,
             height=6,
-            camera_factory=lambda spec, *_: Camera(frames[spec.name]),
+            camera_factory=camera_factory,
         )
         rig.connect()
         self.assertTrue(rig.is_connected)
-        self.assertEqual(rig.frame_shapes, {"wrist": (6, 8, 3), "room": (8, 6, 3)})
+        self.assertEqual(
+            requested_profiles,
+            {"wrist": (30, 8, 6), "room": (25, 8, 6)},
+        )
+        self.assertEqual(rig.frame_shapes, {"wrist": (4, 4, 3), "room": (4, 3, 3)})
         self.assertEqual(set(rig.read()), {"wrist", "room"})
         rig.disconnect()
         self.assertFalse(rig.is_connected)
+
+    def test_camera_startup_timeout_is_retried_once(self):
+        attempts = 0
+
+        class Camera:
+            is_connected = False
+
+            def connect(self):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise TimeoutError("slow camera")
+                self.is_connected = True
+
+            def read_latest(self, max_age_ms=500):
+                return np.zeros((6, 8, 3), dtype=np.uint8)
+
+            def disconnect(self):
+                self.is_connected = False
+
+        rig = CameraRig(
+            (CameraSpec("wrist", 0),),
+            fps=30,
+            width=8,
+            height=6,
+            camera_factory=lambda *_: Camera(),
+        )
+        rig.connect()
+        self.assertEqual(attempts, 2)
+        rig.disconnect()
 
 
 class DatasetRecordingTest(unittest.TestCase):

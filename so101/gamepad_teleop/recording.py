@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -24,6 +24,11 @@ from .gamepad import GamepadSample
 
 CAMERA_SPEC_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 CAMERA_ROTATIONS = (0, 90, 180, 270)
+CAMERA_OUTPUT_SIZE_PATTERN = re.compile(
+    r"^(?P<name>[A-Za-z][A-Za-z0-9_]*)=(?P<width>[1-9][0-9]*)x(?P<height>[1-9][0-9]*)$"
+)
+CAMERA_WARMUP_SECONDS = 5
+CAMERA_CONNECT_ATTEMPTS = 2
 
 
 def recording_controls_markdown() -> str:
@@ -57,11 +62,14 @@ def recording_status_markdown(status: dict[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class CameraSpec:
-    """One named camera source and its clockwise display/storage rotation."""
+    """One named camera source plus native and dataset-output settings."""
 
     name: str
     source: int | Path
     rotation_deg: int = 0
+    fps: int | None = None
+    output_width: int | None = None
+    output_height: int | None = None
 
     def __post_init__(self) -> None:
         if not CAMERA_SPEC_PATTERN.fullmatch(self.name):
@@ -73,22 +81,43 @@ class CameraSpec:
             raise ValueError("camera index must be non-negative")
         if self.rotation_deg not in CAMERA_ROTATIONS:
             raise ValueError(f"camera rotation must be one of {CAMERA_ROTATIONS}")
+        if self.fps is not None and self.fps <= 0:
+            raise ValueError("camera fps must be positive")
+        if (self.output_width is None) != (self.output_height is None):
+            raise ValueError("camera output width and height must be specified together")
+        if self.output_width is not None and (
+            self.output_width <= 0 or self.output_height <= 0
+        ):
+            raise ValueError("camera output width and height must be positive")
 
     @property
     def description(self) -> str:
-        return f"{self.name}={self.source}:{self.rotation_deg}"
+        fps = f"@{self.fps}" if self.fps is not None else ""
+        output_size = (
+            f" -> {self.output_width}x{self.output_height}"
+            if self.output_width is not None
+            else ""
+        )
+        return f"{self.name}={self.source}:{self.rotation_deg}{fps}{output_size}"
 
 
 def parse_camera_spec(value: str) -> CameraSpec:
-    """Parse ``NAME=INDEX[:ROTATION]`` (or a device path in place of INDEX)."""
+    """Parse ``NAME=INDEX[:ROTATION][@FPS]``."""
 
     if "=" not in value:
-        raise ValueError("camera must use NAME=INDEX[:ROTATION]")
+        raise ValueError("camera must use NAME=INDEX[:ROTATION][@FPS]")
     name, source_and_rotation = value.split("=", 1)
     name = name.strip()
     source_and_rotation = source_and_rotation.strip()
     if not source_and_rotation:
         raise ValueError("camera source cannot be empty")
+
+    fps: int | None = None
+    if "@" in source_and_rotation:
+        source_and_rotation, fps_text = source_and_rotation.rsplit("@", 1)
+        if not fps_text.strip().isdecimal() or int(fps_text) <= 0:
+            raise ValueError("camera fps must be a positive integer")
+        fps = int(fps_text)
 
     rotation = 0
     source_text = source_and_rotation
@@ -104,7 +133,12 @@ def parse_camera_spec(value: str) -> CameraSpec:
         source = int(source_text)
     else:
         source = Path(source_text).expanduser()
-    return CameraSpec(name=name, source=source, rotation_deg=rotation)
+    return CameraSpec(
+        name=name,
+        source=source,
+        rotation_deg=rotation,
+        fps=fps,
+    )
 
 
 def parse_camera_specs(values: Iterable[str] | None) -> tuple[CameraSpec, ...]:
@@ -120,6 +154,75 @@ def parse_camera_specs(values: Iterable[str] | None) -> tuple[CameraSpec, ...]:
     if not specs:
         raise ValueError("at least one camera is required for dataset recording")
     return specs
+
+
+def apply_camera_output_sizes(
+    specs: Iterable[CameraSpec],
+    values: Iterable[str] | None,
+) -> tuple[CameraSpec, ...]:
+    """Apply repeatable ``NAME=WIDTHxHEIGHT`` output transforms to cameras.
+
+    Frames are center-cropped to the requested aspect ratio before resizing,
+    so non-square source images can become square without geometric stretching.
+    """
+
+    configured = tuple(specs)
+    sizes: dict[str, tuple[int, int]] = {}
+    for value in values or ():
+        match = CAMERA_OUTPUT_SIZE_PATTERN.fullmatch(value.strip())
+        if match is None:
+            raise ValueError("camera output size must use NAME=WIDTHxHEIGHT")
+        name = match.group("name")
+        if name in sizes:
+            raise ValueError(f"camera output size for {name!r} was specified twice")
+        sizes[name] = (int(match.group("width")), int(match.group("height")))
+
+    known_names = {spec.name for spec in configured}
+    unknown_names = set(sizes) - known_names
+    if unknown_names:
+        unknown = ", ".join(sorted(unknown_names))
+        raise ValueError(f"camera output size refers to unknown camera(s): {unknown}")
+
+    return tuple(
+        replace(
+            spec,
+            output_width=sizes[spec.name][0],
+            output_height=sizes[spec.name][1],
+        )
+        if spec.name in sizes
+        else spec
+        for spec in configured
+    )
+
+
+def center_crop_and_resize(
+    frame: np.ndarray,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Center-crop ``frame`` to the target aspect ratio, then resize it."""
+
+    source_height, source_width = frame.shape[:2]
+    if source_width == width and source_height == height:
+        return frame
+
+    if source_width * height > width * source_height:
+        crop_width = max(1, source_height * width // height)
+        left = (source_width - crop_width) // 2
+        cropped = frame[:, left : left + crop_width]
+    elif source_width * height < width * source_height:
+        crop_height = max(1, source_width * height // width)
+        top = (source_height - crop_height) // 2
+        cropped = frame[top : top + crop_height, :]
+    else:
+        cropped = frame
+
+    import cv2
+
+    shrinking = width * height < cropped.shape[0] * cropped.shape[1]
+    interpolation = cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR
+    resized = cv2.resize(cropped, (width, height), interpolation=interpolation)
+    return np.ascontiguousarray(resized)
 
 
 class CameraRig:
@@ -142,6 +245,7 @@ class CameraRig:
         self.fps = int(fps)
         self.width = int(width)
         self.height = int(height)
+        self._specs_by_name = {spec.name: spec for spec in self.specs}
         self._camera_factory = camera_factory or self._make_opencv_camera
         self._cameras: dict[str, Any] = {}
         self._latest: dict[str, np.ndarray] = {}
@@ -163,6 +267,10 @@ class CameraRig:
             width=width,
             height=height,
             rotation=Cv2Rotation(rotation_value),
+            # High-resolution AVFoundation cameras (notably Canon EOS models)
+            # can take longer than LeRobot's one-second default to deliver the
+            # first frame, even though the capture device opened successfully.
+            warmup_s=CAMERA_WARMUP_SECONDS,
         )
         return OpenCVCamera(config)
 
@@ -186,13 +294,24 @@ class CameraRig:
             raise RuntimeError("camera rig is already connected")
         try:
             for spec in self.specs:
-                camera = self._camera_factory(
-                    spec,
-                    self.fps,
-                    self.width,
-                    self.height,
-                )
-                camera.connect()
+                camera_fps = spec.fps or self.fps
+                for attempt in range(1, CAMERA_CONNECT_ATTEMPTS + 1):
+                    camera = self._camera_factory(
+                        spec,
+                        camera_fps,
+                        self.width,
+                        self.height,
+                    )
+                    try:
+                        camera.connect()
+                        break
+                    except TimeoutError:
+                        if attempt == CAMERA_CONNECT_ATTEMPTS:
+                            raise
+                        print(
+                            f"WARNING: camera {spec.name!r} produced no startup "
+                            "frame; reopening once"
+                        )
                 self._cameras[spec.name] = camera
             self._latest = self.read()
         except BaseException:
@@ -212,6 +331,13 @@ class CameraRig:
             if frame.dtype != np.uint8:
                 raise RuntimeError(
                     f"camera {name!r} returned {frame.dtype}; expected uint8"
+                )
+            spec = self._specs_by_name[name]
+            if spec.output_width is not None and spec.output_height is not None:
+                frame = center_crop_and_resize(
+                    frame,
+                    spec.output_width,
+                    spec.output_height,
                 )
             frames[name] = frame.copy()
         self._latest = frames
