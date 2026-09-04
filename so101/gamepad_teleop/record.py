@@ -12,7 +12,11 @@ from pathlib import Path
 from so101.teleop.runtime import DEFAULT_ROBOT_PORT, FPS
 
 from .gamepad import PAN_CONTROL_MODES
-from .recording import RecordingConfig, parse_camera_specs
+from .recording import (
+    RecordingConfig,
+    apply_camera_output_sizes,
+    parse_camera_specs,
+)
 from .teleoperate import main as run_hardware_teleoperation
 
 
@@ -48,14 +52,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--camera",
         action="append",
-        metavar="NAME=ID[:ROTATION]",
+        metavar="NAME=ID[:ROTATION][@FPS]",
         help=(
-            "repeat for every camera; rotation is 0/90/180/270 degrees. "
+            "repeat for every camera; rotation is 0/90/180/270 degrees and "
+            "an optional native FPS overrides the dataset FPS. "
             "Default: wrist=0:180"
         ),
     )
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
+    parser.add_argument(
+        "--camera-output-size",
+        action="append",
+        metavar="NAME=WIDTHxHEIGHT",
+        help=(
+            "repeat to set a stored image size; frames are center-cropped to "
+            "the requested aspect ratio before resizing"
+        ),
+    )
     parser.add_argument(
         "--rerun-camera-hz",
         type=float,
@@ -94,7 +108,10 @@ def cli() -> None:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        camera_specs = parse_camera_specs(args.camera)
+        camera_specs = apply_camera_output_sizes(
+            parse_camera_specs(args.camera),
+            args.camera_output_size,
+        )
         dataset_root = args.dataset_root.expanduser().resolve()
         if args.resume and not dataset_root.exists():
             parser.error(

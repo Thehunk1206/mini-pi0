@@ -222,14 +222,23 @@ repeating the option and manually assigning each ID:
   --task "pick up the cube" \
   --dataset-repo-id local/so101-pick-cube \
   --dataset-root data/lerobot/so101_pick_cube \
-  --camera wrist=0:180 \
-  --camera overview=1:0 \
+  --camera wrist=0:180@25 \
+  --camera overview=1:0@30 \
+  --camera-width 1920 \
+  --camera-height 1080 \
+  --camera-output-size wrist=480x480 \
+  --camera-output-size overview=640x360 \
   --camera side=2:90
 ```
 
 Rotation is clockwise and accepts `0`, `90`, `180`, or `270`. Camera IDs,
-rotations, and actual output shapes are validated before the servo bus opens
-and shown in Rerun. If the output already exists, choose one explicit mode:
+rotations, optional per-camera native frame rates, and actual output shapes are
+validated before the servo bus opens and shown in Rerun. The optional `@FPS`
+suffix avoids forcing every camera to use the dataset's 30 FPS rate. Frames from
+a lower-rate camera use its latest image when sampled by the 30 FPS control loop.
+`--camera-output-size` center-crops to the requested aspect ratio before resizing,
+so square wrist images are not stretched. If the output already exists, choose
+one explicit mode:
 
 ```bash
 # Append episodes to a compatible dataset.
