@@ -31,7 +31,7 @@ Click the preview to open the MP4.
 
 Click a preview to open the MP4.
 
-### PegInsertionSide Diagnostics
+### PegInsertionSide
 
 PegInsertionSide is the current hard task. The latest contact + hole-camera
 policy reaches 10.0% success over 100 eval episodes, with most remaining
@@ -41,7 +41,79 @@ failures reaching the hole but timing out before stable insertion.
 | --- | --- | --- |
 | [![PegInsertion base camera success grid](./assets/peginsertion_seed4278_success_grid_base_camera_3x3.gif)](./assets/peginsertion_seed4278_success_grid_base_camera_3x3.mp4) | [![PegInsertion left hole camera success grid](./assets/peginsertion_seed4278_success_grid_hole_left_camera_3x3.gif)](./assets/peginsertion_seed4278_success_grid_hole_left_camera_3x3.mp4) | [![PegInsertion right hole camera success grid](./assets/peginsertion_seed4278_success_grid_hole_right_camera_3x3.gif)](./assets/peginsertion_seed4278_success_grid_hole_right_camera_3x3.mp4) |
 
+### PullCubeTool-v1
+
+31.0% success over 100 eval episodes with the `pd_ee_delta_pose` small policy
+using hist2 base + wrist cameras.
+
+| Base camera success | Wrist camera success |
+| --- | --- |
+| [![PullCubeTool base camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.gif)](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.mp4) | [![PullCubeTool wrist camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.gif)](./assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.mp4) |
+
 Click a preview to open the MP4.
+
+## Install
+
+This project is `uv` first. Use Python 3.11 for the ManiSkill + LeRobot stack.
+
+```bash
+uv venv --python 3.11 .venv
+. .venv/bin/activate
+uv pip install -e ".[maniskill3,vision,dev]"
+```
+
+For LeRobot v3 support in the same environment as ManiSkill, install with the
+repo constraints so the simulator stack stays compatible:
+
+```bash
+uv pip install -e ".[maniskill3,lerobot,vision,dev]" \
+  -c constraints-maniskill-lerobot.txt
+```
+
+Pip fallback:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -e ".[maniskill3,lerobot,vision,dev]" \
+  -c constraints-maniskill-lerobot.txt
+```
+
+On shared machines with read-only Hugging Face cache paths, set a writable cache:
+
+```bash
+export HF_HOME=/tmp/minipi_hf_cache
+```
+
+## Quickstart
+
+Train the StackCube transformer + ViT policy:
+
+```bash
+mini-pi0 train \
+  --config examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml
+```
+
+Evaluate a checkpoint:
+
+```bash
+mini-pi0 eval \
+  --config examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml \
+  --set eval.checkpoint=runs/<experiment>/run1/checkpoints/best.pt \
+  --set eval.action_stats_path=runs/<experiment>/run1/artifacts/action_stats.json \
+  --set eval.record_grid=true \
+  --set eval.grid_cameras='["base_camera","hand_camera"]'
+```
+
+Run offline action diagnostics:
+
+```bash
+python -m mini_pi0.eval.action_diagnostics \
+  --config examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml \
+  --checkpoint runs/<experiment>/run1/checkpoints/best.pt \
+  --action_stats runs/<experiment>/run1/artifacts/action_stats.json \
+  --flow_steps 4,6,8
+```
 
 ## What Is In This Repo
 
@@ -178,69 +250,6 @@ recoverable overwrite behavior, position-only training data, replay, and safety.
   action mapping. Do not run it on the SO-101 without a calibration-aware
   hardware review.
 
-## Install
-
-This project is `uv` first. Use Python 3.11 for the ManiSkill + LeRobot stack.
-
-```bash
-uv venv --python 3.11 .venv
-. .venv/bin/activate
-uv pip install -e ".[maniskill3,vision,dev]"
-```
-
-For LeRobot v3 support in the same environment as ManiSkill, install with the
-repo constraints so the simulator stack stays compatible:
-
-```bash
-uv pip install -e ".[maniskill3,lerobot,vision,dev]" \
-  -c constraints-maniskill-lerobot.txt
-```
-
-Pip fallback:
-
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -e ".[maniskill3,lerobot,vision,dev]" \
-  -c constraints-maniskill-lerobot.txt
-```
-
-On shared machines with read-only Hugging Face cache paths, set a writable cache:
-
-```bash
-export HF_HOME=/tmp/minipi_hf_cache
-```
-
-## Quickstart
-
-Train the StackCube transformer + ViT policy:
-
-```bash
-mini-pi0 train \
-  --config examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml
-```
-
-Evaluate a checkpoint:
-
-```bash
-mini-pi0 eval \
-  --config examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml \
-  --set eval.checkpoint=runs/<experiment>/run1/checkpoints/best.pt \
-  --set eval.action_stats_path=runs/<experiment>/run1/artifacts/action_stats.json \
-  --set eval.record_grid=true \
-  --set eval.grid_cameras='["base_camera","hand_camera"]'
-```
-
-Run offline action diagnostics:
-
-```bash
-python -m mini_pi0.eval.action_diagnostics \
-  --config examples/configs/maniskill3_stackcube_motionplanning_transformer_vit_hist2_medium.yaml \
-  --checkpoint runs/<experiment>/run1/checkpoints/best.pt \
-  --action_stats runs/<experiment>/run1/artifacts/action_stats.json \
-  --flow_steps 4,6,8
-```
-
 ## Isaac Lab Docker Quickstart
 
 Isaac Sim/Lab is isolated in Docker. This repository does not install Isaac,
@@ -343,41 +352,6 @@ For full data notes, custom environment collection, and task conversion details,
 see [docs/DATASETS.md](docs/DATASETS.md) and
 [docs/SIMULATION.md](docs/SIMULATION.md).
 
-## PegInsertionSide
-
-PegInsertionSide is tracked separately because it needs better visual access to
-the hole and benefits from contact diagnostics. This branch includes:
-
-- `MiniPi0PegInsertionSide-v1`, a repo-local ManiSkill environment with close
-  `hole_left_camera` and `hole_right_camera` sensors.
-- Replay helpers for local env registration.
-- Contact extraction into HDF5 under `obs/*` keys.
-- A contact-aware config:
-  `examples/configs/maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml`.
-- A checkpoint ReinFlow config using the existing run2 policy:
-  `examples/configs/maniskill3_peginsertion_reinflow_finetune.yaml`.
-
-Prepare the hole-camera contact dataset:
-
-```bash
-NUM_ENVS=16 tools/prepare_peginsertion_holecam_contacts.sh
-```
-
-Train the current PegInsertion config:
-
-```bash
-mini-pi0 train \
-  --config examples/configs/maniskill3_peginsertion_motionplanning_transformer_vit_hist3_medium_holecam_contacts.yaml
-```
-
-Read the task-specific notes in [docs/PEG_INSERTION.md](docs/PEG_INSERTION.md).
-
-Smoke-test the existing FM checkpoint before RL fine-tuning:
-
-```bash
-mini-pi0 rl-smoke --config examples/configs/maniskill3_peginsertion_reinflow_finetune.yaml
-```
-
 ## Config Notes
 
 The main knobs are:
@@ -476,10 +450,6 @@ Variant:
 | Failure modes | 69 timeout after progress, 31 success |
 
 ![PullCubeTool eval metrics](./assets/pullcubetool_pd_ee_seed2000_eval_metrics.png)
-
-| Base camera success | Wrist camera success |
-| --- | --- |
-| [![PullCubeTool base camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.gif)](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.mp4) | [![PullCubeTool wrist camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.gif)](./assets/pullcubetool_pd_ee_seed2000_success_grid_hand_camera_3x3.mp4) |
 
 Artifacts:
 - [base-camera success grid](./assets/pullcubetool_pd_ee_seed2000_success_grid_base_camera_3x3.mp4)
