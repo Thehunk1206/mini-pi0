@@ -152,3 +152,17 @@ class ActionStats:
         """
 
         return actions * self.std + self.mean
+
+
+class StateStats(ActionStats):
+    """Per-dimension proprioceptive-state normalization statistics."""
+
+    @classmethod
+    def from_iterable(cls, states: object) -> "StateStats":
+        """Estimate state statistics from a streaming iterable."""
+
+        accumulator = ActionStatsAccumulator()
+        for item in states:  # type: ignore[operator]
+            accumulator.update(np.asarray(item))
+        stats = accumulator.to_stats()
+        return cls(mean=stats.mean, std=stats.std)

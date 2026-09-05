@@ -64,6 +64,25 @@ train:
         with self.assertRaisesRegex(ValueError, "Unknown config key"):
             load_config(overrides=["data.observation_mode='precomputed'"])
 
+    def test_so101_preprocessing_and_training_controls_are_supported(self):
+        cfg = load_config(
+            overrides=[
+                "robot.image_resize_hw=[224,224]",
+                "robot.image_resize_mode='letterbox'",
+                "data.sample_stride=3",
+                "data.normalize_state=true",
+                "model.freeze_vision_batchnorm_stats=true",
+                "train.lr_observation=1e-4",
+                "train.checkpoint_every_epochs=10",
+            ]
+        )
+
+        self.assertEqual(cfg.robot.image_resize_hw, [224, 224])
+        self.assertEqual(cfg.data.sample_stride, 3)
+        self.assertTrue(cfg.data.normalize_state)
+        self.assertTrue(cfg.model.freeze_vision_batchnorm_stats)
+        self.assertEqual(cfg.train.checkpoint_every_epochs, 10)
+
 
 if __name__ == "__main__":
     unittest.main()

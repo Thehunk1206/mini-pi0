@@ -5,7 +5,8 @@ import torch
 from torch.utils.data import Dataset
 
 from mini_pi0.dataset.episodes import EpisodeData
-from mini_pi0.dataset.stats import ActionStats
+from mini_pi0.dataset.image_transforms import resize_image_tensor
+from mini_pi0.dataset.stats import ActionStats, StateStats
 
 
 class ActionChunkDataset(Dataset):
@@ -27,6 +28,11 @@ class ActionChunkDataset(Dataset):
         action_stats: ActionStats,
         obs_horizon: int = 1,
         preserve_camera_dim: bool = False,
+        state_stats: StateStats | None = None,
+        normalize_states: bool = False,
+        image_resize_hw: list[int] | None = None,
+        image_resize_mode: str = "letterbox",
+        sample_stride: int = 1,
     ):
         """Build dataset samples from episodic demonstrations.
 
@@ -47,19 +53,29 @@ class ActionChunkDataset(Dataset):
         self.chunk_size = int(chunk_size)
         self.obs_horizon = int(max(1, obs_horizon))
         self.preserve_camera_dim = bool(preserve_camera_dim)
+        self.sample_stride = int(max(1, sample_stride))
+        self.states_are_normalized = bool(normalize_states)
         cam_keys = [str(k).strip() for k in (image_keys or []) if str(k).strip()]
         if not cam_keys:
             cam_keys = [str(image_key)]
 
+        def _resize_hwc(value: np.ndarray) -> np.ndarray:
+            arr = np.asarray(value)
+            if arr.ndim != 3 or arr.shape[-1] not in {1, 3, 4}:
+                raise ValueError(f"Only HWC images are supported, got shape {arr.shape}.")
+            tensor = torch.from_numpy(np.ascontiguousarray(arr)).permute(2, 0, 1)
+            tensor = resize_image_tensor(tensor, image_resize_hw, image_resize_mode)
+            return tensor.permute(1, 2, 0).contiguous().numpy()
+
         def _visual_at(obs_t: dict[str, np.ndarray]) -> np.ndarray:
+            visual_parts = [_resize_hwc(np.asarray(obs_t[k])) for k in cam_keys]
             if len(cam_keys) == 1:
-                visual_arr = np.asarray(obs_t[cam_keys[0]])
+                visual_arr = visual_parts[0]
                 if self.preserve_camera_dim and visual_arr.ndim >= 2:
                     visual_arr = visual_arr[None, ...]
             elif self.preserve_camera_dim:
-                visual_arr = np.stack([np.asarray(obs_t[k]) for k in cam_keys], axis=0)
+                visual_arr = np.stack(visual_parts, axis=0)
             else:
-                visual_parts = [np.asarray(obs_t[k]) for k in cam_keys]
                 if all(v.ndim >= 2 for v in visual_parts):
                     h = visual_parts[0].shape[0]
                     c = visual_parts[0].shape[2] if visual_parts[0].ndim >= 3 else 1
@@ -83,13 +99,18 @@ class ActionChunkDataset(Dataset):
 
         def _prop_at(obs_t: dict[str, np.ndarray]) -> np.ndarray:
             parts = [np.asarray(obs_t[k], dtype=np.float32).reshape(-1) for k in proprio_keys]
-            return np.concatenate(parts, axis=0).astype(np.float32)
+            prop = np.concatenate(parts, axis=0).astype(np.float32)
+            if normalize_states:
+                if state_stats is None:
+                    raise ValueError("state_stats are required when normalize_states=true.")
+                prop = state_stats.normalize(prop).astype(np.float32)
+            return prop
 
         for ep in episodes:
             obs_seq = ep.obs
             act_seq = action_stats.normalize(np.asarray(ep.actions, dtype=np.float32))
             n = max(0, len(obs_seq) - self.chunk_size + 1)
-            for t in range(n):
+            for t in range(0, n, self.sample_stride):
                 hist_indices = [max(0, t - self.obs_horizon + 1 + offset) for offset in range(self.obs_horizon)]
                 visual_hist = [_visual_at(obs_seq[idx]) for idx in hist_indices]
                 prop_hist = [_prop_at(obs_seq[idx]) for idx in hist_indices]

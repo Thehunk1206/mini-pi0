@@ -1149,6 +1149,8 @@ def _make_obs_processor(cfg: RootConfig, *, device: str):
         device=device,
         obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
         preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
+        image_resize_hw=cfg.robot.image_resize_hw,
+        image_resize_mode=cfg.robot.image_resize_mode,
     )
 
 

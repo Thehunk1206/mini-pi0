@@ -20,7 +20,15 @@ from torch.utils.data import DataLoader, Subset
 from mini_pi0.config.io import load_config
 from mini_pi0.config.schema import RootConfig, effective_image_keys, effective_state_keys
 from mini_pi0.dataset.episodes import load_episodes_from_config
-from mini_pi0.dataset.stats import ActionStats
+from mini_pi0.dataset.lerobot_v3 import (
+    LEROBOT_V3_FORMATS,
+    LeRobotDatasetFactory,
+    LeRobotFeatureSpec,
+    LeRobotPolicyDataset,
+    LeRobotTemporalConfig,
+    LeRobotV3OpenConfig,
+)
+from mini_pi0.dataset.stats import ActionStats, StateStats
 from mini_pi0.dataset.torch_dataset import ActionChunkDataset
 from mini_pi0.eval.runner import (
     _inject_model_cfg_from_checkpoint,
@@ -29,12 +37,55 @@ from mini_pi0.eval.runner import (
 from mini_pi0.models.registry import load_checkpoint, make_model
 from mini_pi0.sim.registry import make_sim_adapter
 from mini_pi0.train.data import curate_episodes
+from mini_pi0.train.augmentation import GpuBatchProcessor
 from mini_pi0.utils.device import resolve_device
 from mini_pi0.utils.precision import autocast_context, resolve_runtime_dtype
 
 
-def _build_dataset(cfg: RootConfig, stats: ActionStats) -> ActionChunkDataset:
+def _build_dataset(
+    cfg: RootConfig,
+    stats: ActionStats,
+    state_stats: StateStats | None,
+) -> torch.utils.data.Dataset:
     """Build the action chunk dataset used for offline comparison."""
+
+    if str(cfg.data.format).strip().lower() in LEROBOT_V3_FORMATS:
+        repo_id = cfg.data.lerobot_repo_id
+        if not repo_id:
+            raise ValueError("data.lerobot_repo_id is required for LeRobot diagnostics.")
+        image_keys = cfg.data.lerobot_image_keys or effective_image_keys(cfg.robot)
+        spec = LeRobotFeatureSpec.from_keys(
+            action_key=cfg.data.lerobot_action_key,
+            state_key=cfg.data.lerobot_state_key,
+            image_keys=image_keys,
+            episode_index_key=cfg.data.lerobot_episode_index_key,
+        )
+        open_cfg = LeRobotV3OpenConfig(
+            repo_id=str(repo_id),
+            root=cfg.data.lerobot_root,
+            revision=cfg.data.lerobot_revision,
+            episodes=cfg.data.lerobot_episodes,
+            local_files_only=bool(cfg.data.lerobot_local_files_only),
+            video_backend=cfg.data.lerobot_video_backend,
+        )
+        plain = LeRobotDatasetFactory(open_cfg).open()
+        spec.validate(plain)
+        temporal = LeRobotTemporalConfig(
+            fps=int(getattr(plain, "fps", cfg.simulator.control_freq)),
+            obs_horizon=int(cfg.model.obs_horizon),
+            chunk_size=int(cfg.data.chunk_size),
+        )
+        temporal_dataset = LeRobotDatasetFactory(open_cfg, temporal).open(spec)
+        return LeRobotPolicyDataset(
+            dataset=temporal_dataset,
+            spec=spec,
+            chunk_size=int(cfg.data.chunk_size),
+            obs_horizon=int(cfg.model.obs_horizon),
+            preserve_camera_dim=str(cfg.model.conditioning_mode).strip().lower() == "cross_attention",
+            image_resize_hw=cfg.robot.image_resize_hw,
+            image_resize_mode=cfg.robot.image_resize_mode,
+            sample_stride=int(cfg.data.sample_stride),
+        )
 
     episodes = load_episodes_from_config(cfg)
     episodes, _ = curate_episodes(episodes, cfg)
@@ -47,10 +98,15 @@ def _build_dataset(cfg: RootConfig, stats: ActionStats) -> ActionChunkDataset:
         action_stats=stats,
         obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
         preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
+        state_stats=state_stats,
+        normalize_states=bool(cfg.data.normalize_state),
+        image_resize_hw=cfg.robot.image_resize_hw,
+        image_resize_mode=cfg.robot.image_resize_mode,
+        sample_stride=int(cfg.data.sample_stride),
     )
 
 
-def _select_subset(dataset: ActionChunkDataset, num_samples: int, seed: int) -> Subset:
+def _select_subset(dataset: torch.utils.data.Dataset, num_samples: int, seed: int) -> Subset:
     """Select a deterministic subset without materializing the full dataset."""
 
     n = len(dataset)
@@ -62,13 +118,19 @@ def _select_subset(dataset: ActionChunkDataset, num_samples: int, seed: int) -> 
     return Subset(dataset, indices.tolist())
 
 
-def _action_bounds(cfg: RootConfig) -> tuple[np.ndarray | None, np.ndarray | None]:
+def _action_bounds(cfg: RootConfig, action_dim: int) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Best-effort simulator action bounds lookup."""
 
+    if str(cfg.robot.name).strip().lower().startswith("so101"):
+        return None, None
     adapter = make_sim_adapter(cfg)
     try:
         low, high = adapter.action_spec()
-        return np.asarray(low, dtype=np.float32).reshape(-1), np.asarray(high, dtype=np.float32).reshape(-1)
+        low_arr = np.asarray(low, dtype=np.float32).reshape(-1)
+        high_arr = np.asarray(high, dtype=np.float32).reshape(-1)
+        if low_arr.size != int(action_dim) or high_arr.size != int(action_dim):
+            return None, None
+        return low_arr, high_arr
     finally:
         adapter.close()
 
@@ -150,7 +212,11 @@ def _update_metrics(
     metrics["any_gt_oob"] = int(metrics["any_gt_oob"]) + int(np.any(gt_low | gt_high, axis=1).sum())
 
 
-def _finalize_metrics(metrics: dict[str, np.ndarray | float | int]) -> dict[str, Any]:
+def _finalize_metrics(
+    metrics: dict[str, np.ndarray | float | int],
+    *,
+    bounds_available: bool,
+) -> dict[str, Any]:
     """Convert accumulated sums into JSON-serializable means/fractions."""
 
     n = max(1, int(metrics["count"]))
@@ -170,12 +236,20 @@ def _finalize_metrics(metrics: dict[str, np.ndarray | float | int]) -> dict[str,
         "gt_raw_mean_by_dim": gt_mean.tolist(),
         "gt_raw_std_by_dim": np.sqrt(gt_var).tolist(),
         "gt_raw_abs_max_by_dim": metrics["gt_raw_abs_max"].tolist(),
-        "pred_clip_fraction_by_dim": pred_clip.tolist(),
-        "pred_clip_low_fraction_by_dim": (metrics["pred_clip_low"] / n).tolist(),
-        "pred_clip_high_fraction_by_dim": (metrics["pred_clip_high"] / n).tolist(),
-        "pred_any_clip_fraction": float(int(metrics["any_pred_clip"]) / n),
-        "gt_oob_fraction_by_dim": gt_oob.tolist(),
-        "gt_any_oob_fraction": float(int(metrics["any_gt_oob"]) / n),
+        "pred_clip_fraction_by_dim": pred_clip.tolist() if bounds_available else None,
+        "pred_clip_low_fraction_by_dim": (
+            (metrics["pred_clip_low"] / n).tolist() if bounds_available else None
+        ),
+        "pred_clip_high_fraction_by_dim": (
+            (metrics["pred_clip_high"] / n).tolist() if bounds_available else None
+        ),
+        "pred_any_clip_fraction": (
+            float(int(metrics["any_pred_clip"]) / n) if bounds_available else None
+        ),
+        "gt_oob_fraction_by_dim": gt_oob.tolist() if bounds_available else None,
+        "gt_any_oob_fraction": (
+            float(int(metrics["any_gt_oob"]) / n) if bounds_available else None
+        ),
     }
 
 
@@ -184,6 +258,7 @@ def run_action_diagnostics(
     *,
     checkpoint: str,
     action_stats_path: str,
+    state_stats_path: str | None,
     flow_steps: Sequence[int],
     num_samples: int,
     batch_size: int,
@@ -195,18 +270,33 @@ def run_action_diagnostics(
 
     device = resolve_device(device_name)
     stats = ActionStats.load(action_stats_path)
+    state_stats = StateStats.load(state_stats_path) if state_stats_path else None
+    if bool(cfg.data.normalize_state) and state_stats is None:
+        raise ValueError("--state_stats is required when data.normalize_state=true.")
     cfg = copy.deepcopy(cfg)
     cfg.eval.checkpoint = checkpoint
     cfg.eval.action_stats_path = action_stats_path
     model = _load_model(cfg, checkpoint=checkpoint, weight_source=weight_source, device=device)
-    dataset = _build_dataset(cfg, stats)
+    dataset = _build_dataset(cfg, stats, state_stats)
     subset = _select_subset(dataset, num_samples=num_samples, seed=int(cfg.experiment.seed))
     loader = DataLoader(subset, batch_size=int(max(1, batch_size)), shuffle=False, num_workers=0)
-    low, high = _action_bounds(cfg)
     action_dim = int(cfg.model.action_dim)
+    low, high = _action_bounds(cfg, action_dim)
+    batch_processor = GpuBatchProcessor(
+        cfg=cfg,
+        device=device,
+        action_stats=stats,
+        normalize_actions=not bool(getattr(dataset, "actions_are_normalized", False)),
+        state_stats=state_stats,
+        normalize_states=(
+            bool(cfg.data.normalize_state)
+            and not bool(getattr(dataset, "states_are_normalized", False))
+        ),
+    )
     results: dict[str, Any] = {
         "checkpoint": checkpoint,
         "action_stats_path": action_stats_path,
+        "state_stats_path": state_stats_path,
         "num_samples": len(subset),
         "chunk_size": int(cfg.model.chunk_size),
         "action_dim": action_dim,
@@ -219,9 +309,7 @@ def run_action_diagnostics(
         metrics = _empty_metric_sums(action_dim)
         with torch.no_grad(), autocast_context(device=device, dtype=dtype):
             for img, prop, gt_norm_t in loader:
-                img = img.to(device=device)
-                prop = prop.to(device=device)
-                gt_norm_t = gt_norm_t.to(device=device)
+                img, prop, gt_norm_t = batch_processor.eval_batch(img, prop, gt_norm_t)
                 pred_norm_t = model.sample(
                     img,
                     prop,
@@ -233,7 +321,10 @@ def run_action_diagnostics(
                 pred_raw = stats.denormalize(pred_norm)
                 gt_raw = stats.denormalize(gt_norm)
                 _update_metrics(metrics, pred_norm, gt_norm, pred_raw, gt_raw, low, high)
-        results["flow_steps"][str(int(steps))] = _finalize_metrics(metrics)
+        results["flow_steps"][str(int(steps))] = _finalize_metrics(
+            metrics,
+            bounds_available=low is not None and high is not None,
+        )
 
     if output_json:
         out_path = Path(output_json)
@@ -261,9 +352,12 @@ def _print_summary(results: dict[str, Any]) -> None:
         print(f"[action-diagnostics] high: {_format_dim_values(results['action_high'])}")
     for steps, row in results["flow_steps"].items():
         print(f"\nflow_steps={steps}")
-        print(f"  pred any clip : {100.0 * float(row['pred_any_clip_fraction']):.1f}%")
-        print(f"  gt any oob    : {100.0 * float(row['gt_any_oob_fraction']):.1f}%")
-        print(f"  pred clip dim : {_format_dim_values(row['pred_clip_fraction_by_dim'], scale=100.0)}")
+        if row["pred_any_clip_fraction"] is None:
+            print("  bounds checks : unavailable (configure calibrated SO-101 joint limits)")
+        else:
+            print(f"  pred any clip : {100.0 * float(row['pred_any_clip_fraction']):.1f}%")
+            print(f"  gt any oob    : {100.0 * float(row['gt_any_oob_fraction']):.1f}%")
+            print(f"  pred clip dim : {_format_dim_values(row['pred_clip_fraction_by_dim'], scale=100.0)}")
         print(f"  raw MAE dim   : {_format_dim_values(row['raw_mae_by_dim'])}")
         print(f"  norm MAE dim  : {_format_dim_values(row['normalized_mae_by_dim'])}")
         print(f"  pred abs max  : {_format_dim_values(row['pred_raw_abs_max_by_dim'])}")
@@ -276,6 +370,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to YAML config.")
     parser.add_argument("--checkpoint", required=True, help="Checkpoint to evaluate offline.")
     parser.add_argument("--action_stats", required=True, help="Action stats JSON used by the checkpoint/run.")
+    parser.add_argument("--state_stats", default=None, help="Optional state normalization statistics JSON.")
     parser.add_argument("--flow_steps", type=int, nargs="+", default=[4, 6, 8])
     parser.add_argument("--num_samples", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=8)
@@ -295,6 +390,7 @@ def main() -> int:
         cfg,
         checkpoint=str(args.checkpoint),
         action_stats_path=str(args.action_stats),
+        state_stats_path=str(args.state_stats) if args.state_stats else None,
         flow_steps=list(args.flow_steps),
         num_samples=int(args.num_samples),
         batch_size=int(args.batch_size),

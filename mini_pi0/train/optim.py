@@ -107,28 +107,42 @@ def build_optimizer(
 ) -> tuple[torch.optim.Optimizer, dict[str, float]]:
     """Build optimizer with optional backbone/expert LR groups.
 
-    ``lr_backbone`` targets the image encoder. ``lr_expert`` targets the action
-    denoiser. Unset values fall back to the base LR.
+    ``lr_backbone`` targets only the pretrained image backbone,
+    ``lr_observation`` targets newly initialized observation adapters, and
+    ``lr_expert`` targets the action denoiser. Unset values use the base LR.
     """
     base_lr = float(cfg.train.lr)
     weight_decay = float(cfg.train.weight_decay)
     lr_backbone_cfg = getattr(cfg.train, "lr_backbone", None)
+    lr_observation_cfg = getattr(cfg.train, "lr_observation", None)
     lr_expert_cfg = getattr(cfg.train, "lr_expert", None)
 
     obs_encoder = getattr(model, "obs_encoder", None)
     action_expert = getattr(model, "action_transformer", None)
     if isinstance(obs_encoder, torch.nn.Module) and isinstance(action_expert, torch.nn.Module):
         lr_backbone = float(lr_backbone_cfg) if lr_backbone_cfg is not None else base_lr
+        lr_observation = float(lr_observation_cfg) if lr_observation_cfg is not None else base_lr
         lr_expert = float(lr_expert_cfg) if lr_expert_cfg is not None else base_lr
 
-        backbone_params = [p for p in obs_encoder.parameters() if p.requires_grad]
+        vision_backbone = getattr(obs_encoder, "img_backbone", None)
+        backbone_params = (
+            [p for p in vision_backbone.parameters() if p.requires_grad]
+            if isinstance(vision_backbone, torch.nn.Module)
+            else []
+        )
+        backbone_ids = {id(p) for p in backbone_params}
+        observation_params = [
+            p for p in obs_encoder.parameters() if p.requires_grad and id(p) not in backbone_ids
+        ]
         expert_params = [p for p in action_expert.parameters() if p.requires_grad]
-        grouped_ids = {id(p) for p in backbone_params + expert_params}
+        grouped_ids = {id(p) for p in backbone_params + observation_params + expert_params}
         other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in grouped_ids]
 
         param_groups = []
         if backbone_params:
             param_groups.append({"params": backbone_params, "lr": lr_backbone, "name": "backbone"})
+        if observation_params:
+            param_groups.append({"params": observation_params, "lr": lr_observation, "name": "observation"})
         if expert_params:
             param_groups.append({"params": expert_params, "lr": lr_expert, "name": "expert"})
         if other_params:
@@ -137,7 +151,11 @@ def build_optimizer(
             raise ValueError("No trainable parameter groups found for optimizer.")
 
         optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
-        return optimizer, {"backbone_lr": lr_backbone, "expert_lr": lr_expert}
+        return optimizer, {
+            "backbone_lr": lr_backbone,
+            "observation_lr": lr_observation,
+            "expert_lr": lr_expert,
+        }
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
-    return optimizer, {"backbone_lr": base_lr, "expert_lr": base_lr}
+    return optimizer, {"backbone_lr": base_lr, "observation_lr": base_lr, "expert_lr": base_lr}

@@ -5,7 +5,8 @@ import torch
 from collections import deque
 from collections.abc import Iterable, Mapping
 
-from mini_pi0.dataset.stats import ActionStats
+from mini_pi0.dataset.image_transforms import resize_image_tensor
+from mini_pi0.dataset.stats import ActionStats, StateStats
 from mini_pi0.utils.device import resolve_device
 
 
@@ -25,6 +26,9 @@ class ObsProcessor:
         device: str = "auto",
         obs_horizon: int = 1,
         preserve_camera_dim: bool = False,
+        state_stats_path: str | None = None,
+        image_resize_hw: list[int] | None = None,
+        image_resize_mode: str = "letterbox",
     ):
         """Initialize observation processor and action normalization tensors.
 
@@ -52,6 +56,8 @@ class ObsProcessor:
         self.proprio_keys = proprio_keys
         self.obs_horizon = int(max(1, obs_horizon))
         self.preserve_camera_dim = bool(preserve_camera_dim)
+        self.image_resize_hw = image_resize_hw
+        self.image_resize_mode = str(image_resize_mode)
         self._history: deque[dict[str, np.ndarray]] = deque(maxlen=self.obs_horizon)
         self._batch_history: dict[int, deque[dict[str, np.ndarray]]] = {}
         self.action_mean: torch.Tensor | None = None
@@ -60,6 +66,12 @@ class ObsProcessor:
             stats = ActionStats.load(action_stats_path)
             self.action_mean = torch.tensor(stats.mean, dtype=torch.float32, device=self.device)
             self.action_std = torch.tensor(stats.std, dtype=torch.float32, device=self.device)
+        self.state_mean: np.ndarray | None = None
+        self.state_std: np.ndarray | None = None
+        if state_stats_path is not None:
+            state_stats = StateStats.load(state_stats_path)
+            self.state_mean = state_stats.mean
+            self.state_std = state_stats.std
 
     def reset_history(self, obs: dict[str, np.ndarray]) -> None:
         """Reset sequential rollout history using repeat padding."""
@@ -90,7 +102,14 @@ class ObsProcessor:
     def _single_obs_to_arrays(self, obs: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Convert one observation into unbatched visual/proprio arrays."""
 
-        imgs = [np.asarray(obs[key], dtype=np.uint8) for key in self.image_keys]
+        imgs = []
+        for key in self.image_keys:
+            raw = np.asarray(obs[key], dtype=np.uint8)
+            if raw.ndim != 3 or raw.shape[-1] not in {1, 3, 4}:
+                raise ValueError(f"Expected HWC image for {key!r}, got {raw.shape}.")
+            tensor = torch.from_numpy(np.ascontiguousarray(raw)).permute(2, 0, 1)
+            tensor = resize_image_tensor(tensor, self.image_resize_hw, self.image_resize_mode)
+            imgs.append(tensor.permute(1, 2, 0).contiguous().numpy())
         if len(imgs) > 1:
             h = imgs[0].shape[0]
             c = imgs[0].shape[2] if imgs[0].ndim >= 3 else 1
@@ -111,6 +130,8 @@ class ObsProcessor:
             [np.asarray(obs[k], dtype=np.float32).reshape(-1) for k in self.proprio_keys],
             axis=0,
         )
+        if self.state_mean is not None and self.state_std is not None:
+            prop = (prop - self.state_mean) / self.state_std
         return visual, prop
 
     def _history_to_tensors(self, history: Iterable[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:

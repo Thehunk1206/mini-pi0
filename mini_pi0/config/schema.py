@@ -92,6 +92,8 @@ class RobotConfig:
     state_keys: list[str] | None = None
     image_key: str = "agentview_image"
     image_keys: list[str] | None = None
+    image_resize_hw: list[int] | None = None
+    image_resize_mode: str = "letterbox"
 
 
 def effective_state_keys(robot: RobotConfig) -> list[str]:
@@ -172,7 +174,10 @@ class DataConfig:
     fallback_image_hw: list[int] = field(default_factory=lambda: [84, 84])
     n_demos: int | None = 200
     chunk_size: int = 16
+    sample_stride: int = 1
+    normalize_state: bool = False
     action_stats_path: str = "action_stats.json"
+    state_stats_path: str = "state_stats.json"
     filter_min_episode_length: int = 0
     filter_min_action_std: float = 0.0
     filter_min_state_delta: float = 0.0
@@ -272,6 +277,7 @@ class ModelConfig:
     vision_pretrained: bool = True
     action_cnn_kernel_size: int = 5
     freeze_vision_backbone: bool = True
+    freeze_vision_batchnorm_stats: bool = False
     dropout: float = 0.1
     num_timestep_buckets: int = 1000
     noise_beta_alpha: float = 1.5
@@ -382,6 +388,7 @@ class TrainConfig:
     checkpoint_use_ema: bool = True
     val_use_ema: bool = False
     lr_backbone: float | None = None
+    lr_observation: float | None = None
     lr_expert: float | None = None
     image_aug_enable: bool = False
     image_aug_crop_scale: float = 1.0
@@ -392,6 +399,8 @@ class TrainConfig:
     action_noise_clip: float = 0.0
     action_smoothness_weight: float = 0.0
     action_jerk_weight: float = 0.0
+    checkpoint_every_epochs: int = 0
+    save_final: bool = True
     sim_eval_every_epochs: int = 0
     sim_eval_n_episodes: int = 10
     sim_eval_max_steps: int | None = None
@@ -467,6 +476,7 @@ class EvalConfig:
     checkpoint: str = "checkpoints/best.pt"
     weight_source: str = "model"
     action_stats_path: str = "action_stats.json"
+    state_stats_path: str | None = None
     n_episodes: int = 50
     execute_steps: int = 8
     n_flow_steps: int = 10
@@ -543,6 +553,7 @@ class DeployConfig:
     mode: str = "sim"
     checkpoint: str = "checkpoints/best.pt"
     action_stats_path: str = "action_stats.json"
+    state_stats_path: str | None = None
     execute_steps: int = 4
     n_flow_steps: int = 10
     flow_solver: str = "euler"

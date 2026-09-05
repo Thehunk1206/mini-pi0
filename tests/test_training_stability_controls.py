@@ -9,7 +9,7 @@ from mini_pi0.deploy.sim_runner import _resolve_deploy_rollout_controls
 from mini_pi0.eval.core import _resolve_eval_rollout_controls
 from mini_pi0.models.registry import make_model
 from mini_pi0.train.optim import ExponentialMovingAverage
-from mini_pi0.dataset.stats import ActionStats
+from mini_pi0.dataset.stats import ActionStats, StateStats
 from mini_pi0.train.augmentation import GpuBatchProcessor
 from mini_pi0.train.runner import _augment_actions, _augment_image_batch, _build_dataloaders, _build_optimizer, _curate_episodes
 from mini_pi0.train.samplers import BlockShuffleSampler, dataset_prefers_locality_sampler, locality_order_for_dataset
@@ -103,6 +103,7 @@ class TrainingStabilityControlTests(unittest.TestCase):
                 "model.nhead=4",
                 "model.nlayers=2",
                 "model.action_backbone='cnn1d'",
+                "model.freeze_vision_backbone=false",
                 "train.lr=1e-4",
                 "train.lr_backbone=2e-5",
                 "train.lr_expert=8e-5",
@@ -117,6 +118,7 @@ class TrainingStabilityControlTests(unittest.TestCase):
         self.assertAlmostEqual(lr_summary["expert_lr"], 8e-5, places=10)
         groups_by_name = {str(g.get("name")): float(g["lr"]) for g in optimizer.param_groups}
         self.assertEqual(groups_by_name["backbone"], 2e-5)
+        self.assertEqual(groups_by_name["observation"], 1e-4)
         self.assertEqual(groups_by_name["expert"], 8e-5)
 
     def test_training_augmentations_image_and_action(self):
@@ -146,6 +148,26 @@ class TrainingStabilityControlTests(unittest.TestCase):
         self.assertFalse(torch.allclose(actions_aug, actions))
         self.assertTrue(torch.all(actions_aug.abs() <= 1.0 + 1e-6).item())
 
+    def test_multicamera_augmentation_preserves_shape_and_shares_geometry(self):
+        cfg = load_config(
+            overrides=[
+                "train.image_aug_enable=true",
+                "train.image_aug_crop_scale=0.8",
+                "train.image_aug_brightness=0.0",
+                "train.image_aug_contrast=0.0",
+                "train.image_aug_saturation=0.0",
+            ]
+        )
+        base = torch.arange(16 * 16, dtype=torch.float32).reshape(1, 1, 16, 16).div(255.0)
+        img = base.expand(2, 3, 3, 16, 16).clone()
+        torch.manual_seed(3)
+
+        augmented = _augment_image_batch(img, cfg)
+
+        self.assertEqual(tuple(augmented.shape), tuple(img.shape))
+        self.assertTrue(torch.allclose(augmented[:, :1], augmented[:, 1:2]))
+        self.assertTrue(torch.allclose(augmented[:, 1:2], augmented[:, 2:3]))
+
     def test_gpu_batch_processor_normalizes_raw_actions_on_device(self):
         cfg = load_config(overrides=["train.image_aug_enable=false", "train.action_noise_std=0.0"])
         stats = ActionStats(mean=np.array([1.0, 2.0], dtype=np.float32), std=np.array([2.0, 4.0], dtype=np.float32))
@@ -165,6 +187,28 @@ class TrainingStabilityControlTests(unittest.TestCase):
         self.assertTrue(torch.allclose(img_out.max(), torch.tensor(1.0)))
         self.assertTrue(torch.allclose(prop_out, prop.float()))
         self.assertTrue(torch.allclose(actions_out, torch.tensor([[[1.0, 2.0]]])))
+
+    def test_gpu_batch_processor_normalizes_state(self):
+        cfg = load_config()
+        processor = GpuBatchProcessor(
+            cfg=cfg,
+            device=torch.device("cpu"),
+            action_stats=None,
+            normalize_actions=False,
+            state_stats=StateStats(
+                mean=np.array([1.0, 3.0], dtype=np.float32),
+                std=np.array([2.0, 4.0], dtype=np.float32),
+            ),
+            normalize_states=True,
+        )
+
+        _, prop, _ = processor.eval_batch(
+            torch.zeros(1, 3, 8, 8),
+            torch.tensor([[3.0, 11.0]]),
+            torch.zeros(1, 2, 2),
+        )
+
+        self.assertTrue(torch.allclose(prop, torch.tensor([[1.0, 2.0]])))
 
     def test_dataloader_uses_prefetch_factor_with_workers(self):
         cfg = load_config(

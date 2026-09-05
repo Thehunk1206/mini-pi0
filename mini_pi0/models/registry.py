@@ -72,6 +72,7 @@ def make_model(model_cfg: ModelConfig | RootConfig) -> nn.Module:
         "vision_pretrained": getattr(cfg, "vision_pretrained", True),
         "action_cnn_kernel_size": getattr(cfg, "action_cnn_kernel_size", 5),
         "freeze_vision_backbone": getattr(cfg, "freeze_vision_backbone", True),
+        "freeze_vision_batchnorm_stats": getattr(cfg, "freeze_vision_batchnorm_stats", False),
         "dropout": getattr(cfg, "dropout", 0.1),
     }
     sig = inspect.signature(cls.__init__)
@@ -158,6 +159,7 @@ def build_checkpoint_payload(
             "vision_pretrained": getattr(cfg.model, "vision_pretrained", True),
             "action_cnn_kernel_size": getattr(cfg.model, "action_cnn_kernel_size", 5),
             "freeze_vision_backbone": getattr(cfg.model, "freeze_vision_backbone", True),
+            "freeze_vision_batchnorm_stats": getattr(cfg.model, "freeze_vision_batchnorm_stats", False),
             "dropout": getattr(cfg.model, "dropout", 0.1),
             "num_timestep_buckets": getattr(cfg.model, "num_timestep_buckets", 1000),
             "noise_beta_alpha": getattr(cfg.model, "noise_beta_alpha", 1.5),
@@ -185,6 +187,8 @@ def build_checkpoint_payload(
             "action_dim": cfg.robot.action_dim,
             "image_key": cfg.robot.image_key,
             "image_keys": effective_image_keys(cfg.robot),
+            "image_resize_hw": cfg.robot.image_resize_hw,
+            "image_resize_mode": cfg.robot.image_resize_mode,
             "state_keys": list(cfg.robot.state_keys) if cfg.robot.state_keys is not None else None,
             "proprio_keys": list(cfg.robot.proprio_keys),
         },
@@ -192,6 +196,9 @@ def build_checkpoint_payload(
             "format": cfg.data.format,
             "robomimic_hdf5": cfg.data.robomimic_hdf5,
             "lerobot_repo_id": cfg.data.lerobot_repo_id,
+            "lerobot_revision": cfg.data.lerobot_revision,
+            "sample_stride": cfg.data.sample_stride,
+            "normalize_state": cfg.data.normalize_state,
         },
     }
     if extra:

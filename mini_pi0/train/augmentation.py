@@ -5,12 +5,13 @@ from __future__ import annotations
 import torch
 
 from mini_pi0.config.schema import RootConfig
-from mini_pi0.dataset.stats import ActionStats
+from mini_pi0.dataset.stats import ActionStats, StateStats
 
 
 def _random_resized_crop_batch(img: torch.Tensor, scale_min: float) -> torch.Tensor:
-    """Apply per-sample random crop then resize back to original resolution."""
-    bsz, _, height, width = img.shape
+    """Apply one random crop per sample consistently across camera/history views."""
+
+    bsz, views, _, height, width = img.shape
     scale = float(max(0.1, min(1.0, scale_min)))
     if scale >= 1.0:
         return img
@@ -24,46 +25,49 @@ def _random_resized_crop_batch(img: torch.Tensor, scale_min: float) -> torch.Ten
     for i in range(bsz):
         y0 = int(torch.randint(0, max_y + 1, (1,), device=img.device).item()) if max_y > 0 else 0
         x0 = int(torch.randint(0, max_x + 1, (1,), device=img.device).item()) if max_x > 0 else 0
-        crop = img[i : i + 1, :, y0 : y0 + crop_h, x0 : x0 + crop_w]
+        crop = img[i : i + 1, :, :, y0 : y0 + crop_h, x0 : x0 + crop_w]
+        crop = crop.reshape(views, *crop.shape[-3:])
         crop = torch.nn.functional.interpolate(
             crop,
             size=(height, width),
             mode="bilinear",
             align_corners=False,
         )
-        crops.append(crop)
+        crops.append(crop.unsqueeze(0))
     return torch.cat(crops, dim=0)
 
 
 def augment_image_batch(img: torch.Tensor, cfg: RootConfig) -> torch.Tensor:
     """Apply lightweight image augmentations to training image batches."""
-    if img.ndim != 4:
+    if img.ndim < 4 or img.shape[-3] not in {1, 3, 4}:
         return img
     if not bool(getattr(cfg.train, "image_aug_enable", False)):
         return img
 
-    out = img
+    original_shape = tuple(img.shape)
+    bsz = int(img.shape[0])
+    views = int(img.numel() // (bsz * img.shape[-3] * img.shape[-2] * img.shape[-1]))
+    out = img.reshape(bsz, views, *img.shape[-3:])
     crop_scale = float(getattr(cfg.train, "image_aug_crop_scale", 1.0))
     if crop_scale < 1.0:
         out = _random_resized_crop_batch(out, crop_scale)
 
-    bsz = out.shape[0]
     brightness = float(max(0.0, getattr(cfg.train, "image_aug_brightness", 0.0)))
     contrast = float(max(0.0, getattr(cfg.train, "image_aug_contrast", 0.0)))
     saturation = float(max(0.0, getattr(cfg.train, "image_aug_saturation", 0.0)))
 
     if brightness > 0.0:
-        factor = 1.0 + (torch.rand((bsz, 1, 1, 1), device=out.device, dtype=out.dtype) * 2.0 - 1.0) * brightness
+        factor = 1.0 + (torch.rand((bsz, 1, 1, 1, 1), device=out.device, dtype=out.dtype) * 2.0 - 1.0) * brightness
         out = out * factor
     if contrast > 0.0:
-        mean = out.mean(dim=(1, 2, 3), keepdim=True)
-        factor = 1.0 + (torch.rand((bsz, 1, 1, 1), device=out.device, dtype=out.dtype) * 2.0 - 1.0) * contrast
+        mean = out.mean(dim=(2, 3, 4), keepdim=True)
+        factor = 1.0 + (torch.rand((bsz, 1, 1, 1, 1), device=out.device, dtype=out.dtype) * 2.0 - 1.0) * contrast
         out = (out - mean) * factor + mean
     if saturation > 0.0:
-        gray = out.mean(dim=1, keepdim=True)
-        factor = 1.0 + (torch.rand((bsz, 1, 1, 1), device=out.device, dtype=out.dtype) * 2.0 - 1.0) * saturation
+        gray = out.mean(dim=2, keepdim=True)
+        factor = 1.0 + (torch.rand((bsz, 1, 1, 1, 1), device=out.device, dtype=out.dtype) * 2.0 - 1.0) * saturation
         out = gray + (out - gray) * factor
-    return out.clamp(0.0, 1.0)
+    return out.clamp(0.0, 1.0).reshape(original_shape)
 
 
 def augment_actions(actions: torch.Tensor, cfg: RootConfig) -> torch.Tensor:
@@ -89,6 +93,8 @@ class GpuBatchProcessor:
         device: torch.device,
         action_stats: ActionStats | None,
         normalize_actions: bool,
+        state_stats: StateStats | None = None,
+        normalize_states: bool = False,
     ) -> None:
         """Create a GPU-aware batch processor.
 
@@ -102,11 +108,17 @@ class GpuBatchProcessor:
         self.cfg = cfg
         self.device = device
         self.normalize_actions = bool(normalize_actions)
+        self.normalize_states = bool(normalize_states)
         self.mean: torch.Tensor | None = None
         self.std: torch.Tensor | None = None
         if action_stats is not None:
             self.mean = torch.as_tensor(action_stats.mean, device=device, dtype=torch.float32)
             self.std = torch.as_tensor(action_stats.std, device=device, dtype=torch.float32)
+        self.state_mean: torch.Tensor | None = None
+        self.state_std: torch.Tensor | None = None
+        if state_stats is not None:
+            self.state_mean = torch.as_tensor(state_stats.mean, device=device, dtype=torch.float32)
+            self.state_std = torch.as_tensor(state_stats.std, device=device, dtype=torch.float32)
 
     def train_batch(
         self,
@@ -119,9 +131,10 @@ class GpuBatchProcessor:
         img, prop, actions = self._transfer(img, prop, actions)
         img = self._prepare_images(img)
         actions = self._prepare_actions(actions)
+        prop = self._prepare_states(prop)
         img = augment_image_batch(img, self.cfg)
         actions = augment_actions(actions, self.cfg)
-        return img, prop.float(), actions
+        return img, prop, actions
 
     def eval_batch(
         self,
@@ -132,7 +145,7 @@ class GpuBatchProcessor:
         """Transfer and preprocess a validation batch without augmentation."""
 
         img, prop, actions = self._transfer(img, prop, actions)
-        return self._prepare_images(img), prop.float(), self._prepare_actions(actions)
+        return self._prepare_images(img), self._prepare_states(prop), self._prepare_actions(actions)
 
     def _transfer(
         self,
@@ -165,3 +178,14 @@ class GpuBatchProcessor:
         if self.mean is None or self.std is None:
             raise RuntimeError("Action stats are required to normalize raw action chunks.")
         return (out - self.mean.view(*([1] * (out.ndim - 1)), -1)) / self.std.view(*([1] * (out.ndim - 1)), -1)
+
+    def _prepare_states(self, states: torch.Tensor) -> torch.Tensor:
+        """Normalize raw proprioceptive states on the target device when enabled."""
+
+        out = states.float()
+        if not self.normalize_states:
+            return out
+        if self.state_mean is None or self.state_std is None:
+            raise RuntimeError("State stats are required to normalize raw proprioceptive states.")
+        shape = (*([1] * (out.ndim - 1)), -1)
+        return (out - self.state_mean.view(*shape)) / self.state_std.view(*shape)
