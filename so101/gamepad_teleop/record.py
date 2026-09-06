@@ -14,11 +14,11 @@ from so101.teleop.runtime import DEFAULT_ROBOT_PORT, FPS
 from .gamepad import PAN_CONTROL_MODES
 from .recording import (
     RecordingConfig,
+    apply_camera_capture_sizes,
     apply_camera_output_sizes,
     parse_camera_specs,
 )
 from .teleoperate import main as run_hardware_teleoperation
-
 
 DEFAULT_DATASET_ROOT = Path("data/lerobot/so101_gamepad")
 DEFAULT_REPO_ID = "local/so101-gamepad"
@@ -61,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
+    parser.add_argument(
+        "--camera-native-size",
+        action="append",
+        metavar="NAME=WIDTHxHEIGHT",
+        help="repeat when cameras require different native capture resolutions",
+    )
     parser.add_argument(
         "--camera-output-size",
         action="append",
@@ -109,18 +115,17 @@ def cli() -> None:
     args = parser.parse_args()
     try:
         camera_specs = apply_camera_output_sizes(
-            parse_camera_specs(args.camera),
+            apply_camera_capture_sizes(
+                parse_camera_specs(args.camera), args.camera_native_size
+            ),
             args.camera_output_size,
         )
         dataset_root = args.dataset_root.expanduser().resolve()
         if args.resume and not dataset_root.exists():
-            parser.error(
-                f"cannot append: dataset does not exist at {dataset_root}"
-            )
+            parser.error(f"cannot append: dataset does not exist at {dataset_root}")
         if dataset_root.exists() and not args.resume and not args.overwrite:
             parser.error(
-                f"dataset already exists at {dataset_root}; use --append or "
-                "--overwrite"
+                f"dataset already exists at {dataset_root}; use --append or --overwrite"
             )
         config = RecordingConfig(
             repo_id=args.dataset_repo_id,

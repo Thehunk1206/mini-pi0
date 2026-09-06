@@ -146,7 +146,7 @@ class LeRobotDatasetFactory:
             module = import_module("lerobot.datasets.lerobot_dataset")
             cls = getattr(module, "LeRobotDataset")
         except Exception as exc:
-            raise RuntimeError("LeRobot v3 support requires `lerobot==0.4.4` or a compatible version.") from exc
+            raise RuntimeError("LeRobot v3 support requires `lerobot==0.6.1` or a compatible version.") from exc
         return cls
 
 

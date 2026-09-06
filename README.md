@@ -54,10 +54,10 @@ Click a preview to open the MP4.
 
 ## Install
 
-This project is `uv` first. Use Python 3.11 for the ManiSkill + LeRobot stack.
+This project is `uv` first. Use Python 3.12 for the ManiSkill + LeRobot stack.
 
 ```bash
-uv venv --python 3.11 .venv
+uv venv --python 3.12 .venv
 . .venv/bin/activate
 uv pip install -e ".[maniskill3,vision,dev]"
 ```
@@ -138,6 +138,9 @@ python -m mini_pi0.eval.action_diagnostics \
 - Xbox-style SO-101 gamepad teleoperation with calibrated wrist-pivot IK,
   direct gripper control, Rerun visualization, and gamepad-only multi-camera
   LeRobotDataset recording/replay with six-position state and action vectors.
+- Dual-camera SO-101 inference for the trained 16M and 25M policies with
+  asynchronous LeRobot RTC, MPS/CUDA execution, calibrated command safety,
+  and a memory-bounded Rerun dashboard.
 
 ## Repository Layout
 
@@ -163,6 +166,7 @@ so101/
   joint_ui/       # Local calibrated browser dashboard
   phone_teleop/   # Android WebXR -> IK -> SO-101 control
   gamepad_teleop/ # Xbox controller -> calibrated IK/direct SO-101 control
+  policy_inference/ # Dual-camera mini-pi0 -> RTC -> calibrated joint control
   teleop/         # Shared calibration, model, logging, and visualization code
   deployment/     # Experimental physical-policy deployment code
 ```
@@ -179,6 +183,9 @@ All physical SO-101 utilities are organized in [`so101/`](so101/README.md):
 - [`gamepad_teleop/`](so101/gamepad_teleop/README.md) provides hardware and
   hardware-free Xbox-style control plus Rerun-only LeRobotDataset recording
   and replay from named, rotatable cameras.
+- [`policy_inference/`](so101/policy_inference/README.md) deploys the trained
+  dual-camera 16M/25M policies with MPS/CUDA support, asynchronous RTC, and
+  calibrated hardware safety. Its default command is hardware-free.
 - [`deployment/`](so101/deployment/README.md) contains an experimental legacy
   policy-deployment prototype; it is not validated for calibrated SO-101 use.
 

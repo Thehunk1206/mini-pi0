@@ -10,7 +10,7 @@ imageio-ffmpeg
 matplotlib
 scipy
 h5py
-opencv-python
+opencv-python-headless>=4.9.0,<4.14.0
 lerobot
 av
 timm

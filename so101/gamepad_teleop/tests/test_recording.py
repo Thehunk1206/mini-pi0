@@ -13,6 +13,7 @@ from so101.gamepad_teleop.recording import (
     CameraSpec,
     GamepadDatasetRecorder,
     RecordingConfig,
+    apply_camera_capture_sizes,
     apply_camera_output_sizes,
     build_dataset_features,
     build_observation_values,
@@ -26,7 +27,6 @@ from so101.gamepad_teleop.recording import (
 from so101.gamepad_teleop.replay import position_channels, to_hwc_uint8
 from so101.teleop.flight_recorder import ElectricalTelemetrySampler
 from so101.teleop.runtime import return_to_base
-
 
 JOINTS = (
     "shoulder_pan",
@@ -125,9 +125,7 @@ class CameraSpecTest(unittest.TestCase):
         self.assertTrue(appended.resume)
         self.assertFalse(appended.overwrite)
         with self.assertRaises(SystemExit):
-            parser.parse_args(
-                ["--task", "test", "--append", "--overwrite"]
-            )
+            parser.parse_args(["--task", "test", "--append", "--overwrite"])
 
     def test_named_camera_id_and_rotation_are_parsed(self):
         self.assertEqual(
@@ -161,6 +159,17 @@ class CameraSpecTest(unittest.TestCase):
         self.assertIn("-> 480x480", specs[0].description)
         with self.assertRaisesRegex(ValueError, "unknown camera"):
             apply_camera_output_sizes(specs, ("room=320x240",))
+
+    def test_camera_native_sizes_are_applied_independently(self):
+        specs = apply_camera_capture_sizes(
+            (CameraSpec("wrist", 0), CameraSpec("base", 1)),
+            ("wrist=640x480", "base=1920x1080"),
+        )
+        self.assertEqual((specs[0].capture_width, specs[0].capture_height), (640, 480))
+        self.assertEqual(
+            (specs[1].capture_width, specs[1].capture_height), (1920, 1080)
+        )
+        self.assertIn("native 1920x1080", specs[1].description)
 
     def test_square_output_is_center_cropped_without_stretching(self):
         frame = np.zeros((4, 8, 3), dtype=np.uint8)
@@ -208,8 +217,8 @@ class CameraSpecTest(unittest.TestCase):
 
         rig = CameraRig(
             (
-                CameraSpec("wrist", 0, 180, None, 4, 4),
-                CameraSpec("room", 1, 90, 25, 3, 4),
+                CameraSpec("wrist", 0, 180, None, 4, 4, 640, 480),
+                CameraSpec("room", 1, 90, 25, 3, 4, 1920, 1080),
             ),
             fps=30,
             width=8,
@@ -220,14 +229,15 @@ class CameraSpecTest(unittest.TestCase):
         self.assertTrue(rig.is_connected)
         self.assertEqual(
             requested_profiles,
-            {"wrist": (30, 8, 6), "room": (25, 8, 6)},
+            {"wrist": (30, 640, 480), "room": (25, 1920, 1080)},
         )
         self.assertEqual(rig.frame_shapes, {"wrist": (4, 4, 3), "room": (4, 3, 3)})
         self.assertEqual(set(rig.read()), {"wrist", "room"})
         rig.disconnect()
         self.assertFalse(rig.is_connected)
 
-    def test_camera_startup_timeout_is_retried_once(self):
+    @patch("so101.gamepad_teleop.recording.time.sleep")
+    def test_camera_startup_timeout_is_retried(self, sleep):
         attempts = 0
 
         class Camera:
@@ -255,7 +265,39 @@ class CameraSpecTest(unittest.TestCase):
         )
         rig.connect()
         self.assertEqual(attempts, 2)
+        sleep.assert_called_once_with(0.5)
         rig.disconnect()
+
+    @patch("so101.gamepad_teleop.recording.time.sleep")
+    def test_camera_startup_timeout_reports_exhausted_profile(self, sleep):
+        attempts = 0
+
+        class Camera:
+            is_connected = False
+
+            def connect(self):
+                nonlocal attempts
+                attempts += 1
+                raise TimeoutError("slow camera")
+
+            def disconnect(self):
+                self.is_connected = False
+
+        rig = CameraRig(
+            (CameraSpec("wrist", 1, fps=25, capture_width=1920, capture_height=1080),),
+            fps=30,
+            width=640,
+            height=480,
+            camera_factory=lambda *_: Camera(),
+        )
+
+        with self.assertRaisesRegex(
+            TimeoutError, "after 5 attempts at 1920x1080@25 FPS"
+        ):
+            rig.connect()
+
+        self.assertEqual(attempts, 5)
+        self.assertEqual(sleep.call_count, 4)
 
 
 class DatasetRecordingTest(unittest.TestCase):
@@ -319,14 +361,12 @@ class DatasetRecordingTest(unittest.TestCase):
 
             def get_observation(self):
                 return {
-                    f"{joint}.pos": value
-                    for joint, value in self.positions.items()
+                    f"{joint}.pos": value for joint, value in self.positions.items()
                 }
 
             def send_action(self, action):
                 self.positions = {
-                    joint: float(action[f"{joint}.pos"])
-                    for joint in JOINTS
+                    joint: float(action[f"{joint}.pos"]) for joint in JOINTS
                 }
                 return dict(action)
 
@@ -455,9 +495,7 @@ class DatasetRecordingTest(unittest.TestCase):
             )
             recorder.open()
             recorder.handle_gamepad(sample(start_episode=True))
-            self.assertFalse(
-                recorder.handle_gamepad(sample(return_to_base=True))
-            )
+            self.assertFalse(recorder.handle_gamepad(sample(return_to_base=True)))
             self.assertEqual(recorder.state, recorder.RECORDING)
             observation = {f"{joint}.pos": 0.0 for joint in JOINTS}
             action = observation.copy()
@@ -497,8 +535,7 @@ class DatasetRecordingTest(unittest.TestCase):
             recorder.open()
             recorder.start_episode()
             observation = {
-                f"{joint}.pos": float(index)
-                for index, joint in enumerate(JOINTS)
+                f"{joint}.pos": float(index) for index, joint in enumerate(JOINTS)
             }
             image = {"wrist": np.full((6, 8, 3), 127, dtype=np.uint8)}
             for _ in range(3):

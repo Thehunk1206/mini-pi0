@@ -1,0 +1,4 @@
+# RTC and Rerun APIs used by the SO-101 inference runtime.
+lerobot[dataset,viz]==0.6.1
+av
+opencv-python-headless>=4.9.0,<4.14.0

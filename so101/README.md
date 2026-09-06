@@ -15,6 +15,7 @@ Phone control uses Ruckig; gamepad control uses validated direct joint updates.
 | [`joint_ui/`](joint_ui/README.md) | Local six-joint dashboard, telemetry, base pose, and safety controls | `python -m so101.joint_ui.app` |
 | [`phone_teleop/`](phone_teleop/README.md) | Android WebXR control, telemetry/URDF console, optional Rerun, and incident capture | `python -m so101.phone_teleop.teleoperate` |
 | [`gamepad_teleop/`](gamepad_teleop/README.md) | Xbox-style IK/direct control and gamepad-only LeRobotDataset camera recording/replay | `python -m so101.gamepad_teleop.teleoperate` / `python -m so101.gamepad_teleop.record` / `python -m so101.gamepad_teleop.replay` |
+| [`policy_inference/`](policy_inference/README.md) | Dual-camera 16M/25M mini-pi0 deployment with asynchronous LeRobot RTC, calibrated safety, and Rerun | `python -m so101.policy_inference` |
 | [`deployment/`](deployment/README.md) | Legacy physical-policy deployment prototype | No supported SO-101 entry point |
 
 Start with the hardware-free gamepad/Rerun path before opening the servo bus:
