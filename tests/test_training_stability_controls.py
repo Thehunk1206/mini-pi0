@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -11,7 +14,14 @@ from mini_pi0.models.registry import make_model
 from mini_pi0.train.optim import ExponentialMovingAverage
 from mini_pi0.dataset.stats import ActionStats, StateStats
 from mini_pi0.train.augmentation import GpuBatchProcessor
-from mini_pi0.train.runner import _augment_actions, _augment_image_batch, _build_dataloaders, _build_optimizer, _curate_episodes
+from mini_pi0.train.runner import (
+    _augment_actions,
+    _augment_image_batch,
+    _build_dataloaders,
+    _build_optimizer,
+    _curate_episodes,
+    _restore_from_checkpoint,
+)
 from mini_pi0.train.samplers import BlockShuffleSampler, dataset_prefers_locality_sampler, locality_order_for_dataset
 
 
@@ -283,6 +293,44 @@ class TrainingStabilityControlTests(unittest.TestCase):
         for name, value in model.state_dict().items():
             self.assertEqual(ema.shadow[name].dtype, value.dtype)
             self.assertEqual(ema.shadow[name].device, value.device)
+
+    def test_resume_uses_raw_model_with_optimizer_and_restores_ema(self):
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        ema = ExponentialMovingAverage(model, decay=0.999)
+        raw_state = {key: torch.full_like(value, 3.0) for key, value in model.state_dict().items()}
+        ema_state = {key: torch.full_like(value, 7.0) for key, value in model.state_dict().items()}
+
+        with TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "latest.pt"
+            checkpoint_path.touch()
+            cfg = load_config(overrides=[f"train.resume_from='{checkpoint_path}'"])
+            checkpoint = {
+                "epoch": 49,
+                "best_metric": 0.125,
+                "model": ema_state,
+                "model_raw": raw_state,
+                "model_weight_source": "ema",
+                "optimizer": optimizer.state_dict(),
+                "ema": {"decay": 0.999, "shadow": ema_state},
+            }
+            with patch("mini_pi0.train.runner.load_checkpoint", return_value=checkpoint):
+                start_epoch, best_metric, resume_from = _restore_from_checkpoint(
+                    cfg,
+                    model,
+                    optimizer,
+                    scheduler=None,
+                    ema=ema,
+                    best_metric_name="train_loss",
+                )
+
+        self.assertEqual(start_epoch, 50)
+        self.assertEqual(best_metric, 0.125)
+        self.assertEqual(resume_from, str(checkpoint_path))
+        for value in model.state_dict().values():
+            self.assertTrue(torch.equal(value, torch.full_like(value, 3.0)))
+        for value in ema.shadow.values():
+            self.assertTrue(torch.equal(value, torch.full_like(value, 7.0)))
 
     def test_validation_ema_is_disabled_by_default(self):
         cfg = load_config(overrides=["train.ema_decay=0.999", "train.checkpoint_use_ema=true"])

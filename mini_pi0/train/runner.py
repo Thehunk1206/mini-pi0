@@ -50,6 +50,23 @@ except Exception:
     tqdm = None
 
 
+def _reset_lerobot_decoder_cache(_worker_id: int) -> None:
+    """Drop decoder objects inherited when DataLoader workers are forked.
+
+    LeRobot's TorchCodec backend keeps a process-global decoder cache. Dataset
+    inspection can populate that cache in the parent before workers start, so
+    each worker must discard the inherited decoder/file handle and build its
+    own cache on first use.
+    """
+
+    try:
+        from lerobot.datasets.video_utils import _default_decoder_cache
+
+        _default_decoder_cache.clear()
+    except (ImportError, AttributeError):
+        return
+
+
 def _model_forward_context(cfg: RootConfig, device: torch.device):
     """Create the configured training autocast context."""
 
@@ -171,6 +188,7 @@ def _build_dataloaders(
     if num_workers > 0:
         prefetch_factor = int(max(1, getattr(cfg.train, "prefetch_factor", 4)))
         loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["worker_init_fn"] = _reset_lerobot_decoder_cache
 
     loader = DataLoader(train_dataset, **loader_kwargs)
     val_loader = None
@@ -244,8 +262,19 @@ def _restore_from_checkpoint(
     print(f"[train] Resuming from checkpoint: {ckpt_path}", flush=True)
 
     ckpt = load_checkpoint(ckpt_path, map_location="cpu")
-    state = ckpt.get("model", ckpt)
+    if isinstance(ckpt, dict) and "model_raw" in ckpt:
+        # Optimizer moments were produced from the raw training weights. EMA
+        # weights remain available through the separately restored EMA state.
+        state = ckpt["model_raw"]
+        model_state_source = "model_raw"
+    elif isinstance(ckpt, dict) and "model" in ckpt:
+        state = ckpt["model"]
+        model_state_source = "model"
+    else:
+        state = ckpt
+        model_state_source = "checkpoint"
     model.load_state_dict(state, strict=True)
+    print(f"[train] Restored training model weights from: {model_state_source}", flush=True)
 
     prev_epoch = int(ckpt.get("epoch", -1))
     start_epoch = max(0, prev_epoch + 1)

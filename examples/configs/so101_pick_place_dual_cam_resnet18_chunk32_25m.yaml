@@ -1,5 +1,5 @@
 experiment:
-  name: so101-pick-place-dual-cam-resnet18-chunk32
+  name: so101-pick-place-dual-cam-resnet18-chunk32-25m
   seed: 42
   runs_root: runs
 
@@ -41,9 +41,9 @@ model:
   prop_dim: 6
   chunk_size: 32
   cond_dim: 256
-  d_model: 256
+  d_model: 368
   nhead: 4
-  nlayers: 4
+  nlayers: 6
   action_backbone: transformer
   conditioning_mode: cross_attention
   action_attention_causal: false
