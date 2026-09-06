@@ -17,10 +17,11 @@ from mini_pi0.dataset.lerobot_v3 import (
     LeRobotDatasetFactory,
     LeRobotFeatureSpec,
     LeRobotPolicyDataset,
+    LeRobotStateStatsComputer,
     LeRobotTemporalConfig,
     LeRobotV3OpenConfig,
 )
-from mini_pi0.dataset.stats import ActionStats
+from mini_pi0.dataset.stats import ActionStats, StateStats
 from mini_pi0.dataset.torch_dataset import ActionChunkDataset
 from mini_pi0.train.data import (
     curate_episodes,
@@ -40,8 +41,11 @@ class PreparedTrainingData:
     val_dataset: Any | None
     action_stats: ActionStats
     action_stats_path: Path
+    state_stats: StateStats | None
+    state_stats_path: Path | None
     curation_summary: dict[str, Any]
     normalize_actions_on_device: bool
+    normalize_states_on_device: bool
 
 
 class TrainingDatasetBuilder:
@@ -84,6 +88,23 @@ class TrainingDatasetBuilder:
         all_actions = np.concatenate([ep.actions.astype(np.float32) for ep in episodes], axis=0)
         stats = ActionStats.from_actions(all_actions)
         stats_path = self._save_stats(stats)
+        normalize_states = bool(getattr(self.cfg.data, "normalize_state", False))
+        state_stats = None
+        state_stats_path = None
+        if normalize_states:
+            all_states = np.stack(
+                [
+                    np.concatenate(
+                        [np.asarray(obs[key], dtype=np.float32).reshape(-1) for key in state_keys],
+                        axis=0,
+                    )
+                    for ep in episodes
+                    for obs in ep.obs
+                ],
+                axis=0,
+            )
+            state_stats = StateStats.from_actions(all_states)
+            state_stats_path = self._save_state_stats(state_stats)
         dataset = ActionChunkDataset(
             episodes=episodes,
             chunk_size=self.cfg.data.chunk_size,
@@ -93,6 +114,11 @@ class TrainingDatasetBuilder:
             action_stats=stats,
             obs_horizon=int(getattr(self.cfg.model, "obs_horizon", 1)),
             preserve_camera_dim=self._preserve_camera_dim(),
+            state_stats=state_stats,
+            normalize_states=normalize_states,
+            image_resize_hw=self.cfg.robot.image_resize_hw,
+            image_resize_mode=self.cfg.robot.image_resize_mode,
+            sample_stride=int(getattr(self.cfg.data, "sample_stride", 1)),
         )
         train_dataset, val_dataset = self._split(dataset)
         print(
@@ -106,8 +132,11 @@ class TrainingDatasetBuilder:
             val_dataset=val_dataset,
             action_stats=stats,
             action_stats_path=stats_path,
+            state_stats=state_stats,
+            state_stats_path=state_stats_path,
             curation_summary=curation_summary,
             normalize_actions_on_device=False,
+            normalize_states_on_device=False,
         )
 
     def _build_lerobot_v3(self) -> PreparedTrainingData:
@@ -135,6 +164,14 @@ class TrainingDatasetBuilder:
         spec.validate(plain_dataset)
         stats = ActionStats.from_iterable(LeRobotActionStatsComputer(plain_dataset, spec.action_key).iter_actions())
         stats_path = self._save_stats(stats)
+        normalize_states = bool(getattr(self.cfg.data, "normalize_state", False))
+        state_stats = None
+        state_stats_path = None
+        if normalize_states:
+            state_stats = StateStats.from_iterable(
+                LeRobotStateStatsComputer(plain_dataset, spec.state_key).iter_states()
+            )
+            state_stats_path = self._save_state_stats(state_stats)
 
         temporal = LeRobotTemporalConfig(
             fps=int(getattr(plain_dataset, "fps", self.cfg.simulator.control_freq)),
@@ -148,6 +185,9 @@ class TrainingDatasetBuilder:
             chunk_size=int(self.cfg.data.chunk_size),
             obs_horizon=int(getattr(self.cfg.model, "obs_horizon", 1)),
             preserve_camera_dim=self._preserve_camera_dim(),
+            image_resize_hw=self.cfg.robot.image_resize_hw,
+            image_resize_mode=self.cfg.robot.image_resize_mode,
+            sample_stride=int(getattr(self.cfg.data, "sample_stride", 1)),
         )
         info = dataset.info()
         self._align_dims(info.action_dim, info.prop_dim)
@@ -167,8 +207,11 @@ class TrainingDatasetBuilder:
             val_dataset=val_dataset,
             action_stats=stats,
             action_stats_path=stats_path,
+            state_stats=state_stats,
+            state_stats_path=state_stats_path,
             curation_summary=curation_summary,
             normalize_actions_on_device=True,
+            normalize_states_on_device=normalize_states,
         )
 
     def _align_dims(self, action_dim: int, prop_dim: int) -> None:
@@ -189,6 +232,13 @@ class TrainingDatasetBuilder:
         """Persist action stats into the current run artifacts."""
 
         path = self.run_dir / "artifacts" / "action_stats.json"
+        stats.save(str(path))
+        return path
+
+    def _save_state_stats(self, stats: StateStats) -> Path:
+        """Persist state normalization statistics into the run artifacts."""
+
+        path = self.run_dir / "artifacts" / "state_stats.json"
         stats.save(str(path))
         return path
 

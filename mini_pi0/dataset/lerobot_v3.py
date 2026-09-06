@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from mini_pi0.dataset.image_transforms import resize_image_tensor
+
 
 LEROBOT_V3_FORMATS = {"lerobot_v3", "lerobot_hf", "lerobot", "hf"}
 
@@ -169,6 +171,25 @@ class LeRobotActionStatsComputer:
             yield _to_numpy(self.dataset[idx][self.action_key]).astype(np.float32)
 
 
+class LeRobotStateStatsComputer:
+    """Compute state statistics without decoding image/video features."""
+
+    def __init__(self, dataset: Any, state_key: str = "observation.state") -> None:
+        self.dataset = dataset
+        self.state_key = state_key
+
+    def iter_states(self) -> Iterator[np.ndarray]:
+        """Yield state arrays from low-dimensional dataset storage."""
+
+        hf_dataset = getattr(self.dataset, "hf_dataset", None)
+        if hf_dataset is not None and self.state_key in getattr(hf_dataset, "column_names", []):
+            for value in hf_dataset[self.state_key]:
+                yield _to_numpy(value).astype(np.float32)
+            return
+        for idx in range(len(self.dataset)):
+            yield _to_numpy(self.dataset[idx][self.state_key]).astype(np.float32)
+
+
 class LeRobotPolicyDataset(Dataset):
     """Thin adapter from LeRobot samples to mini-pi0 policy batches.
 
@@ -177,6 +198,7 @@ class LeRobotPolicyDataset(Dataset):
     """
 
     actions_are_normalized = False
+    states_are_normalized = False
     prefers_locality_sampler = True
 
     def __init__(
@@ -187,6 +209,9 @@ class LeRobotPolicyDataset(Dataset):
         chunk_size: int,
         obs_horizon: int,
         preserve_camera_dim: bool,
+        image_resize_hw: list[int] | None = None,
+        image_resize_mode: str = "letterbox",
+        sample_stride: int = 1,
     ) -> None:
         """Create a policy dataset wrapper around an opened LeRobot dataset."""
 
@@ -195,6 +220,9 @@ class LeRobotPolicyDataset(Dataset):
         self.chunk_size = int(chunk_size)
         self.obs_horizon = int(max(1, obs_horizon))
         self.preserve_camera_dim = bool(preserve_camera_dim)
+        self.image_resize_hw = image_resize_hw
+        self.image_resize_mode = str(image_resize_mode)
+        self.sample_stride = int(max(1, sample_stride))
         self.valid_indices = self._valid_indices()
         if not self.valid_indices:
             raise ValueError(f"No LeRobot samples available for chunk_size={self.chunk_size}.")
@@ -229,7 +257,14 @@ class LeRobotPolicyDataset(Dataset):
     def _images(self, sample: dict[str, Any]) -> torch.Tensor:
         """Format images into the existing model contract."""
 
-        images = [_image_to_tchw(sample[key], self.obs_horizon) for key in self.spec.image_keys]
+        images = [
+            resize_image_tensor(
+                _image_to_tchw(sample[key], self.obs_horizon),
+                self.image_resize_hw,
+                self.image_resize_mode,
+            )
+            for key in self.spec.image_keys
+        ]
         if self.obs_horizon == 1:
             single_t = [img[0] for img in images]
             if len(single_t) == 1:
@@ -268,15 +303,16 @@ class LeRobotPolicyDataset(Dataset):
             for episode in episodes:
                 start = int(episode["dataset_from_index"])
                 end = int(episode["dataset_to_index"])
-                indices.extend(range(start, max(start, end - self.chunk_size + 1)))
+                indices.extend(range(start, max(start, end - self.chunk_size + 1), self.sample_stride))
             return indices
 
         pad_key = f"{self.spec.action_key}_is_pad"
-        return [
+        indices = [
             idx
             for idx in range(len(self.dataset))
             if pad_key not in self.dataset[idx] or not bool(_to_tensor(self.dataset[idx][pad_key]).any().item())
         ]
+        return indices[:: self.sample_stride]
 
     def _episode_count(self) -> int:
         """Return number of distinct loaded episodes."""
@@ -303,7 +339,7 @@ class LeRobotPolicyDataset(Dataset):
         start = 0
         for idx, episode_id in enumerate([*episode_ids, None]):
             if episode_id != current_episode:
-                indices.extend(range(start, max(start, idx - self.chunk_size + 1)))
+                indices.extend(range(start, max(start, idx - self.chunk_size + 1), self.sample_stride))
                 start = idx
                 current_episode = episode_id
         return indices
@@ -353,6 +389,9 @@ def build_lerobot_v3_dataset(
     action_stats: Any | None = None,
     obs_horizon: int,
     preserve_camera_dim: bool,
+    image_resize_hw: list[int] | None = None,
+    image_resize_mode: str = "letterbox",
+    sample_stride: int = 1,
 ) -> LeRobotPolicyDataset:
     """Backward-compatible factory used by older call sites/tests."""
 
@@ -375,6 +414,9 @@ def build_lerobot_v3_dataset(
         chunk_size=chunk_size,
         obs_horizon=obs_horizon,
         preserve_camera_dim=preserve_camera_dim,
+        image_resize_hw=image_resize_hw,
+        image_resize_mode=image_resize_mode,
+        sample_stride=sample_stride,
     )
 
 

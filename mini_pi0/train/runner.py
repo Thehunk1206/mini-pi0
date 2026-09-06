@@ -50,6 +50,23 @@ except Exception:
     tqdm = None
 
 
+def _reset_lerobot_decoder_cache(_worker_id: int) -> None:
+    """Drop decoder objects inherited when DataLoader workers are forked.
+
+    LeRobot's TorchCodec backend keeps a process-global decoder cache. Dataset
+    inspection can populate that cache in the parent before workers start, so
+    each worker must discard the inherited decoder/file handle and build its
+    own cache on first use.
+    """
+
+    try:
+        from lerobot.datasets.video_utils import _default_decoder_cache
+
+        _default_decoder_cache.clear()
+    except (ImportError, AttributeError):
+        return
+
+
 def _model_forward_context(cfg: RootConfig, device: torch.device):
     """Create the configured training autocast context."""
 
@@ -86,6 +103,7 @@ def _build_train_checkpoint_payload(
     optimizer: torch.optim.Optimizer,
     scheduler: Any | None,
     ema: ExponentialMovingAverage | None,
+    normalization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a full training checkpoint with optimizer, scheduler, and EMA."""
     payload = build_checkpoint_payload(
@@ -102,6 +120,7 @@ def _build_train_checkpoint_payload(
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "ema": (ema.state_dict() if ema is not None else None),
+            "normalization": dict(normalization or {}),
         },
     )
     payload["model_weight_source"] = "raw"
@@ -125,6 +144,8 @@ def _run_training_sim_eval(
     eval_cfg = copy.deepcopy(cfg)
     eval_cfg.eval.checkpoint = str(checkpoint_path)
     eval_cfg.eval.action_stats_path = str(run_dir / "artifacts" / "action_stats.json")
+    if bool(getattr(cfg.data, "normalize_state", False)):
+        eval_cfg.eval.state_stats_path = str(run_dir / "artifacts" / "state_stats.json")
     eval_cfg.eval.run_dir = str(run_dir / "sim_eval" / f"epoch_{epoch + 1:03d}")
     eval_cfg.eval.n_episodes = int(max(1, getattr(cfg.train, "sim_eval_n_episodes", 10)))
     sim_eval_max_steps = getattr(cfg.train, "sim_eval_max_steps", None)
@@ -167,6 +188,7 @@ def _build_dataloaders(
     if num_workers > 0:
         prefetch_factor = int(max(1, getattr(cfg.train, "prefetch_factor", 4)))
         loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["worker_init_fn"] = _reset_lerobot_decoder_cache
 
     loader = DataLoader(train_dataset, **loader_kwargs)
     val_loader = None
@@ -240,8 +262,19 @@ def _restore_from_checkpoint(
     print(f"[train] Resuming from checkpoint: {ckpt_path}", flush=True)
 
     ckpt = load_checkpoint(ckpt_path, map_location="cpu")
-    state = ckpt.get("model", ckpt)
+    if isinstance(ckpt, dict) and "model_raw" in ckpt:
+        # Optimizer moments were produced from the raw training weights. EMA
+        # weights remain available through the separately restored EMA state.
+        state = ckpt["model_raw"]
+        model_state_source = "model_raw"
+    elif isinstance(ckpt, dict) and "model" in ckpt:
+        state = ckpt["model"]
+        model_state_source = "model"
+    else:
+        state = ckpt
+        model_state_source = "checkpoint"
     model.load_state_dict(state, strict=True)
+    print(f"[train] Restored training model weights from: {model_state_source}", flush=True)
 
     prev_epoch = int(ckpt.get("epoch", -1))
     start_epoch = max(0, prev_epoch + 1)
@@ -299,7 +332,16 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         device=device,
         action_stats=prepared.action_stats,
         normalize_actions=prepared.normalize_actions_on_device,
+        state_stats=prepared.state_stats,
+        normalize_states=prepared.normalize_states_on_device,
     )
+    normalization_metadata = {
+        "action_mean": prepared.action_stats.mean.tolist(),
+        "action_std": prepared.action_stats.std.tolist(),
+        "state_mean": prepared.state_stats.mean.tolist() if prepared.state_stats is not None else None,
+        "state_std": prepared.state_stats.std.tolist() if prepared.state_stats is not None else None,
+        "state_normalized": prepared.state_stats is not None,
+    }
 
     optimizer, lr_summary = _build_optimizer(model, cfg)
     scheduler, scheduler_desc = build_scheduler(optimizer, cfg)
@@ -330,6 +372,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     print(
         "Optimizer          : AdamW("
         f"backbone_lr={lr_summary['backbone_lr']:.2e}, "
+        f"observation_lr={lr_summary['observation_lr']:.2e}, "
         f"expert_lr={lr_summary['expert_lr']:.2e}, "
         f"weight_decay={cfg.train.weight_decay})"
     )
@@ -359,7 +402,12 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         f"record_grid={bool(getattr(cfg.train, 'sim_eval_record_grid', False))}, "
         f"save_best_success={bool(getattr(cfg.train, 'save_best_success', True))}"
     )
-    print(f"Checkpointing      : save_best={cfg.train.save_best}, min_delta={cfg.train.save_best_min_delta}")
+    print(
+        "Checkpointing      : "
+        f"save_best={cfg.train.save_best}, min_delta={cfg.train.save_best_min_delta}, "
+        f"every_epochs={int(getattr(cfg.train, 'checkpoint_every_epochs', 0))}, "
+        f"save_final={bool(getattr(cfg.train, 'save_final', True))}"
+    )
     print(f"Resume             : checkpoint={resume_from}, restore_opt={bool(getattr(cfg.train, 'resume_optimizer', True))}")
     print(f"Batches / epoch    : {len(loader)}")
 
@@ -382,6 +430,10 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
     use_ema_for_val = bool(getattr(cfg.train, "val_use_ema", False))
     best_success_rate = float("-inf")
     best_success_epoch: int | None = None
+    checkpoint_every = int(max(0, getattr(cfg.train, "checkpoint_every_epochs", 0)))
+    last_epoch: int | None = None
+    last_train_avg: float | None = None
+    last_val_avg: float | None = None
 
     for epoch in range(start_epoch, epochs):
         _set_epoch_for_sampler(loader, epoch)
@@ -470,6 +522,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
                 optimizer=optimizer,
                 scheduler=scheduler,
                 ema=ema,
+                normalization=normalization_metadata,
             )
             save_checkpoint(run_ckpt_dir / "best.pt", payload)
             save_s = time.perf_counter() - t_save0
@@ -493,6 +546,7 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
                 optimizer=optimizer,
                 scheduler=scheduler,
                 ema=ema,
+                normalization=normalization_metadata,
             )
             latest_path = run_ckpt_dir / "latest.pt"
             save_checkpoint(latest_path, latest_payload)
@@ -535,6 +589,27 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             else:
                 status = f"{status}; sim_eval_success={sim_success:.3f}"
 
+        last_epoch = int(epoch)
+        last_train_avg = float(train_avg)
+        last_val_avg = float(val_avg) if val_avg is not None else None
+        if checkpoint_every > 0 and (epoch + 1) % checkpoint_every == 0:
+            periodic_payload = _build_train_checkpoint_payload(
+                model=model,
+                cfg=cfg,
+                epoch=epoch,
+                train_avg=train_avg,
+                val_avg=val_avg,
+                best_metric=best_metric,
+                best_metric_name=best_metric_name,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                ema=ema,
+                normalization=normalization_metadata,
+            )
+            save_checkpoint(run_ckpt_dir / f"epoch_{epoch + 1:03d}.pt", periodic_payload)
+            save_checkpoint(run_ckpt_dir / "latest.pt", periodic_payload)
+            status = f"{status}; saved periodic checkpoint"
+
         dt = time.perf_counter() - epoch_start
         other_s = max(0.0, dt - data_wait_s - compute_s - save_s)
         lr_now = float(optimizer.param_groups[0]["lr"])
@@ -573,6 +648,25 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
             f"other={other_s:.1f}s, it_setup={iter_setup_s:.1f}s) | {status}"
         )
 
+    final_checkpoint: Path | None = None
+    if bool(getattr(cfg.train, "save_final", True)) and last_epoch is not None and last_train_avg is not None:
+        final_payload = _build_train_checkpoint_payload(
+            model=model,
+            cfg=cfg,
+            epoch=last_epoch,
+            train_avg=last_train_avg,
+            val_avg=last_val_avg,
+            best_metric=best_metric,
+            best_metric_name=best_metric_name,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            ema=ema,
+            normalization=normalization_metadata,
+        )
+        final_checkpoint = run_ckpt_dir / "final.pt"
+        save_checkpoint(final_checkpoint, final_payload)
+        save_checkpoint(run_ckpt_dir / "latest.pt", final_payload)
+
     summary = {
         "run_dir": str(run_dir),
         "best_loss": float(best_metric),
@@ -585,17 +679,22 @@ def run_train(cfg: RootConfig) -> dict[str, Any]:
         "val_samples": int(len(prepared.val_dataset) if prepared.val_dataset is not None else 0),
         "episodes": int(prepared.episode_count),
         "data_curation": prepared.curation_summary,
-        "best_checkpoint": str(run_ckpt_dir / "best.pt"),
+        "best_checkpoint": str(run_ckpt_dir / "best.pt") if bool(cfg.train.save_best) else None,
+        "final_checkpoint": str(final_checkpoint) if final_checkpoint is not None else None,
         "best_success_checkpoint": str(run_ckpt_dir / "best_success.pt"),
         "best_success_rate": (float(best_success_rate) if best_success_epoch is not None else None),
         "best_success_epoch": best_success_epoch,
         "action_stats": str(prepared.action_stats_path),
+        "state_stats": str(prepared.state_stats_path) if prepared.state_stats_path is not None else None,
     }
     with (run_dir / "metrics" / "train_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     print(f"Run artifacts saved under: {run_dir}")
-    print(f"Best checkpoint        : {run_ckpt_dir / 'best.pt'}")
+    if bool(cfg.train.save_best):
+        print(f"Best checkpoint        : {run_ckpt_dir / 'best.pt'}")
+    if final_checkpoint is not None:
+        print(f"Final checkpoint       : {final_checkpoint}")
     if best_success_epoch is not None:
         print(
             f"Best success checkpoint: {run_ckpt_dir / 'best_success.pt'} "

@@ -267,6 +267,9 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
 
     image_keys = effective_image_keys(cfg.robot)
     stats_path = cfg.eval.action_stats_path or cfg.data.action_stats_path
+    state_stats_path = cfg.eval.state_stats_path or (
+        cfg.data.state_stats_path if bool(getattr(cfg.data, "normalize_state", False)) else None
+    )
     state_keys = effective_state_keys(cfg.robot)
     processor = ObsProcessor(
         action_stats_path=stats_path,
@@ -276,6 +279,9 @@ def run_eval(cfg: RootConfig) -> dict[str, Any]:
         device=str(device),
         obs_horizon=int(getattr(cfg.model, "obs_horizon", 1)),
         preserve_camera_dim=str(getattr(cfg.model, "conditioning_mode", "global")).strip().lower() == "cross_attention",
+        state_stats_path=state_stats_path,
+        image_resize_hw=cfg.robot.image_resize_hw,
+        image_resize_mode=cfg.robot.image_resize_mode,
     )
 
     adapter_maker = _adapter_factory(cfg)

@@ -14,6 +14,7 @@ from mini_pi0.dataset.lerobot_v3 import (
     LeRobotActionStatsComputer,
     LeRobotFeatureSpec,
     LeRobotPolicyDataset,
+    LeRobotStateStatsComputer,
     LeRobotTemporalConfig,
 )
 from mini_pi0.dataset.robomimic_to_lerobot import RobomimicToLeRobotConfig, convert_robomimic_to_lerobot
@@ -140,6 +141,46 @@ class LeRobotV3Tests(unittest.TestCase):
 
         self.assertTrue(np.allclose(stats.mean, expected.mean(axis=0)))
         self.assertTrue(np.allclose(stats.std, expected.std(axis=0) + 1e-6))
+
+    def test_streaming_state_stats_reads_low_dimensional_column(self):
+        base = _FakeLeRobotDataset()
+        expected = np.concatenate([sample["observation.state"] for sample in base.samples], axis=0)
+
+        values = list(LeRobotStateStatsComputer(base).iter_states())
+
+        self.assertTrue(np.allclose(np.concatenate(values, axis=0), expected))
+
+    def test_dual_camera_images_are_resized_before_stack_and_strided(self):
+        base = _FakeLeRobotDataset()
+        for idx, sample in enumerate(base.samples):
+            sample["observation.images.base"] = np.stack(
+                [
+                    np.full((3, 6, 12), max(idx - 1, 0), dtype=np.uint8),
+                    np.full((3, 6, 12), idx, dtype=np.uint8),
+                ],
+                axis=0,
+            )
+        base.features["observation.images.base"] = {}
+        spec = LeRobotFeatureSpec.from_keys(
+            action_key="action",
+            state_key="observation.state",
+            image_keys=["agentview_image", "base"],
+        )
+
+        ds = LeRobotPolicyDataset(
+            dataset=base,
+            spec=spec,
+            chunk_size=3,
+            obs_horizon=2,
+            preserve_camera_dim=True,
+            image_resize_hw=[10, 10],
+            image_resize_mode="letterbox",
+            sample_stride=2,
+        )
+        img, _, _ = ds[0]
+
+        self.assertEqual(len(ds), 2)
+        self.assertEqual(tuple(img.shape), (2, 2, 3, 10, 10))
 
     def test_convert_robomimic_to_lerobot_writes_expected_frames(self):
         with tempfile.TemporaryDirectory() as tmp:

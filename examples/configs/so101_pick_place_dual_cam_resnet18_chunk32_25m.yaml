@@ -1,0 +1,120 @@
+experiment:
+  name: so101-pick-place-dual-cam-resnet18-chunk32-25m
+  seed: 42
+  runs_root: runs
+
+simulator:
+  control_freq: 30
+  camera_names: [wrist, base]
+
+robot:
+  name: so101_gamepad
+  action_dim: 6
+  image_key: observation.images.wrist
+  image_keys: [observation.images.wrist, observation.images.base]
+  proprio_keys: [observation.state]
+  state_keys: [observation.state]
+  image_resize_hw: [224, 224]
+  image_resize_mode: letterbox
+
+data:
+  format: lerobot_v3
+  lerobot_repo_id: tauhidkhan1206/so101-pick-place-blocks-dual-cam
+  lerobot_root: null
+  lerobot_revision: 552b459dfc3c227ef935fe2006a097e7fefa48bc
+  lerobot_episodes: null
+  lerobot_action_key: action
+  lerobot_state_key: observation.state
+  lerobot_image_keys: [observation.images.wrist, observation.images.base]
+  lerobot_episode_index_key: episode_index
+  lerobot_local_files_only: false
+  lerobot_video_backend: torchcodec
+  chunk_size: 32
+  sample_stride: 3
+  normalize_state: true
+  action_stats_path: action_stats.json
+  state_stats_path: state_stats.json
+
+model:
+  name: mini_pi0_fm
+  action_dim: 6
+  prop_dim: 6
+  chunk_size: 32
+  cond_dim: 256
+  d_model: 368
+  nhead: 4
+  nlayers: 6
+  action_backbone: transformer
+  conditioning_mode: cross_attention
+  action_attention_causal: false
+  obs_horizon: 1
+  vision_backbone: resnet18
+  vision_model_name: null
+  vision_pretrained: true
+  vision_token_grid_size: 4
+  freeze_vision_backbone: false
+  freeze_vision_batchnorm_stats: true
+  dropout: 0.1
+  noise_beta_alpha: 1.5
+  noise_beta_beta: 1.0
+  noise_s: 0.999
+
+train:
+  epochs: 100
+  batch_size: 8
+  lr: 0.0001
+  lr_backbone: 0.00001
+  lr_observation: 0.0001
+  lr_expert: 0.0001
+  lr_scheduler: cosine
+  scheduler_t_max: 100
+  scheduler_eta_min: 0.000001
+  weight_decay: 0.0001
+  num_workers: 8
+  persistent_workers: true
+  prefetch_factor: 2
+  dataloader_in_order: false
+  sample_order: block_shuffle
+  block_shuffle_size: 2048
+  block_shuffle_within_block: false
+  save_best: false
+  checkpoint_every_epochs: 10
+  save_final: true
+  grad_clip_norm: 1.0
+  val_ratio: 0.0
+  ema_decay: 0.999
+  checkpoint_use_ema: true
+  val_use_ema: false
+  image_aug_enable: true
+  image_aug_crop_scale: 0.95
+  image_aug_brightness: 0.12
+  image_aug_contrast: 0.12
+  image_aug_saturation: 0.10
+  action_noise_std: 0.0
+  action_noise_clip: 0.0
+  action_smoothness_weight: 0.0
+  action_jerk_weight: 0.0
+  sim_eval_every_epochs: 0
+  model_print_depth: 2
+  dtype: bf16
+  device: cuda
+
+eval:
+  checkpoint: checkpoints/final.pt
+  weight_source: model
+  action_stats_path: artifacts/action_stats.json
+  state_stats_path: artifacts/state_stats.json
+  execute_steps: 4
+  n_flow_steps: 8
+  flow_solver: euler
+  device: cuda
+
+deploy:
+  mode: sim
+  checkpoint: checkpoints/final.pt
+  action_stats_path: artifacts/action_stats.json
+  state_stats_path: artifacts/state_stats.json
+  execute_steps: 4
+  n_flow_steps: 8
+  flow_solver: euler
+  device: cuda

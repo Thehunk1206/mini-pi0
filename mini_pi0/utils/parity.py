@@ -93,6 +93,7 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             "vision_pretrained",
             "action_cnn_kernel_size",
             "freeze_vision_backbone",
+            "freeze_vision_batchnorm_stats",
             "dropout",
             "num_timestep_buckets",
             "noise_beta_alpha",
@@ -133,6 +134,13 @@ def build_checkpoint_parity_report(cfg: RootConfig, ckpt: dict[str, Any]) -> dic
             run_v = cfg.robot.image_key
             if ckpt_v != run_v:
                 issues.append(ParityIssue(key="robot.image_key", checkpoint=ckpt_v, runtime=run_v))
+        for key in ("image_resize_hw", "image_resize_mode"):
+            if key not in robot_cfg:
+                continue
+            ckpt_v = robot_cfg[key]
+            run_v = getattr(cfg.robot, key, None)
+            if ckpt_v != run_v:
+                issues.append(ParityIssue(key=f"robot.{key}", checkpoint=ckpt_v, runtime=run_v))
 
     return {
         "checkpoint_path": None,

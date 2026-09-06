@@ -80,7 +80,7 @@ class SinusoidalTimestep(nn.Module):
 class _TorchvisionResNet18TokenBackbone(nn.Module):
     """ResNet18 trunk that returns spatial feature maps instead of pooled vectors."""
 
-    def __init__(self, freeze: bool):
+    def __init__(self, freeze: bool, freeze_batchnorm_stats: bool = False):
         """Create a torchvision ResNet18 spatial trunk."""
 
         super().__init__()
@@ -95,10 +95,28 @@ class _TorchvisionResNet18TokenBackbone(nn.Module):
             weights = "IMAGENET1K_V1"
         net = models.resnet18(weights=weights)
         self.trunk = nn.Sequential(*list(net.children())[:-2])
+        self.freeze_batchnorm_stats = bool(freeze_batchnorm_stats or freeze)
         self.register_buffer("image_mean", torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
         self.register_buffer("image_std", torch.tensor(std, dtype=torch.float32).view(1, 3, 1, 1))
         for p in self.trunk.parameters():
             p.requires_grad = not bool(freeze)
+        self._freeze_batchnorm_running_stats()
+
+    def _freeze_batchnorm_running_stats(self) -> None:
+        """Keep pretrained BatchNorm running statistics fixed when requested."""
+
+        if not self.freeze_batchnorm_stats:
+            return
+        for module in self.trunk.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                module.eval()
+
+    def train(self, mode: bool = True):
+        """Apply train mode while preserving frozen BatchNorm statistics."""
+
+        super().train(mode)
+        self._freeze_batchnorm_running_stats()
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Return feature maps shaped ``[B, 512, h, w]``."""
@@ -200,6 +218,7 @@ class ObservationEncoder(nn.Module):
         vision_model_name: str | None = None,
         vision_pretrained: bool = True,
         vision_token_grid_size: int = 4,
+        freeze_vision_batchnorm_stats: bool = False,
         max_cameras: int = 8,
     ):
         """Initialize observation encoding branches.
@@ -245,7 +264,10 @@ class ObservationEncoder(nn.Module):
         else:
             if self.vision_backbone_name != "resnet18":
                 raise ValueError("model.vision_backbone must be 'resnet18' or 'timm'.")
-            resnet = _TorchvisionResNet18TokenBackbone(freeze=bool(freeze_vision_backbone))
+            resnet = _TorchvisionResNet18TokenBackbone(
+                freeze=bool(freeze_vision_backbone),
+                freeze_batchnorm_stats=bool(freeze_vision_batchnorm_stats),
+            )
             self.img_backbone = resnet
             self._timm_token_backbone = None
             self.img_token_proj = nn.Linear(512, cond_dim)
@@ -759,6 +781,7 @@ class MiniPi0FlowMatching(nn.Module):
         vision_pretrained: bool = True,
         action_cnn_kernel_size: int = 5,
         freeze_vision_backbone: bool = True,
+        freeze_vision_batchnorm_stats: bool = False,
         noise_beta_alpha: float = 1.5,
         noise_beta_beta: float = 1.0,
         noise_s: float = 0.999,
@@ -778,6 +801,7 @@ class MiniPi0FlowMatching(nn.Module):
             prop_dim=prop_dim,
             cond_dim=cond_dim,
             freeze_vision_backbone=freeze_vision_backbone,
+            freeze_vision_batchnorm_stats=freeze_vision_batchnorm_stats,
             obs_horizon=obs_horizon,
             vision_backbone=vision_backbone,
             vision_model_name=vision_model_name,

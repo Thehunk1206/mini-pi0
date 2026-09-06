@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from mini_pi0.dataset.obs_processor import ObsProcessor
-from mini_pi0.dataset.stats import ActionStats
+from mini_pi0.dataset.stats import ActionStats, StateStats
 from mini_pi0.eval.core import _blend_with_previous_tail
 import mini_pi0.models.fm as fm_module
 from mini_pi0.models.fm import MiniPi0FlowMatching
@@ -53,6 +53,35 @@ def test_obs_processor_history_repeat_pads_and_preserves_camera_axis(action_stat
     assert tuple(img1.shape) == (1, 2, 2, 3, 8, 8)
     assert torch.all(prop1[:, 0] == 2)
     assert torch.all(prop1[:, 1] == 4)
+
+
+def test_obs_processor_resizes_unequal_cameras_and_normalizes_state(
+    action_stats_path,
+    tmp_path,
+) -> None:
+    state_stats_path = tmp_path / "state_stats.json"
+    StateStats(
+        mean=np.full(9, 2.0, dtype=np.float32),
+        std=np.full(9, 2.0, dtype=np.float32),
+    ).save(str(state_stats_path))
+    obs = _obs(4)
+    obs["agentview_image"] = np.full((12, 20, 3), 4, dtype=np.uint8)
+    obs["robot0_eye_in_hand_image"] = np.full((18, 18, 3), 5, dtype=np.uint8)
+    processor = ObsProcessor(
+        action_stats_path=str(action_stats_path),
+        state_stats_path=str(state_stats_path),
+        image_key="agentview_image",
+        image_keys=["agentview_image", "robot0_eye_in_hand_image"],
+        proprio_keys=["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos"],
+        preserve_camera_dim=True,
+        image_resize_hw=[16, 16],
+        image_resize_mode="letterbox",
+    )
+
+    image, state = processor.obs_to_tensors(obs)
+
+    assert tuple(image.shape) == (1, 2, 3, 16, 16)
+    assert torch.allclose(state, torch.ones_like(state))
 
 
 def test_blend_with_previous_tail_uses_configured_prefix() -> None:
@@ -202,6 +231,29 @@ def test_resnet18_backbone_registers_imagenet_preprocessing_buffers() -> None:
     assert tuple(backbone.image_std.shape) == (1, 3, 1, 1)
     assert torch.allclose(backbone.image_mean.flatten(), torch.tensor([0.485, 0.456, 0.406]))
     assert torch.allclose(backbone.image_std.flatten(), torch.tensor([0.229, 0.224, 0.225]))
+
+
+def test_resnet18_can_train_weights_while_batchnorm_stats_stay_frozen() -> None:
+    model = MiniPi0FlowMatching(
+        action_dim=6,
+        prop_dim=6,
+        chunk_size=4,
+        cond_dim=16,
+        d_model=16,
+        nhead=4,
+        nlayers=1,
+        vision_backbone="resnet18",
+        freeze_vision_backbone=False,
+        freeze_vision_batchnorm_stats=True,
+    )
+
+    model.train()
+    backbone = model.obs_encoder.img_backbone
+    batchnorms = [m for m in backbone.modules() if isinstance(m, torch.nn.modules.batchnorm._BatchNorm)]
+
+    assert any(p.requires_grad for p in backbone.parameters())
+    assert batchnorms
+    assert all(not module.training for module in batchnorms)
 
 
 def test_timm_backbone_requires_model_name() -> None:
