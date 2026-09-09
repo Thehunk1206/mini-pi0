@@ -5,11 +5,11 @@ import pytest
 import torch
 from torch import nn
 
+import mini_pi0.models.fm as fm_module
 from mini_pi0.dataset.obs_processor import ObsProcessor
 from mini_pi0.dataset.stats import ActionStats, StateStats
 from mini_pi0.eval.core import _blend_with_previous_tail
-import mini_pi0.models.fm as fm_module
-from mini_pi0.models.fm import MiniPi0FlowMatching
+from mini_pi0.models.fm import MiniPi0FlowMatching, adaptive_avg_pool2d_exact
 
 
 @pytest.fixture()
@@ -254,6 +254,48 @@ def test_resnet18_can_train_weights_while_batchnorm_stats_stay_frozen() -> None:
     assert any(p.requires_grad for p in backbone.parameters())
     assert batchnorms
     assert all(not module.training for module in batchnorms)
+
+
+@pytest.mark.parametrize(
+    ("input_size", "output_size"),
+    [((7, 7), (4, 4)), ((8, 11), (3, 5)), ((5, 6), (1, 2))],
+)
+def test_exact_adaptive_pool_matches_torch(
+    input_size: tuple[int, int],
+    output_size: tuple[int, int],
+) -> None:
+    x = torch.randn(2, 3, *input_size)
+
+    actual = adaptive_avg_pool2d_exact(x, output_size)
+    expected = torch.nn.functional.adaptive_avg_pool2d(x, output_size)
+
+    assert torch.allclose(actual, expected, atol=2e-7, rtol=1e-6)
+
+
+def test_public_conditioning_and_velocity_match_legacy_aliases() -> None:
+    model = MiniPi0FlowMatching(
+        action_dim=6,
+        prop_dim=6,
+        chunk_size=4,
+        cond_dim=16,
+        d_model=16,
+        nhead=4,
+        nlayers=1,
+        vision_backbone="resnet18",
+    ).eval()
+    image = torch.rand(1, 3, 32, 32)
+    state = torch.rand(1, 6)
+    actions = torch.rand(1, 4, 6)
+    time = torch.tensor(0.25)
+
+    with torch.no_grad():
+        conditioning = model.encode_conditioning(image, state)
+        legacy_conditioning = model._encode_conditioning(image, state)
+        velocity = model.flow_velocity(actions, time, conditioning)
+        legacy_velocity = model._velocity(actions, time, conditioning)
+
+    assert torch.equal(conditioning, legacy_conditioning)
+    assert torch.equal(velocity, legacy_velocity)
 
 
 def test_timm_backbone_requires_model_name() -> None:

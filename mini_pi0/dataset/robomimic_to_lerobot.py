@@ -310,7 +310,7 @@ class RobomimicToLeRobotConverter:
             module = import_module("lerobot.datasets.lerobot_dataset")
             cls = getattr(module, "LeRobotDataset")
         except Exception as exc:
-            raise RuntimeError("robomimic-to-LeRobot conversion requires `lerobot==0.4.4`.") from exc
+            raise RuntimeError("robomimic-to-LeRobot conversion requires `lerobot==0.6.1`.") from exc
         for attr in ("create", "add_frame", "save_episode"):
             if not hasattr(cls, attr):
                 raise RuntimeError(f"Installed LeRobotDataset is missing required method: {attr}")

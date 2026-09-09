@@ -6,8 +6,7 @@ This module centralizes dtype parsing and autocast creation so training and
 evaluation use the same config contract.
 """
 
-from contextlib import nullcontext
-from typing import ContextManager
+from contextlib import AbstractContextManager, nullcontext
 
 import torch
 
@@ -15,7 +14,7 @@ _BF16_ALIASES = {"bf16", "bfloat16", "torch.bfloat16"}
 _FP16_ALIASES = {"fp16", "float16", "half", "torch.float16"}
 _FP32_ALIASES = {"fp32", "float32", "full", "none", "torch.float32"}
 _AUTO_ALIASES = {"", "auto", "default", "null"}
-_AUTOCAST_DEVICE_TYPES = {"cuda", "cpu"}
+_AUTOCAST_DEVICE_TYPES = {"cuda", "cpu", "mps"}
 
 
 def resolve_runtime_dtype(
@@ -59,7 +58,7 @@ def autocast_context(
     *,
     device: torch.device,
     dtype: torch.dtype | None,
-) -> ContextManager[None]:
+) -> AbstractContextManager[None]:
     """Create a torch autocast context for the requested dtype.
 
     Args:
@@ -81,6 +80,27 @@ def autocast_context(
             "Use cuda/cpu or set dtype to fp32."
         )
     return torch.autocast(device_type=device.type, dtype=dtype, enabled=True)
+
+
+def resolve_inference_dtype(
+    *,
+    device: torch.device,
+    requested: str | None = "auto",
+) -> torch.dtype | None:
+    """Resolve a backend-aware inference precision.
+
+    MPS defaults to fp32 because the small SO-101 policies benchmark faster in
+    fp32 on Apple Silicon. CUDA prefers bf16 when the GPU supports it and fp16
+    otherwise. CPU and unknown backends default to fp32. Explicit requests are
+    still honored and validated by :func:`autocast_context`.
+    """
+
+    normalized = _normalize_dtype_text(requested)
+    if normalized not in _AUTO_ALIASES:
+        return resolve_runtime_dtype(runtime_dtype=normalized, model_dtype=None)
+    if device.type == "cuda":
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    return None
 
 
 def describe_runtime_dtype(

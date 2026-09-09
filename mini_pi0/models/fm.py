@@ -12,13 +12,50 @@ import math
 from typing import Literal
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
-
+from torch import nn
+from torchvision import models
 
 ConditioningMode = Literal["global", "cross_attention"]
 FlowSolver = Literal["euler", "heun"]
+
+
+def adaptive_avg_pool2d_exact(
+    x: torch.Tensor,
+    output_size: tuple[int, int],
+) -> torch.Tensor:
+    """Apply exact adaptive average pooling using separable bin weights.
+
+    PyTorch's MPS backend cannot execute every adaptive-pooling shape used by
+    the ResNet token encoder (notably 7x7 to 4x4).  Adaptive average pooling is
+    separable, so two small weighted reductions implement the same binning
+    rule while remaining checkpoint-compatible and differentiable.
+    """
+
+    if x.ndim != 4:
+        raise ValueError(f"Expected a 4D NCHW tensor, got shape {tuple(x.shape)}.")
+    out_h, out_w = (int(output_size[0]), int(output_size[1]))
+    if out_h <= 0 or out_w <= 0:
+        raise ValueError(f"output_size must be positive, got {output_size}.")
+
+    def _weights(input_size: int, output_count: int) -> torch.Tensor:
+        output_index = torch.arange(output_count, device=x.device, dtype=torch.int64)
+        input_index = torch.arange(input_size, device=x.device, dtype=torch.int64)
+        starts = torch.div(output_index * input_size, output_count, rounding_mode="floor")
+        ends = torch.div(
+            (output_index + 1) * input_size + output_count - 1,
+            output_count,
+            rounding_mode="floor",
+        )
+        mask = (input_index.unsqueeze(0) >= starts.unsqueeze(1)) & (
+            input_index.unsqueeze(0) < ends.unsqueeze(1)
+        )
+        return mask.to(dtype=x.dtype) / (ends - starts).to(dtype=x.dtype).unsqueeze(1)
+
+    height_weights = _weights(int(x.shape[-2]), out_h)
+    width_weights = _weights(int(x.shape[-1]), out_w)
+    height_pooled = torch.einsum("bchw,oh->bcow", x, height_weights)
+    return torch.einsum("bcow,pw->bcop", height_pooled, width_weights)
 
 
 def _valid_group_count(channels: int, max_groups: int = 8) -> int:
@@ -327,7 +364,11 @@ class ObservationEncoder(nn.Module):
             tok = self.img_token_proj(raw_tokens)
         else:
             fmap = self.img_backbone(flat)
-            pooled = F.adaptive_avg_pool2d(fmap, (self.vision_token_grid_size, self.vision_token_grid_size))
+            grid_size = (self.vision_token_grid_size, self.vision_token_grid_size)
+            if fmap.device.type == "mps":
+                pooled = adaptive_avg_pool2d_exact(fmap, grid_size)
+            else:
+                pooled = F.adaptive_avg_pool2d(fmap, grid_size)
             raw_tokens = pooled.flatten(2).transpose(1, 2)
             tokens_per_view = int(raw_tokens.shape[1])
             tok = self.img_token_proj(raw_tokens)
@@ -865,12 +906,17 @@ class MiniPi0FlowMatching(nn.Module):
         else:
             raise ValueError("model.action_backbone must be 'transformer', 'cnn1d', or 'unet1d'.")
 
-    def _encode_conditioning(self, img: torch.Tensor, prop: torch.Tensor) -> torch.Tensor:
-        """Encode observations for the configured conditioning path."""
+    def encode_conditioning(self, img: torch.Tensor, prop: torch.Tensor) -> torch.Tensor:
+        """Encode observations once for sampling or an external ODE solver."""
 
         if self.conditioning_mode == "cross_attention":
             return self.obs_encoder.forward_tokens(img, prop)
         return self.obs_encoder(img, prop)
+
+    def _encode_conditioning(self, img: torch.Tensor, prop: torch.Tensor) -> torch.Tensor:
+        """Backward-compatible alias for :meth:`encode_conditioning`."""
+
+        return self.encode_conditioning(img, prop)
 
     def _flow_loss_components(
         self,
@@ -881,7 +927,7 @@ class MiniPi0FlowMatching(nn.Module):
         """Return FM velocity loss and predicted clean-action estimate."""
 
         batch = img.shape[0]
-        cond = self._encode_conditioning(img, prop)
+        cond = self.encode_conditioning(img, prop)
         tau = sample_tau_beta(
             batch,
             clean_actions.device,
@@ -923,11 +969,21 @@ class MiniPi0FlowMatching(nn.Module):
 
         return self.compute_loss(img, prop, clean_actions)
 
-    def _velocity(self, actions: torch.Tensor, tau_value: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        """Evaluate the learned velocity field."""
+    def flow_velocity(
+        self,
+        actions: torch.Tensor,
+        tau_value: torch.Tensor,
+        conditioning: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate the learned flow field for an external inference solver."""
 
         tau = tau_value.expand(actions.shape[0])
-        return self.action_transformer(actions, tau, cond)
+        return self.action_transformer(actions, tau, conditioning)
+
+    def _velocity(self, actions: torch.Tensor, tau_value: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """Backward-compatible alias for :meth:`flow_velocity`."""
+
+        return self.flow_velocity(actions, tau_value, cond)
 
     @torch.no_grad()
     def sample(
@@ -956,7 +1012,7 @@ class MiniPi0FlowMatching(nn.Module):
         """
 
         batch = img.shape[0]
-        cond = self._encode_conditioning(img, prop)
+        cond = self.encode_conditioning(img, prop)
         h = self.action_transformer.chunk_size
         a_dim = self.action_transformer.action_dim
         expected_shape = (batch, h, a_dim)
@@ -977,10 +1033,10 @@ class MiniPi0FlowMatching(nn.Module):
             t0 = time_grid[i]
             t1 = time_grid[i + 1]
             dt = t1 - t0
-            v0 = self._velocity(actions, t0, cond)
+            v0 = self.flow_velocity(actions, t0, cond)
             if solver_key == "heun":
                 proposal = actions + dt * v0
-                v1 = self._velocity(proposal, t1, cond)
+                v1 = self.flow_velocity(proposal, t1, cond)
                 actions = actions + 0.5 * dt * (v0 + v1)
             else:
                 actions = actions + dt * v0

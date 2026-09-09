@@ -10,17 +10,16 @@ from __future__ import annotations
 import math
 import re
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 import numpy as np
-
 from lerobot.utils.feature_utils import build_dataset_frame, hw_to_dataset_features
 
 from .gamepad import GamepadSample
-
 
 CAMERA_SPEC_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 CAMERA_ROTATIONS = (0, 90, 180, 270)
@@ -28,7 +27,8 @@ CAMERA_OUTPUT_SIZE_PATTERN = re.compile(
     r"^(?P<name>[A-Za-z][A-Za-z0-9_]*)=(?P<width>[1-9][0-9]*)x(?P<height>[1-9][0-9]*)$"
 )
 CAMERA_WARMUP_SECONDS = 5
-CAMERA_CONNECT_ATTEMPTS = 2
+CAMERA_CONNECT_ATTEMPTS = 5
+CAMERA_RETRY_DELAY_SECONDS = 0.5
 
 
 def recording_controls_markdown() -> str:
@@ -70,6 +70,8 @@ class CameraSpec:
     fps: int | None = None
     output_width: int | None = None
     output_height: int | None = None
+    capture_width: int | None = None
+    capture_height: int | None = None
 
     def __post_init__(self) -> None:
         if not CAMERA_SPEC_PATTERN.fullmatch(self.name):
@@ -84,11 +86,21 @@ class CameraSpec:
         if self.fps is not None and self.fps <= 0:
             raise ValueError("camera fps must be positive")
         if (self.output_width is None) != (self.output_height is None):
-            raise ValueError("camera output width and height must be specified together")
+            raise ValueError(
+                "camera output width and height must be specified together"
+            )
         if self.output_width is not None and (
             self.output_width <= 0 or self.output_height <= 0
         ):
             raise ValueError("camera output width and height must be positive")
+        if (self.capture_width is None) != (self.capture_height is None):
+            raise ValueError(
+                "camera capture width and height must be specified together"
+            )
+        if self.capture_width is not None and (
+            self.capture_width <= 0 or self.capture_height <= 0
+        ):
+            raise ValueError("camera capture width and height must be positive")
 
     @property
     def description(self) -> str:
@@ -98,7 +110,12 @@ class CameraSpec:
             if self.output_width is not None
             else ""
         )
-        return f"{self.name}={self.source}:{self.rotation_deg}{fps}{output_size}"
+        capture_size = (
+            f" native {self.capture_width}x{self.capture_height}"
+            if self.capture_width is not None
+            else ""
+        )
+        return f"{self.name}={self.source}:{self.rotation_deg}{fps}{capture_size}{output_size}"
 
 
 def parse_camera_spec(value: str) -> CameraSpec:
@@ -188,6 +205,38 @@ def apply_camera_output_sizes(
             spec,
             output_width=sizes[spec.name][0],
             output_height=sizes[spec.name][1],
+        )
+        if spec.name in sizes
+        else spec
+        for spec in configured
+    )
+
+
+def apply_camera_capture_sizes(
+    specs: Iterable[CameraSpec],
+    values: Iterable[str] | None,
+) -> tuple[CameraSpec, ...]:
+    """Apply per-camera native capture sizes using ``NAME=WIDTHxHEIGHT``."""
+
+    configured = tuple(specs)
+    sizes: dict[str, tuple[int, int]] = {}
+    for value in values or ():
+        match = CAMERA_OUTPUT_SIZE_PATTERN.fullmatch(value.strip())
+        if match is None:
+            raise ValueError("camera native size must use NAME=WIDTHxHEIGHT")
+        name = match.group("name")
+        if name in sizes:
+            raise ValueError(f"camera native size for {name!r} was specified twice")
+        sizes[name] = (int(match.group("width")), int(match.group("height")))
+    unknown_names = set(sizes) - {spec.name for spec in configured}
+    if unknown_names:
+        unknown = ", ".join(sorted(unknown_names))
+        raise ValueError(f"camera native size refers to unknown camera(s): {unknown}")
+    return tuple(
+        replace(
+            spec,
+            capture_width=sizes[spec.name][0],
+            capture_height=sizes[spec.name][1],
         )
         if spec.name in sizes
         else spec
@@ -295,23 +344,32 @@ class CameraRig:
         try:
             for spec in self.specs:
                 camera_fps = spec.fps or self.fps
+                camera_width = spec.capture_width or self.width
+                camera_height = spec.capture_height or self.height
                 for attempt in range(1, CAMERA_CONNECT_ATTEMPTS + 1):
                     camera = self._camera_factory(
                         spec,
                         camera_fps,
-                        self.width,
-                        self.height,
+                        camera_width,
+                        camera_height,
                     )
                     try:
                         camera.connect()
                         break
-                    except TimeoutError:
+                    except TimeoutError as exc:
                         if attempt == CAMERA_CONNECT_ATTEMPTS:
-                            raise
+                            raise TimeoutError(
+                                f"camera {spec.name!r} ({spec.source}) produced no "
+                                f"startup frame after {CAMERA_CONNECT_ATTEMPTS} attempts "
+                                f"at {camera_width}x{camera_height}@{camera_fps} FPS"
+                            ) from exc
+                        retry_delay = CAMERA_RETRY_DELAY_SECONDS * attempt
                         print(
                             f"WARNING: camera {spec.name!r} produced no startup "
-                            "frame; reopening once"
+                            f"frame on attempt {attempt}/{CAMERA_CONNECT_ATTEMPTS}; "
+                            f"reopening in {retry_delay:.1f}s"
                         )
+                        time.sleep(retry_delay)
                 self._cameras[spec.name] = camera
             self._latest = self.read()
         except BaseException:
@@ -348,7 +406,7 @@ class CameraRig:
             try:
                 if camera.is_connected:
                     camera.disconnect()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - disconnect every remaining camera
                 print(f"WARNING: camera disconnect failed: {exc}")
         self._cameras.clear()
 
@@ -484,9 +542,7 @@ class GamepadDatasetRecorder:
 
         root = self.config.root.expanduser()
         if self.config.resume and not root.exists():
-            raise FileNotFoundError(
-                f"cannot append: dataset does not exist at {root}"
-            )
+            raise FileNotFoundError(f"cannot append: dataset does not exist at {root}")
         if not self.config.resume and root.exists():
             if not self.config.overwrite:
                 raise FileExistsError(
@@ -617,9 +673,7 @@ class GamepadDatasetRecorder:
         self.state = self.WAITING
         self.episode_frames = 0
         self.episode_started_at = None
-        self._event(
-            f"episode {self.saved_episodes - 1} saved ({frame_count} frames)"
-        )
+        self._event(f"episode {self.saved_episodes - 1} saved ({frame_count} frames)")
         if (
             self.config.num_episodes > 0
             and self.saved_episodes >= self.config.num_episodes
@@ -765,7 +819,6 @@ def install_recording_layout(
     """Install the custom layout after the mesh visualizer initializes."""
 
     import rerun as rr
-
     from lerobot.utils.visualization_utils import log_rerun_data
 
     blueprint = build_recording_blueprint(spec.name for spec in config.camera_specs)
