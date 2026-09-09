@@ -13,13 +13,13 @@ CNN1D, and UNet1D denoisers.
 
 ## Demo Gallery
 
-### SO-101 Physical Robot
+### SO-101 Autonomous Policy
 
-Two demonstrations from the current physical SO-101 workflow.
+Autonomous physical-robot demonstrations from the 32M-parameter ViT policy.
 
-| Demo 1 | Demo 2 |
+| Autonomous demo 1 | Autonomous demo 2 |
 | --- | --- |
-| [![SO-101 physical robot demo 1](./assets/so101_demo1.gif)](./assets/so101_demo1.mp4) | [![SO-101 physical robot demo 2](./assets/so101_demo2.gif)](./assets/so101_demo2.mp4) |
+| [![SO-101 32M ViT autonomous demo 1](./assets/so101_demo1.gif)](./assets/so101_demo1.mp4) | [![SO-101 32M ViT autonomous demo 2](./assets/so101_demo2.gif)](./assets/so101_demo2.mp4) |
 
 Click a preview to open the MP4.
 

@@ -10,9 +10,11 @@ Phone control uses Ruckig; gamepad control uses validated direct joint updates.
 
 ## Demos
 
-| Physical SO-101 demo 1 | Physical SO-101 demo 2 |
+Autonomous physical-robot demonstrations from the 32M-parameter ViT policy.
+
+| 32M ViT autonomous demo 1 | 32M ViT autonomous demo 2 |
 | --- | --- |
-| [![SO-101 physical robot demo 1](../assets/so101_demo1.gif)](../assets/so101_demo1.mp4) | [![SO-101 physical robot demo 2](../assets/so101_demo2.gif)](../assets/so101_demo2.mp4) |
+| [![SO-101 32M ViT autonomous demo 1](../assets/so101_demo1.gif)](../assets/so101_demo1.mp4) | [![SO-101 32M ViT autonomous demo 2](../assets/so101_demo2.gif)](../assets/so101_demo2.mp4) |
 
 Click a preview to open the full MP4.
 
