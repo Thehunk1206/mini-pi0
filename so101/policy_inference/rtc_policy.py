@@ -48,6 +48,19 @@ class MiniPi0RTCPolicy:
             dtype=torch.float32,
         )
 
+    def _sampling_noise(self, images: torch.Tensor) -> torch.Tensor | None:
+        """Return the configured initial flow state for one inference chunk."""
+
+        shape = (1, self.bundle.chunk_size, self.bundle.action_dim)
+        if self.config.sampling_noise == "zero":
+            return torch.zeros(shape, device=self.bundle.device, dtype=images.dtype)
+        if self.config.sampling_noise == "fixed":
+            return self._fixed_noise_cpu.to(
+                device=self.bundle.device,
+                dtype=images.dtype,
+            )
+        return None
+
     def reset(self) -> None:
         self.processor.reset_tracker()
 
@@ -62,11 +75,8 @@ class MiniPi0RTCPolicy:
     ) -> torch.Tensor:
         """Generate a normalized chunk using the model's noise-to-data convention."""
 
-        if initial_noise is None and self.config.fixed_noise:
-            initial_noise = self._fixed_noise_cpu.to(
-                device=self.bundle.device,
-                dtype=images.dtype,
-            )
+        if initial_noise is None:
+            initial_noise = self._sampling_noise(images)
         if not self.config.enabled or previous_leftover is None:
             return self.bundle.sample(
                 images,

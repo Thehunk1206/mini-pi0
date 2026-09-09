@@ -13,11 +13,11 @@ class RTCInferenceConfig:
     enabled: bool = True
     flow_steps: int = 8
     solver: str = "euler"
-    execution_horizon: int = 10
-    replan_interval: int = 6
+    execution_horizon: int = 6
+    replan_interval: int = 3
     max_guidance_weight: float = 5.0
     prefix_attention_schedule: str = "EXP"
-    fixed_noise: bool = True
+    sampling_noise: str = "zero"
     seed: int = 42
 
     def __post_init__(self) -> None:
@@ -33,13 +33,17 @@ class RTCInferenceConfig:
             raise ValueError("replan_interval must be positive")
         if self.max_guidance_weight <= 0:
             raise ValueError("max_guidance_weight must be positive")
+        if self.sampling_noise not in {"zero", "fixed", "random"}:
+            raise ValueError(
+                "sampling_noise must be one of 'zero', 'fixed', or 'random'"
+            )
 
 
 @dataclass(frozen=True)
 class SafetyConfig:
     """Command and following-error safety limits for initial deployment."""
 
-    arm_velocity_deg_s: tuple[float, ...] = (60.0, 60.0, 60.0, 90.0, 120.0)
+    arm_velocity_deg_s: tuple[float, ...] = (20.0, 20.0, 20.0, 30.0, 45.0)
     gripper_velocity_percent_s: float = 100.0
     following_warning_deg: float = 10.0
     following_fault_deg: float = 15.0
@@ -49,6 +53,9 @@ class SafetyConfig:
     underflow_fault_cycles: int = 6
     boundary_saturation_deg: float = 2.0
     gripper_boundary_saturation_percent: float = 2.0
+    initial_target_deviation_deg: float = 15.0
+    initial_gripper_deviation_percent: float = 8.0
+    recovery_valid_chunks: int = 2
 
     def __post_init__(self) -> None:
         if len(self.arm_velocity_deg_s) != 5 or any(
@@ -68,6 +75,13 @@ class SafetyConfig:
             or self.gripper_boundary_saturation_percent < 0
         ):
             raise ValueError("boundary saturation tolerances cannot be negative")
+        if (
+            self.initial_target_deviation_deg <= 0
+            or self.initial_gripper_deviation_percent <= 0
+        ):
+            raise ValueError("initial-target deviation limits must be positive")
+        if self.recovery_valid_chunks <= 0:
+            raise ValueError("recovery_valid_chunks must be positive")
 
 
 @dataclass(frozen=True)

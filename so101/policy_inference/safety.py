@@ -134,6 +134,31 @@ class PolicySafetyGate:
         with self._lock:
             self._last_command = values.copy()
 
+    def validate_initial_target(
+        self, target: np.ndarray, measured: np.ndarray
+    ) -> np.ndarray:
+        """Reject a chunk whose first raw target is implausibly far from state."""
+
+        target_values = self._validate_vector(target, "initial policy target")
+        measured_values = self._validate_vector(measured, "measured state")
+        deviation = np.abs(target_values - measured_values)
+        allowed = np.asarray(
+            (
+                *([self.config.initial_target_deviation_deg] * 5),
+                self.config.initial_gripper_deviation_percent,
+            ),
+            dtype=np.float32,
+        )
+        outside = np.flatnonzero(deviation > allowed)
+        if outside.size:
+            index = int(outside[0])
+            name = JOINT_NAMES[index]
+            raise UnsafePolicyChunk(
+                f"Policy initial target deviation {name}={deviation[index]:.2f} "
+                f"exceeds {allowed[index]:.2f}"
+            )
+        return target_values
+
     def evaluate_tracking(self, measured: np.ndarray) -> TrackingStatus:
         values = self._validate_vector(measured, "measured state")
         with self._lock:

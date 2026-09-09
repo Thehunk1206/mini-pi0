@@ -8,6 +8,50 @@ from so101.policy_inference.policy_bundle import PolicyBundle
 from so101.policy_inference.rtc_policy import MiniPi0RTCPolicy
 
 
+class _RecordingBundle:
+    chunk_size = 4
+    action_dim = 2
+    device = torch.device("cpu")
+
+    def __init__(self) -> None:
+        self.initial_noise: torch.Tensor | None = torch.empty(0)
+
+    def sample(self, images, state, *, flow_steps, solver, initial_noise):
+        self.initial_noise = initial_noise
+        return (
+            torch.ones(1, self.chunk_size, self.action_dim)
+            if initial_noise is None
+            else initial_noise
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    (("zero", "zero"), ("fixed", "nonzero"), ("random", "none")),
+)
+def test_sampling_noise_modes(mode: str, expected: str) -> None:
+    bundle = _RecordingBundle()
+    policy = MiniPi0RTCPolicy(  # type: ignore[arg-type]
+        bundle,
+        RTCInferenceConfig(enabled=False, flow_steps=1, sampling_noise=mode),
+    )
+    images = torch.zeros(1, 2, 3, 8, 8)
+    state = torch.zeros(1, 2)
+
+    policy.sample_normalized(
+        images, state, previous_leftover=None, inference_delay=0
+    )
+
+    if expected == "none":
+        assert bundle.initial_noise is None
+    elif expected == "zero":
+        assert bundle.initial_noise is not None
+        assert torch.count_nonzero(bundle.initial_noise) == 0
+    else:
+        assert bundle.initial_noise is not None
+        assert torch.count_nonzero(bundle.initial_noise) > 0
+
+
 def test_first_chunk_matches_ordinary_sampler_exactly(
     real_policy_bundle: PolicyBundle,
 ) -> None:

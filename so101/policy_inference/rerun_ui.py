@@ -222,6 +222,11 @@ class PolicyRerunLogger:
         rr.log("queue/underflows", rr.Scalars(frame.engine.underflow_count))
         rr.log("queue/rejected_chunks", rr.Scalars(frame.engine.rejected_chunks))
         rr.log("queue/rtc_fallbacks", rr.Scalars(frame.engine.rtc_fallbacks))
+        rr.log("queue/safety_holding", rr.Scalars(int(frame.engine.safety_holding)))
+        rr.log(
+            "queue/recovery_valid_chunks",
+            rr.Scalars(frame.engine.recovery_valid_chunks),
+        )
         rr.log("tracking/max_error", rr.Scalars(frame.tracking.worst_error))
         for index, name in enumerate(JOINT_NAMES):
             rr.log(f"state/{name}", rr.Scalars(float(frame.measured[index])))
@@ -277,6 +282,8 @@ class PolicyRerunLogger:
                     f"**Inference:** `{status.last_latency_ms:.1f} ms`  \n"
                     f"**Delay predicted / actual:** `{status.last_predicted_delay}` / `{status.last_real_delay}`  \n"
                     f"**Rejected / stale:** `{status.rejected_chunks}` / `{status.stale_results_dropped}`  \n"
+                    f"**Safety hold / recovery:** `{status.safety_holding}` / "
+                    f"`{status.recovery_valid_chunks}` valid chunks  \n"
                     f"**Unguided recoveries:** `{status.rtc_fallbacks}`  \n"
                     f"**Last rejection:** `{status.last_rejection_reason or 'none'}`  \n"
                     f"**Rerun frames dropped:** `{self._dropped}`",

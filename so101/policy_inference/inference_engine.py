@@ -43,6 +43,8 @@ class InferenceStatus:
     last_real_delay: int = 0
     last_inference_error: str | None = None
     last_rejection_reason: str | None = None
+    safety_holding: bool = False
+    recovery_valid_chunks: int = 0
 
 
 class AsyncInferenceEngine:
@@ -72,7 +74,8 @@ class AsyncInferenceEngine:
         self._worker: threading.Thread | None = None
         self._underflow_streak = 0
         self._has_ready_chunk = False
-        self._force_unguided_once = False
+        self._safety_holding = False
+        self._recovery_valid_chunks = 0
         self._latest_raw_action: np.ndarray | None = None
         self._latest_tracking = TrackingStatus(
             warning=False,
@@ -166,7 +169,8 @@ class AsyncInferenceEngine:
             self._last_inferred_version = -1
             self._underflow_streak = 0
             self._has_ready_chunk = False
-            self._force_unguided_once = False
+            self._safety_holding = False
+            self._recovery_valid_chunks = 0
             self._latest_raw_action = None
             self._status = replace(
                 self._status,
@@ -175,6 +179,8 @@ class AsyncInferenceEngine:
                 fault=None if resume else reason,
                 queue_size=0,
                 underflow_count=0,
+                safety_holding=False,
+                recovery_valid_chunks=0,
             )
             self._condition.notify_all()
 
@@ -192,7 +198,7 @@ class AsyncInferenceEngine:
         measured_values = np.asarray(measured, dtype=np.float32).reshape(-1)
         current_time = time.monotonic() if now is None else float(now)
         with self._condition:
-            if self._status.paused:
+            if self._status.paused or self._safety_holding:
                 return None
             snapshot = self._snapshot
         if (
@@ -213,6 +219,12 @@ class AsyncInferenceEngine:
             return None
 
         action = self.queue.get()
+        with self._condition:
+            # A worker rejection can clear the queue after the initial status
+            # check but before this consumer pop. Never let that raced action
+            # escape the safety hold.
+            if self._safety_holding:
+                return None
         if action is None:
             with self._condition:
                 if self._has_ready_chunk:
@@ -247,6 +259,29 @@ class AsyncInferenceEngine:
         del measured
         return self.latest_tracking
 
+    def _enter_safety_hold_locked(
+        self, measured: np.ndarray, *, reason: str
+    ) -> None:
+        """Atomically discard motion and wait for consecutive valid chunks."""
+
+        self.queue.clear()
+        self.policy.reset()
+        self.safety.reset(measured)
+        self._has_ready_chunk = False
+        self._safety_holding = True
+        self._recovery_valid_chunks = 0
+        self._latest_raw_action = None
+        self._status = replace(
+            self._status,
+            phase="safety_hold",
+            queue_size=0,
+            rejected_chunks=self._status.rejected_chunks + 1,
+            last_inference_error=reason,
+            last_rejection_reason=reason,
+            safety_holding=True,
+            recovery_valid_chunks=0,
+        )
+
     def _ready_to_infer(self) -> bool:
         return (
             not self._stopping
@@ -277,10 +312,6 @@ class AsyncInferenceEngine:
                 queue_previous = (
                     self.queue.get_left_over() if self.config.rtc.enabled else None
                 )
-                using_unguided_fallback = (
-                    self._force_unguided_once and queue_previous is not None
-                )
-                guidance_previous = None if using_unguided_fallback else queue_previous
                 action_index = self.queue.get_action_index()
                 predicted_delay = (
                     0
@@ -307,7 +338,7 @@ class AsyncInferenceEngine:
                 normalized = self.policy.sample_normalized(
                     images,
                     state,
-                    previous_leftover=guidance_previous,
+                    previous_leftover=queue_previous,
                     inference_delay=predicted_delay,
                 )
                 if self.bundle.device.type == "mps":
@@ -319,15 +350,9 @@ class AsyncInferenceEngine:
                 latency_ms = (time.perf_counter() - started) * 1000.0
             except UnsafePolicyChunk as exc:
                 with self._condition:
-                    self._status = replace(
-                        self._status,
-                        phase="chunk_rejected",
-                        rejected_chunks=self._status.rejected_chunks + 1,
-                        last_inference_error=str(exc),
-                        last_rejection_reason=str(exc),
-                    )
-                    self._force_unguided_once = (
-                        queue_previous is not None and self.config.rtc.enabled
+                    self._enter_safety_hold_locked(
+                        snapshot.state,
+                        reason=str(exc),
                     )
                 continue
             except Exception as exc:  # noqa: BLE001 - worker must convert failures into a safe pause
@@ -356,6 +381,8 @@ class AsyncInferenceEngine:
                     0 if queue_previous is None else max(consumed, latency_delay)
                 )
                 if real_delay >= len(denormalized):
+                    if self._safety_holding:
+                        self._recovery_valid_chunks = 0
                     self._status = replace(
                         self._status,
                         phase="chunk_expired",
@@ -363,11 +390,21 @@ class AsyncInferenceEngine:
                         last_latency_ms=latency_ms,
                         last_real_delay=real_delay,
                         last_inference_error="Inference latency consumed the complete action chunk",
+                        recovery_valid_chunks=self._recovery_valid_chunks,
                     )
                     continue
 
             try:
                 self.safety.validate_chunk(denormalized)
+                self.safety.validate_initial_target(
+                    denormalized[0], snapshot.state
+                )
+                with self._condition:
+                    recovering = self._safety_holding
+                if recovering:
+                    # Begin any recovered trajectory from the freshest measured
+                    # observation, not from the command that was invalidated.
+                    self.safety.reset(snapshot.state)
                 safe_remaining = self.safety.process_chunk(
                     denormalized[real_delay:], snapshot.state
                 )
@@ -377,15 +414,9 @@ class AsyncInferenceEngine:
                 processed[real_delay:] = safe_remaining
             except UnsafePolicyChunk as exc:
                 with self._condition:
-                    self._status = replace(
-                        self._status,
-                        phase="chunk_rejected",
-                        rejected_chunks=self._status.rejected_chunks + 1,
-                        last_inference_error=str(exc),
-                        last_rejection_reason=str(exc),
-                    )
-                    self._force_unguided_once = (
-                        queue_previous is not None and self.config.rtc.enabled
+                    self._enter_safety_hold_locked(
+                        snapshot.state,
+                        reason=str(exc),
                     )
                 continue
 
@@ -398,6 +429,22 @@ class AsyncInferenceEngine:
                             + 1,
                         )
                         continue
+                    if self._safety_holding:
+                        self._recovery_valid_chunks += 1
+                        if (
+                            self._recovery_valid_chunks
+                            < self.config.safety.recovery_valid_chunks
+                        ):
+                            self._latest_raw_action = denormalized[0].copy()
+                            self._status = replace(
+                                self._status,
+                                phase="recovery_validating",
+                                safety_holding=True,
+                                recovery_valid_chunks=self._recovery_valid_chunks,
+                                last_inference_error=None,
+                            )
+                            self._condition.notify_all()
+                            continue
                     processed_tensor = torch.from_numpy(processed)
                     # RTC must anchor to the plan the robot will actually consume.
                     # Calibration saturation and slew limiting are nonlinear, so
@@ -415,17 +462,18 @@ class AsyncInferenceEngine:
                         action_index_before_inference=None,
                     )
                     self._has_ready_chunk = True
-                    self._force_unguided_once = False
+                    self._safety_holding = False
+                    self._recovery_valid_chunks = 0
                     self._latest_raw_action = denormalized[real_delay].copy()
                     self._status = replace(
                         self._status,
                         phase="ready",
                         queue_size=self.queue.qsize(),
                         inference_count=self._status.inference_count + 1,
-                        rtc_fallbacks=self._status.rtc_fallbacks
-                        + int(using_unguided_fallback),
                         last_latency_ms=latency_ms,
                         last_real_delay=real_delay,
+                        safety_holding=False,
+                        recovery_valid_chunks=0,
                     )
                     self._condition.notify_all()
             except Exception as exc:  # noqa: BLE001 - queue failures must not kill the worker silently

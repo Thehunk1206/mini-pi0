@@ -261,6 +261,8 @@ def run_synthetic(
         "underflows": status.underflow_count,
         "rejected_chunks": status.rejected_chunks,
         "rtc_fallbacks": status.rtc_fallbacks,
+        "safety_holding": status.safety_holding,
+        "recovery_valid_chunks": status.recovery_valid_chunks,
         "stale_results_dropped": status.stale_results_dropped,
         "last_inference_ms": status.last_latency_ms,
         "maximum_control_loop_ms": maximum_loop_ms,
@@ -366,6 +368,8 @@ def run_camera_dry(
         "underflows": status.underflow_count,
         "rejected_chunks": status.rejected_chunks,
         "rtc_fallbacks": status.rtc_fallbacks,
+        "safety_holding": status.safety_holding,
+        "recovery_valid_chunks": status.recovery_valid_chunks,
         "fault": status.fault,
         "last_inference_error": status.last_inference_error,
         "last_rejection_reason": status.last_rejection_reason,
@@ -494,6 +498,8 @@ def run_dataset_replay(
         "underflows": status.underflow_count,
         "rejected_chunks": status.rejected_chunks,
         "rtc_fallbacks": status.rtc_fallbacks,
+        "safety_holding": status.safety_holding,
+        "recovery_valid_chunks": status.recovery_valid_chunks,
         "fault": status.fault,
         "last_inference_error": status.last_inference_error,
         "last_rejection_reason": status.last_rejection_reason,
@@ -579,13 +585,14 @@ def run_hardware(
         safety.reset(measured)
         engine = AsyncInferenceEngine(bundle, config, safety)
         engine.start()
+        engine.pause(measured, reason="startup_requires_resume")
         last_command = measured.copy()
-        print("Policy active. Keys: p=pause/resume, b=return to base, q=quit.")
-        print("The arm holds measured position while the first chunk is generated.")
+        print("Policy ready. Keys: p=pause/resume, b=return to base, q=quit.")
+        print("Policy starts paused. Inspect Rerun, then press p to begin inference.")
 
         period = 1.0 / config.control_hz
         frame_index = 0
-        paused_by_operator = False
+        paused_by_operator = True
         with TerminalKeyReader() as keys:
             while True:
                 loop_started = time.monotonic()

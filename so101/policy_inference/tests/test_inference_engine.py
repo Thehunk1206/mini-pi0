@@ -34,12 +34,17 @@ class _FakeBundle:
 
 class _FakePolicy:
     def __init__(
-        self, *, wait: threading.Event | None = None, rtc_enabled: bool = True
+        self,
+        *,
+        wait: threading.Event | None = None,
+        rtc_enabled: bool = True,
+        pan_targets: list[float] | None = None,
     ) -> None:
         self.rtc_config = RTCConfig(enabled=rtc_enabled)
         self.wait = wait
         self.started = threading.Event()
         self.reset_count = 0
+        self.pan_targets = list(pan_targets or [])
 
     def reset(self) -> None:
         self.reset_count += 1
@@ -48,7 +53,11 @@ class _FakePolicy:
         self.started.set()
         if self.wait is not None:
             self.wait.wait(timeout=2.0)
-        return torch.full((1, 8, 6), 0.5)
+        chunk = state.unsqueeze(1).repeat(1, 8, 1).float()
+        chunk[:, :, :5] += 0.5
+        if self.pan_targets:
+            chunk[:, :, 0] = self.pan_targets.pop(0)
+        return chunk
 
 
 def _engine(policy: _FakePolicy, *, rtc_enabled: bool = True) -> AsyncInferenceEngine:
@@ -134,3 +143,61 @@ def test_non_rtc_append_does_not_apply_latency_offset() -> None:
     assert status.inference_count == 2
     assert status.last_predicted_delay == 0
     assert status.last_real_delay == 0
+
+
+def test_rejected_chunk_holds_and_requires_consecutive_valid_chunks() -> None:
+    policy = _FakePolicy(pan_targets=[20.0, 0.5, 0.5])
+    engine = _engine(policy)
+    engine.start()
+    measured = _publish(engine)
+    deadline = time.monotonic() + 2.0
+    while engine.status.rejected_chunks < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert engine.status.safety_holding
+    assert engine.status.queue_size == 0
+    assert engine.get_action(measured) is None
+
+    _publish(engine)
+    deadline = time.monotonic() + 2.0
+    while engine.status.recovery_valid_chunks < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert engine.status.safety_holding
+    assert engine.status.queue_size == 0
+    assert engine.get_action(measured) is None
+
+    _publish(engine)
+    deadline = time.monotonic() + 2.0
+    while engine.status.queue_size == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    status = engine.status
+    action = engine.get_action(measured)
+    engine.stop()
+
+    assert not status.safety_holding
+    assert status.recovery_valid_chunks == 0
+    assert action is not None
+
+
+def test_rejection_discards_an_existing_moving_queue() -> None:
+    policy = _FakePolicy(pan_targets=[0.5, 20.0])
+    engine = _engine(policy)
+    engine.start()
+    measured = _publish(engine)
+    deadline = time.monotonic() + 2.0
+    while engine.status.queue_size == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert engine.get_action(measured) is not None
+    assert engine.get_action(measured) is not None
+
+    _publish(engine)
+    deadline = time.monotonic() + 2.0
+    while engine.status.rejected_chunks < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    status = engine.status
+    action = engine.get_action(measured)
+    engine.stop()
+
+    assert status.safety_holding
+    assert status.queue_size == 0
+    assert action is None

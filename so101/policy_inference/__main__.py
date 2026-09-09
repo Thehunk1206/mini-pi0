@@ -25,16 +25,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-hz", type=float, default=30.0)
     parser.add_argument("--flow-steps", type=int, default=8)
     parser.add_argument("--no-rtc", action="store_true")
-    parser.add_argument("--execution-horizon", type=int, default=10)
-    parser.add_argument("--replan-interval", type=int, default=6)
+    parser.add_argument("--execution-horizon", type=int, default=6)
+    parser.add_argument("--replan-interval", type=int, default=3)
     parser.add_argument("--rtc-guidance", type=float, default=5.0)
     parser.add_argument(
         "--rtc-schedule", choices=("ZEROS", "ONES", "LINEAR", "EXP"), default="EXP"
     )
-    parser.add_argument(
+    noise = parser.add_mutually_exclusive_group()
+    noise.add_argument(
+        "--sampling-noise",
+        choices=("zero", "fixed", "random"),
+        default="zero",
+        help="initial flow noise: zero is the safe deterministic deployment default",
+    )
+    noise.add_argument(
         "--random-noise-each-chunk",
-        action="store_true",
-        help="disable the default fixed sampling noise (less repeatable and usually less smooth)",
+        action="store_const",
+        const="random",
+        dest="sampling_noise",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -66,6 +75,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
+    parser.add_argument("--initial-target-deviation-deg", type=float, default=15.0)
+    parser.add_argument(
+        "--initial-gripper-deviation-percent", type=float, default=8.0
+    )
+    parser.add_argument("--recovery-valid-chunks", type=int, default=2)
+    parser.add_argument(
+        "--arm-velocity-deg-s",
+        type=float,
+        nargs=5,
+        default=(20.0, 20.0, 20.0, 30.0, 45.0),
+        metavar=("PAN", "LIFT", "ELBOW", "WRIST_FLEX", "WRIST_ROLL"),
+    )
     parser.add_argument(
         "--camera-native-size", action="append", metavar="NAME=WIDTHxHEIGHT"
     )
@@ -88,7 +109,7 @@ def cli() -> None:
         replan_interval=args.replan_interval,
         max_guidance_weight=args.rtc_guidance,
         prefix_attention_schedule=args.rtc_schedule,
-        fixed_noise=not args.random_noise_each_chunk,
+        sampling_noise=args.sampling_noise,
         seed=args.seed,
     )
     config = InferenceConfig(
@@ -97,7 +118,12 @@ def cli() -> None:
         precision=args.precision,
         control_hz=args.control_hz,
         rtc=rtc,
-        safety=SafetyConfig(),
+        safety=SafetyConfig(
+            arm_velocity_deg_s=tuple(args.arm_velocity_deg_s),
+            initial_target_deviation_deg=args.initial_target_deviation_deg,
+            initial_gripper_deviation_percent=args.initial_gripper_deviation_percent,
+            recovery_valid_chunks=args.recovery_valid_chunks,
+        ),
     )
     if args.benchmark or args.benchmark_both:
         variants = ("16m", "25m") if args.benchmark_both else (args.variant,)

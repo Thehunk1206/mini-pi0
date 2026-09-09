@@ -13,6 +13,16 @@ CNN1D, and UNet1D denoisers.
 
 ## Demo Gallery
 
+### SO-101 Physical Robot
+
+Two demonstrations from the current physical SO-101 workflow.
+
+| Demo 1 | Demo 2 |
+| --- | --- |
+| [![SO-101 physical robot demo 1](./assets/so101_demo1.gif)](./assets/so101_demo1.mp4) | [![SO-101 physical robot demo 2](./assets/so101_demo2.gif)](./assets/so101_demo2.mp4) |
+
+Click a preview to open the MP4.
+
 ### StackCube Motion Planning
 
 95.5% success over 200 eval episodes with the medium transformer + ViT policy.

@@ -55,6 +55,23 @@ def test_chunk_slew_is_bounded_from_last_command() -> None:
     assert np.allclose(safe[2], [3, -3, 3, -3, 3, 56])
 
 
+def test_initial_target_deviation_is_checked_against_measured_state() -> None:
+    gate = PolicySafetyGate(_limits(), control_hz=30.0, config=SafetyConfig())
+    measured = np.asarray([0, 0, 0, 0, 0, 50], dtype=np.float32)
+
+    gate.validate_initial_target(
+        np.asarray([15, -15, 0, 0, 0, 58], dtype=np.float32), measured
+    )
+    with pytest.raises(UnsafePolicyChunk, match="shoulder_pan"):
+        gate.validate_initial_target(
+            np.asarray([15.01, 0, 0, 0, 0, 50], dtype=np.float32), measured
+        )
+    with pytest.raises(UnsafePolicyChunk, match="gripper"):
+        gate.validate_initial_target(
+            np.asarray([0, 0, 0, 0, 0, 58.01], dtype=np.float32), measured
+        )
+
+
 def test_following_fault_requires_configured_consecutive_cycles() -> None:
     gate = PolicySafetyGate(
         _limits(),

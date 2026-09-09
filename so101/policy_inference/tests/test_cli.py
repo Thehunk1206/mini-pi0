@@ -7,10 +7,15 @@ from so101.policy_inference import __main__ as cli_module
 
 def test_default_cli_path_is_hardware_free(monkeypatch) -> None:
     calls: list[str] = []
+    configs = []
     monkeypatch.setattr(
         cli_module,
         "run_synthetic",
-        lambda *args, **kwargs: calls.append("synthetic") or {"hardware_opened": False},
+        lambda config, **kwargs: (
+            configs.append(config)
+            or calls.append("synthetic")
+            or {"hardware_opened": False}
+        ),
     )
     monkeypatch.setattr(
         cli_module,
@@ -24,6 +29,7 @@ def test_default_cli_path_is_hardware_free(monkeypatch) -> None:
     cli_module.cli()
 
     assert calls == ["synthetic"]
+    assert configs[0].rtc.sampling_noise == "zero"
 
 
 def test_camera_cli_without_motor_flag_uses_camera_dry_run(monkeypatch) -> None:
@@ -56,3 +62,9 @@ def test_camera_cli_without_motor_flag_uses_camera_dry_run(monkeypatch) -> None:
     cli_module.cli()
 
     assert calls == ["camera_dry"]
+
+
+def test_legacy_random_noise_flag_remains_compatible() -> None:
+    args = cli_module.build_parser().parse_args(["--random-noise-each-chunk"])
+
+    assert args.sampling_noise == "random"
